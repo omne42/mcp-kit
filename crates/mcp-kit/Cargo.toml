@@ -1,0 +1,17 @@
+[package]
+name = "pm-mcp-kit"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+pm-jsonrpc = { path = "../jsonrpc" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
