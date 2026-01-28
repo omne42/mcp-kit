@@ -6,8 +6,9 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-clap.workspace = true
+clap = { workspace = true, optional = true }
 pm-jsonrpc = { path = "../jsonrpc" }
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -15,3 +16,10 @@ tokio.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 
+[features]
+cli = ["dep:clap"]
+
+[[bin]]
+name = "mcpctl"
+path = "src/bin/mcpctl.rs"
+required-features = ["cli"]
