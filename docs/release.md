@@ -18,4 +18,4 @@
 3. 跑一遍 gates（见 [`贡献指南`](contributing.md)）
 4. 打 tag（例如 `vX.Y.Z`）
 
-> 若未来需要发布到 crates.io，建议把 `pm-jsonrpc` / `pm-mcp-kit` 分别 publish，并确保 README/docs 与 feature flags 描述一致。
+> 若未来需要发布到 crates.io，建议把 `mcp-jsonrpc` / `mcp-kit` 分别 publish，并确保 README/docs 与 feature flags 描述一致。

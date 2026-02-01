@@ -94,9 +94,9 @@
 
 ### client overloaded（-32000）
 
-原因：`pm-jsonrpc` 的 server→client requests 队列满，触发背压保护。
+原因：`mcp-jsonrpc` 的 server→client requests 队列满，触发背压保护。
 
 解决：
 
-- 确保你在消费 `requests` channel（`pm-mcp-kit` 默认会接管并消费）
-- 或使用自建 `pm_jsonrpc::Client`，调大 `SpawnOptions.limits.requests_capacity` 再 `Manager::connect_jsonrpc(...)`
+- 确保你在消费 `requests` channel（`mcp-kit` 默认会接管并消费）
+- 或使用自建 `mcp_jsonrpc::Client`，调大 `SpawnOptions.limits.requests_capacity` 再 `Manager::connect_jsonrpc(...)`

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use pm_jsonrpc::Id;
+use mcp_jsonrpc::Id;
 use serde_json::Value;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
@@ -40,7 +40,7 @@ async fn request_roundtrip_over_duplex() {
         server_write.flush().await.unwrap();
     });
 
-    let client = pm_jsonrpc::Client::connect_io(client_read, client_write)
+    let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
         .await
         .expect("client connect");
     let result = client
@@ -87,7 +87,7 @@ async fn handles_server_to_client_request_and_responds() {
         assert_eq!(msg["result"], serde_json::json!({ "pong": true }));
     });
 
-    let mut client = pm_jsonrpc::Client::connect_io(client_read, client_write)
+    let mut client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
         .await
         .expect("client connect");
     let _ = client.take_notifications();

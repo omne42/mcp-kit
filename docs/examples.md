@@ -21,19 +21,19 @@
 命令：
 
 ```bash
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- list-tools remote
+cargo run -p mcp-kit --features cli --bin mcpctl -- list-tools remote
 ```
 
 ## 2）远程 + host allowlist（Untrusted 下更安全）
 
 ```bash
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- --allow-host example.com list-tools remote
+cargo run -p mcp-kit --features cli --bin mcpctl -- --allow-host example.com list-tools remote
 ```
 
 等价的代码配置：
 
 ```rust
-use pm_mcp_kit::UntrustedStreamableHttpPolicy;
+use mcp_kit::UntrustedStreamableHttpPolicy;
 manager = manager.with_untrusted_streamable_http_policy(UntrustedStreamableHttpPolicy {
     allowed_hosts: vec!["example.com".into()],
     ..Default::default()
@@ -51,7 +51,7 @@ manager = manager.with_untrusted_streamable_http_policy(UntrustedStreamableHttpP
       "argv": ["mcp-server-bin", "--stdio"],
       "env": { "NO_COLOR": "1" },
       "stdout_log": {
-        "path": "./.codepm_data/logs/mcp/server.stdout.log",
+        "path": "./.mcp-kit/logs/mcp/server.stdout.log",
         "max_bytes_per_part": 1048576,
         "max_parts": 32
       }
@@ -61,7 +61,7 @@ manager = manager.with_untrusted_streamable_http_policy(UntrustedStreamableHttpP
 ```
 
 ```bash
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- --trust list-tools local
+cargo run -p mcp-kit --features cli --bin mcpctl -- --trust list-tools local
 ```
 
 ## 4）使用 `Session`：把单连接交给其它模块
@@ -75,7 +75,7 @@ let tools = session.list_tools().await?;
 
 ```rust
 use std::sync::Arc;
-use pm_mcp_kit::{ServerRequestContext, ServerRequestOutcome};
+use mcp_kit::{ServerRequestContext, ServerRequestOutcome};
 
 let handler = Arc::new(|ctx: ServerRequestContext| {
     Box::pin(async move {

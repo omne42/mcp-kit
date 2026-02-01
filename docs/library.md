@@ -1,6 +1,6 @@
-# 作为库使用（pm-mcp-kit）
+# 作为库使用（mcp-kit）
 
-本章聚焦 `pm-mcp-kit` 的对外 API：`Config / Manager / Session`，以及常见集成方式。
+本章聚焦 `mcp-kit` 的对外 API：`Config / Manager / Session`，以及常见集成方式。
 
 ## 选择 `Manager` 还是 `Session`？
 
@@ -13,10 +13,10 @@
 
 ```rust
 let root = std::env::current_dir()?;
-let config = pm_mcp_kit::Config::load(&root, None).await?;
+let config = mcp_kit::Config::load(&root, None).await?;
 ```
 
-- 默认会按顺序发现（相对 `root`）：`./.mcp.json` → `./mcp.json` → `./.codepm_data/spec/mcp.json`（legacy）。
+- 默认会按顺序发现（相对 `root`）：`./.mcp.json` → `./mcp.json`。
 - 你也可以传入 `Some(path)` 覆盖（绝对路径或相对 `root` 的路径）。
 - schema 为 fail-closed：未知字段会报错（`deny_unknown_fields`）。
 
@@ -27,7 +27,7 @@ let config = pm_mcp_kit::Config::load(&root, None).await?;
 ```rust
 use std::time::Duration;
 
-let mut manager = pm_mcp_kit::Manager::from_config(
+let mut manager = mcp_kit::Manager::from_config(
     &config,
     "my-client",
     "0.1.0",
@@ -54,7 +54,7 @@ let v = manager
 更推荐的方式（typed wrapper）：
 
 ```rust
-use pm_mcp_kit::mcp;
+use mcp_kit::mcp;
 
 let tools = manager
     .request_typed::<mcp::ListToolsRequest>(&config, "remote", None, &root)
@@ -65,7 +65,7 @@ let tools = manager
 
 - `request*` 会自动 `connect + initialize`（若未连接）。
 - timeout 是 `Manager` 级别的 per-request 超时；可用 `.with_timeout(...)` 调整。
-- `pm_mcp_kit::mcp` 只覆盖常用 MCP method 的子集；缺的部分继续用 `serde_json::Value` 即可。
+- `mcp_kit::mcp` 只覆盖常用 MCP method 的子集；缺的部分继续用 `serde_json::Value` 即可。
 
 ## 连接与会话：把 `Session` 交出去
 
@@ -87,12 +87,12 @@ let tools = session.list_tools().await?;
 
 ## server→client：处理 requests / notifications
 
-底层 JSON-RPC（`pm-jsonrpc`）支持 server→client 的：
+底层 JSON-RPC（`mcp-jsonrpc`）支持 server→client 的：
 
 - notification（无 `id`）
 - request（有 `id`，需要 respond）
 
-`pm-mcp-kit::Manager` 默认行为：
+`mcp_kit::Manager` 默认行为：
 
 - 未识别的 server→client request：返回 JSON-RPC `-32601 Method not found`
 - 若启用 roots：内建响应 `roots/list`
@@ -101,7 +101,7 @@ let tools = session.list_tools().await?;
 
 ```rust
 use std::sync::Arc;
-use pm_mcp_kit::{ServerRequestOutcome, ServerRequestContext};
+use mcp_kit::{ServerRequestOutcome, ServerRequestContext};
 
 let handler = Arc::new(|ctx: ServerRequestContext| {
     Box::pin(async move {
@@ -127,14 +127,14 @@ notification handler 类似：`with_server_notification_handler(...)`。
 完全信任配置时显式开启：
 
 ```rust
-use pm_mcp_kit::TrustMode;
+use mcp_kit::TrustMode;
 manager = manager.with_trust_mode(TrustMode::Trusted);
 ```
 
 想在“不完全信任”的前提下收紧/放开远程规则，配置：
 
 ```rust
-use pm_mcp_kit::UntrustedStreamableHttpPolicy;
+use mcp_kit::UntrustedStreamableHttpPolicy;
 manager = manager.with_untrusted_streamable_http_policy(UntrustedStreamableHttpPolicy {
     allowed_hosts: vec!["example.com".into()],
     ..Default::default()
@@ -151,3 +151,5 @@ manager = manager.with_untrusted_streamable_http_policy(UntrustedStreamableHttpP
 - `Manager::connect_jsonrpc(server, client)`
 
 这两者会复用同样的 initialize 与 handler 逻辑。
+
+如果你需要调整 `mcp-jsonrpc` 的 `Limits` 或 streamable_http 的网络选项（例如 connect_timeout / redirects），推荐先用 `mcp-jsonrpc` 构建 `Client`，再用 `connect_jsonrpc` 接入；细节见 [`调优与限制`](tuning.md)。

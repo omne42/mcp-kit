@@ -25,7 +25,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 - 变更 `mcp.json` schema：请同时更新 `docs/config.md` 与相关测试。
 - 变更 TrustMode/策略：请更新 `docs/security.md`，并尽量补测试覆盖。
-- 新增常用 MCP 方法：优先在 `pm_mcp_kit::mcp` 添加 typed wrapper，并在 `docs/library.md` / `docs/api.md` 里补入口说明。
+- 新增常用 MCP 方法：优先在 `mcp_kit::mcp` 添加 typed wrapper，并在 `docs/library.md` / `docs/api.md` 里补入口说明。
 - 影响 CLI：更新 `docs/cli.md`，并保证 `--help` 与文档一致。
 
 ## PR 建议

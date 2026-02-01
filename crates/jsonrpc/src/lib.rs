@@ -1,4 +1,4 @@
-//! `pm-jsonrpc` is a small JSON-RPC 2.0 client with a few MCP-friendly transports.
+//! `mcp-jsonrpc` is a small JSON-RPC 2.0 client with a few MCP-friendly transports.
 //!
 //! Transports:
 //! - stdio (spawned child process)

@@ -8,8 +8,7 @@ use serde_json::Value;
 const MCP_CONFIG_VERSION: u32 = 1;
 const DEFAULT_STDOUT_LOG_MAX_BYTES_PER_PART: u64 = 1024 * 1024;
 const DEFAULT_STDOUT_LOG_MAX_PARTS: u32 = 32;
-const DEFAULT_CONFIG_CANDIDATES: [&str; 3] =
-    [".mcp.json", "mcp.json", ".codepm_data/spec/mcp.json"];
+const DEFAULT_CONFIG_CANDIDATES: [&str; 2] = [".mcp.json", "mcp.json"];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -441,7 +440,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_discovers_dot_mcp_json_before_legacy_path() {
+    async fn load_discovers_dot_mcp_json_before_mcp_json() {
         let dir = tempfile::tempdir().unwrap();
 
         tokio::fs::write(
@@ -451,10 +450,8 @@ mod tests {
         .await
         .unwrap();
 
-        let legacy_dir = dir.path().join(".codepm_data").join("spec");
-        tokio::fs::create_dir_all(&legacy_dir).await.unwrap();
         tokio::fs::write(
-            legacy_dir.join("mcp.json"),
+            dir.path().join("mcp.json"),
             r#"{ "version": 1, "servers": { "b": { "transport": "stdio", "argv": ["mcp-b"] } } }"#,
         )
         .await
@@ -485,10 +482,8 @@ mod tests {
     #[tokio::test]
     async fn load_parses_valid_file() {
         let dir = tempfile::tempdir().unwrap();
-        let spec_dir = dir.path().join(".codepm_data").join("spec");
-        tokio::fs::create_dir_all(&spec_dir).await.unwrap();
         tokio::fs::write(
-            spec_dir.join("mcp.json"),
+            dir.path().join("mcp.json"),
             r#"{ "version": 1, "servers": { "rg": { "transport": "stdio", "argv": ["mcp-rg", "--stdio"], "env": { "NO_COLOR": "1" } } } }"#,
         )
         .await
@@ -510,10 +505,8 @@ mod tests {
     #[tokio::test]
     async fn load_parses_client_section() {
         let dir = tempfile::tempdir().unwrap();
-        let spec_dir = dir.path().join(".codepm_data").join("spec");
-        tokio::fs::create_dir_all(&spec_dir).await.unwrap();
         tokio::fs::write(
-            spec_dir.join("mcp.json"),
+            dir.path().join("mcp.json"),
             r#"{ "version": 1, "client": { "protocol_version": "2025-06-18", "capabilities": { "roots": { "list_changed": true } } }, "servers": {} }"#,
         )
         .await
@@ -534,10 +527,8 @@ mod tests {
     #[tokio::test]
     async fn load_parses_client_roots() {
         let dir = tempfile::tempdir().unwrap();
-        let spec_dir = dir.path().join(".codepm_data").join("spec");
-        tokio::fs::create_dir_all(&spec_dir).await.unwrap();
         tokio::fs::write(
-            spec_dir.join("mcp.json"),
+            dir.path().join("mcp.json"),
             r#"{ "version": 1, "client": { "roots": [ { "uri": "file:///tmp", "name": "tmp" } ] }, "servers": {} }"#,
         )
         .await
@@ -557,10 +548,8 @@ mod tests {
     #[tokio::test]
     async fn load_denies_empty_root_uri() {
         let dir = tempfile::tempdir().unwrap();
-        let spec_dir = dir.path().join(".codepm_data").join("spec");
-        tokio::fs::create_dir_all(&spec_dir).await.unwrap();
         tokio::fs::write(
-            spec_dir.join("mcp.json"),
+            dir.path().join("mcp.json"),
             r#"{ "version": 1, "client": { "roots": [ { "uri": "   " } ] }, "servers": {} }"#,
         )
         .await
@@ -573,10 +562,8 @@ mod tests {
     #[tokio::test]
     async fn load_denies_invalid_client_capabilities() {
         let dir = tempfile::tempdir().unwrap();
-        let spec_dir = dir.path().join(".codepm_data").join("spec");
-        tokio::fs::create_dir_all(&spec_dir).await.unwrap();
         tokio::fs::write(
-            spec_dir.join("mcp.json"),
+            dir.path().join("mcp.json"),
             r#"{ "version": 1, "client": { "capabilities": 123 }, "servers": {} }"#,
         )
         .await
@@ -589,10 +576,8 @@ mod tests {
     #[tokio::test]
     async fn load_parses_stdout_log_and_resolves_relative_path() {
         let dir = tempfile::tempdir().unwrap();
-        let spec_dir = dir.path().join(".codepm_data").join("spec");
-        tokio::fs::create_dir_all(&spec_dir).await.unwrap();
         tokio::fs::write(
-            spec_dir.join("mcp.json"),
+            dir.path().join("mcp.json"),
             r#"{ "version": 1, "servers": { "rg": { "transport": "stdio", "argv": ["mcp-rg"], "stdout_log": { "path": "./logs/rg.stdout.log" } } } }"#,
         )
         .await
@@ -612,10 +597,8 @@ mod tests {
     #[tokio::test]
     async fn load_stdout_log_max_parts_zero_means_unlimited() {
         let dir = tempfile::tempdir().unwrap();
-        let spec_dir = dir.path().join(".codepm_data").join("spec");
-        tokio::fs::create_dir_all(&spec_dir).await.unwrap();
         tokio::fs::write(
-            spec_dir.join("mcp.json"),
+            dir.path().join("mcp.json"),
             r#"{ "version": 1, "servers": { "rg": { "transport": "stdio", "argv": ["mcp-rg"], "stdout_log": { "path": "./logs/rg.stdout.log", "max_parts": 0 } } } }"#,
         )
         .await
@@ -630,10 +613,8 @@ mod tests {
     #[tokio::test]
     async fn load_parses_unix_transport_and_resolves_relative_path() {
         let dir = tempfile::tempdir().unwrap();
-        let spec_dir = dir.path().join(".codepm_data").join("spec");
-        tokio::fs::create_dir_all(&spec_dir).await.unwrap();
         tokio::fs::write(
-            spec_dir.join("mcp.json"),
+            dir.path().join("mcp.json"),
             r#"{ "version": 1, "servers": { "sock": { "transport": "unix", "unix_path": "./sock/mcp.sock" } } }"#,
         )
         .await
@@ -652,10 +633,8 @@ mod tests {
     #[tokio::test]
     async fn load_parses_streamable_http_transport() {
         let dir = tempfile::tempdir().unwrap();
-        let spec_dir = dir.path().join(".codepm_data").join("spec");
-        tokio::fs::create_dir_all(&spec_dir).await.unwrap();
         tokio::fs::write(
-            spec_dir.join("mcp.json"),
+            dir.path().join("mcp.json"),
             r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "url": "https://example.com/mcp" } } }"#,
         )
         .await
@@ -677,10 +656,8 @@ mod tests {
     #[tokio::test]
     async fn load_denies_streamable_http_without_url() {
         let dir = tempfile::tempdir().unwrap();
-        let spec_dir = dir.path().join(".codepm_data").join("spec");
-        tokio::fs::create_dir_all(&spec_dir).await.unwrap();
         tokio::fs::write(
-            spec_dir.join("mcp.json"),
+            dir.path().join("mcp.json"),
             r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http" } } }"#,
         )
         .await
@@ -693,10 +670,8 @@ mod tests {
     #[tokio::test]
     async fn load_denies_streamable_http_with_env() {
         let dir = tempfile::tempdir().unwrap();
-        let spec_dir = dir.path().join(".codepm_data").join("spec");
-        tokio::fs::create_dir_all(&spec_dir).await.unwrap();
         tokio::fs::write(
-            spec_dir.join("mcp.json"),
+            dir.path().join("mcp.json"),
             r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "url": "https://example.com/mcp", "env": { "X": "1" } } } }"#,
         )
         .await
@@ -709,10 +684,8 @@ mod tests {
     #[tokio::test]
     async fn load_denies_unix_transport_with_argv() {
         let dir = tempfile::tempdir().unwrap();
-        let spec_dir = dir.path().join(".codepm_data").join("spec");
-        tokio::fs::create_dir_all(&spec_dir).await.unwrap();
         tokio::fs::write(
-            spec_dir.join("mcp.json"),
+            dir.path().join("mcp.json"),
             r#"{ "version": 1, "servers": { "sock": { "transport": "unix", "argv": ["x"], "unix_path": "/tmp/mcp.sock" } } }"#,
         )
         .await
@@ -725,10 +698,8 @@ mod tests {
     #[tokio::test]
     async fn load_denies_unknown_fields() {
         let dir = tempfile::tempdir().unwrap();
-        let spec_dir = dir.path().join(".codepm_data").join("spec");
-        tokio::fs::create_dir_all(&spec_dir).await.unwrap();
         tokio::fs::write(
-            spec_dir.join("mcp.json"),
+            dir.path().join("mcp.json"),
             r#"{ "version": 1, "servers": {}, "extra": 123 }"#,
         )
         .await
@@ -742,10 +713,8 @@ mod tests {
     #[tokio::test]
     async fn load_denies_invalid_server_names() {
         let dir = tempfile::tempdir().unwrap();
-        let spec_dir = dir.path().join(".codepm_data").join("spec");
-        tokio::fs::create_dir_all(&spec_dir).await.unwrap();
         tokio::fs::write(
-            spec_dir.join("mcp.json"),
+            dir.path().join("mcp.json"),
             r#"{ "version": 1, "servers": { "bad name": { "transport": "stdio", "argv": ["x"] } } }"#,
         )
         .await

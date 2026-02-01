@@ -564,6 +564,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
+name = "mcp-jsonrpc"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "mcp-kit"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "mcp-jsonrpc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "memchr"
 version = "2.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -609,36 +639,6 @@ name = "pin-utils"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
-
-[[package]]
-name = "pm-jsonrpc"
-version = "0.1.1"
-dependencies = [
- "anyhow",
- "bytes",
- "futures-util",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "pm-mcp-kit"
-version = "0.1.1"
-dependencies = [
- "anyhow",
- "clap",
- "pm-jsonrpc",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
 
 [[package]]
 name = "potential_utf"

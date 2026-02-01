@@ -99,11 +99,11 @@ async fn main() -> anyhow::Result<()> {
         .root
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    let config = pm_mcp_kit::Config::load(&root, cli.config.clone()).await?;
+    let config = mcp_kit::Config::load(&root, cli.config.clone()).await?;
 
     let timeout = Duration::from_millis(cli.timeout_ms);
     let mut manager =
-        pm_mcp_kit::Manager::from_config(&config, "mcpctl", env!("CARGO_PKG_VERSION"), timeout);
+        mcp_kit::Manager::from_config(&config, "mcpctl", env!("CARGO_PKG_VERSION"), timeout);
 
     if !cli.trust
         && (cli.allow_http
@@ -111,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
             || cli.allow_private_ip
             || !cli.allow_host.is_empty())
     {
-        let mut policy = pm_mcp_kit::UntrustedStreamableHttpPolicy::default();
+        let mut policy = mcp_kit::UntrustedStreamableHttpPolicy::default();
         if cli.allow_http {
             policy.require_https = false;
         }
@@ -128,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if cli.trust {
-        manager = manager.with_trust_mode(pm_mcp_kit::TrustMode::Trusted);
+        manager = manager.with_trust_mode(mcp_kit::TrustMode::Trusted);
     }
 
     let result = match cli.command {

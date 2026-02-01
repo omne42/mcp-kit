@@ -2,9 +2,9 @@
 
 本章给出 `mcp-kit` 暴露的主要 API 入口与定位（完整细节建议直接看 rustdoc）。
 
-## pm-mcp-kit
+## mcp-kit
 
-入口：`use pm_mcp_kit::*;`
+入口：`use mcp_kit::*;`
 
 ### 配置
 
@@ -31,16 +31,16 @@
 ### typed 方法抽象（轻量）
 
 - `McpRequest` / `McpNotification`：method + params/result 的轻量 trait（schema-agnostic）
-- `pm_mcp_kit::mcp`：常用方法的 typed wrapper 子集（`ListToolsRequest` / `CallToolRequest` / `ListResourcesRequest` …）
+- `mcp_kit::mcp`：常用方法的 typed wrapper 子集（`ListToolsRequest` / `CallToolRequest` / `ListResourcesRequest` …）
 
 ### 安全
 
 - `TrustMode::{Untrusted, Trusted}`
 - `UntrustedStreamableHttpPolicy`：Untrusted 下的远程出站策略（https/host/ip/allowlist）
 
-## pm-jsonrpc
+## mcp-jsonrpc
 
-入口：`use pm_jsonrpc::*;`
+入口：`use mcp_jsonrpc::*;`
 
 - `Client`：JSON-RPC 连接（stdio/unix/streamable_http/io）
   - `request(method, params)` / `notify(method, params)`
@@ -55,5 +55,5 @@
 在 `mcp-kit/` 下：
 
 ```bash
-cargo doc -p pm-mcp-kit -p pm-jsonrpc --no-deps
+cargo doc -p mcp-kit -p mcp-jsonrpc --no-deps
 ```

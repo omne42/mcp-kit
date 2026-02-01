@@ -14,7 +14,7 @@
 
 ```bash
 cd mcp-kit
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- --help
+cargo run -p mcp-kit --features cli --bin mcpctl -- --help
 ```
 
 > 注意：`mcpctl` 通过 feature `cli` 启用，避免 library 依赖方被迫引入 `clap`。
@@ -43,34 +43,34 @@ cargo run -p pm-mcp-kit --features cli --bin mcpctl -- --help
 列出解析后的配置（包含 `client` 与 servers 的关键字段），用于确认最终生效值：
 
 ```bash
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- list-servers
+cargo run -p mcp-kit --features cli --bin mcpctl -- list-servers
 ```
 
 ### list-tools / list-resources / list-prompts
 
 ```bash
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- list-tools remote
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- list-resources remote
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- list-prompts remote
+cargo run -p mcp-kit --features cli --bin mcpctl -- list-tools remote
+cargo run -p mcp-kit --features cli --bin mcpctl -- list-resources remote
+cargo run -p mcp-kit --features cli --bin mcpctl -- list-prompts remote
 ```
 
 ### call
 
 ```bash
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- call remote my.tool --arguments-json '{"k":"v"}'
+cargo run -p mcp-kit --features cli --bin mcpctl -- call remote my.tool --arguments-json '{"k":"v"}'
 ```
 
 ### request（raw JSON-RPC request）
 
 ```bash
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- request remote tools/list
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- request remote resources/read --params-json '{"uri":"file:///path/to/file"}'
+cargo run -p mcp-kit --features cli --bin mcpctl -- request remote tools/list
+cargo run -p mcp-kit --features cli --bin mcpctl -- request remote resources/read --params-json '{"uri":"file:///path/to/file"}'
 ```
 
 ### notify（raw JSON-RPC notification）
 
 ```bash
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- notify remote notifications/initialized
+cargo run -p mcp-kit --features cli --bin mcpctl -- notify remote notifications/initialized
 ```
 
 ## 常见用法组合

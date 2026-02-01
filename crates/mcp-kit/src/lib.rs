@@ -1,4 +1,4 @@
-//! `pm-mcp-kit` is a small, reusable MCP client toolkit.
+//! `mcp-kit` is a small, reusable MCP client toolkit.
 //!
 //! It provides:
 //! - `Config`: loads and validates `mcp.json` (v1) from a workspace root.

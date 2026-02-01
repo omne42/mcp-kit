@@ -9,11 +9,11 @@
 
 ## 1）先把 `mcpctl` 跑起来
 
-`mcpctl` 在 `pm-mcp-kit` crate 中，通过 feature `cli` 启用：
+`mcpctl` 在 `mcp-kit` crate 中，通过 feature `cli` 启用：
 
 ```bash
 cd mcp-kit
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- --help
+cargo run -p mcp-kit --features cli --bin mcpctl -- --help
 ```
 
 ## 2）准备一个最小的远程配置（推荐）
@@ -36,10 +36,10 @@ cargo run -p pm-mcp-kit --features cli --bin mcpctl -- --help
 
 ```bash
 # 查看解析后的配置（确认最终生效字段）
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- list-servers
+cargo run -p mcp-kit --features cli --bin mcpctl -- list-servers
 
 # 探测 tools（远程 https 且非 localhost/私网：默认无需 --trust）
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- list-tools remote
+cargo run -p mcp-kit --features cli --bin mcpctl -- list-tools remote
 ```
 
 如果你需要对远程出站做更严格/更宽松控制，见 [`安全模型`](security.md) 与 `mcpctl --help` 中的 `--allow-*` 选项。
@@ -63,14 +63,14 @@ cargo run -p pm-mcp-kit --features cli --bin mcpctl -- list-tools remote
 在默认模式下（Untrusted），`mcpctl list-tools local` 会报错：拒绝 spawn。本地 `stdio/unix` 必须显式信任：
 
 ```bash
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- --trust list-tools local
+cargo run -p mcp-kit --features cli --bin mcpctl -- --trust list-tools local
 ```
 
 原因与威胁模型见 [`安全模型`](security.md)。
 
 ## 4）作为库使用：最小代码
 
-`pm-mcp-kit` 的典型流程是：
+`mcp-kit` 的典型流程是：
 
 1. `Config::load` 读取并校验 `mcp.json`。
 2. `Manager::from_config` 创建 client（可设置 protocol/capabilities/roots/超时/信任策略）。
@@ -81,7 +81,7 @@ cargo run -p pm-mcp-kit --features cli --bin mcpctl -- --trust list-tools local
 ```rust
 use std::time::Duration;
 
-use pm_mcp_kit::{mcp, Config, Manager, UntrustedStreamableHttpPolicy};
+use mcp_kit::{mcp, Config, Manager, UntrustedStreamableHttpPolicy};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

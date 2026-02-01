@@ -68,7 +68,7 @@ pub struct Manager {
 
 pub struct Connection {
     pub child: Option<Child>,
-    pub client: pm_jsonrpc::Client,
+    pub client: mcp_jsonrpc::Client,
 }
 
 impl Default for Manager {
@@ -223,14 +223,14 @@ impl Manager {
                 let stdout_log = server_cfg
                     .stdout_log
                     .as_ref()
-                    .map(|log| pm_jsonrpc::StdoutLog {
+                    .map(|log| mcp_jsonrpc::StdoutLog {
                         path: log.path.clone(),
                         max_bytes_per_part: log.max_bytes_per_part,
                         max_parts: log.max_parts,
                     });
-                let mut client = pm_jsonrpc::Client::spawn_command_with_options(
+                let mut client = mcp_jsonrpc::Client::spawn_command_with_options(
                     cmd,
-                    pm_jsonrpc::SpawnOptions {
+                    mcp_jsonrpc::SpawnOptions {
                         stdout_log,
                         ..Default::default()
                     },
@@ -250,7 +250,7 @@ impl Manager {
                     .unix_path
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("mcp server unix_path must be set"))?;
-                let client = pm_jsonrpc::Client::connect_unix(unix_path)
+                let client = mcp_jsonrpc::Client::connect_unix(unix_path)
                     .await
                     .with_context(|| {
                         format!("connect unix mcp server path={}", unix_path.display())
@@ -306,14 +306,14 @@ impl Manager {
                     }
                 }
 
-                let client = pm_jsonrpc::Client::connect_streamable_http_with_options(
+                let client = mcp_jsonrpc::Client::connect_streamable_http_with_options(
                     url,
-                    pm_jsonrpc::StreamableHttpOptions {
+                    mcp_jsonrpc::StreamableHttpOptions {
                         headers,
                         request_timeout: Some(self.request_timeout),
                         ..Default::default()
                     },
-                    pm_jsonrpc::SpawnOptions::default(),
+                    mcp_jsonrpc::SpawnOptions::default(),
                 )
                 .await
                 .with_context(|| format!("connect streamable http mcp server url={url}"))?;
@@ -328,7 +328,7 @@ impl Manager {
     pub async fn connect_jsonrpc(
         &mut self,
         server_name: &str,
-        mut client: pm_jsonrpc::Client,
+        mut client: mcp_jsonrpc::Client,
     ) -> anyhow::Result<()> {
         if self.is_connected_and_alive(server_name) {
             return Ok(());
@@ -353,7 +353,7 @@ impl Manager {
             return Ok(());
         }
 
-        let client = pm_jsonrpc::Client::connect_io(read, write)
+        let client = mcp_jsonrpc::Client::connect_io(read, write)
             .await
             .context("connect jsonrpc io")?;
         self.connect_jsonrpc(server_name, client).await
@@ -382,7 +382,7 @@ impl Manager {
     async fn install_connection(
         &mut self,
         server_name: &str,
-        mut client: pm_jsonrpc::Client,
+        mut client: mcp_jsonrpc::Client,
         child: Option<Child>,
     ) -> anyhow::Result<()> {
         self.attach_client_handlers(server_name, &mut client);
@@ -395,7 +395,7 @@ impl Manager {
         Ok(())
     }
 
-    fn attach_client_handlers(&self, server_name: &str, client: &mut pm_jsonrpc::Client) {
+    fn attach_client_handlers(&self, server_name: &str, client: &mut mcp_jsonrpc::Client) {
         if let Some(mut requests_rx) = client.take_requests() {
             let handler = self.server_request_handler.clone();
             let roots = self.roots.clone();
@@ -517,7 +517,7 @@ impl Manager {
     pub async fn connect_jsonrpc_session(
         &mut self,
         server_name: &str,
-        client: pm_jsonrpc::Client,
+        client: mcp_jsonrpc::Client,
     ) -> anyhow::Result<Session> {
         self.connect_jsonrpc(server_name, client).await?;
         self.take_session(server_name)
@@ -925,7 +925,7 @@ impl Manager {
     async fn initialize(
         &self,
         server_name: &str,
-        client: &pm_jsonrpc::Client,
+        client: &mcp_jsonrpc::Client,
     ) -> anyhow::Result<Value> {
         if self.protocol_version.trim().is_empty() {
             anyhow::bail!("mcp protocol version must not be empty");
@@ -965,7 +965,7 @@ impl Manager {
 
     async fn request_raw(
         timeout: Duration,
-        client: &pm_jsonrpc::Client,
+        client: &mcp_jsonrpc::Client,
         method: &str,
         params: Option<Value>,
     ) -> anyhow::Result<Value> {
@@ -978,7 +978,7 @@ impl Manager {
 
     async fn notify_raw(
         timeout: Duration,
-        client: &pm_jsonrpc::Client,
+        client: &mcp_jsonrpc::Client,
         method: &str,
         params: Option<Value>,
     ) -> anyhow::Result<()> {

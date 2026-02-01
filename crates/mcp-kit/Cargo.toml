@@ -1,5 +1,5 @@
 [package]
-name = "pm-mcp-kit"
+name = "mcp-kit"
 edition.workspace = true
 rust-version.workspace = true
 version.workspace = true
@@ -7,7 +7,7 @@ version.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap = { workspace = true, optional = true }
-pm-jsonrpc = { path = "../jsonrpc" }
+mcp-jsonrpc = { path = "../jsonrpc" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

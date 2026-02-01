@@ -1,8 +1,5 @@
 /target/
 **/target/
-.codepm_data/
-.codepm/
-.code_pm/
 .github-agent-data/
 .DS_Store
 *.log

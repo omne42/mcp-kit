@@ -1,6 +1,6 @@
 # 配置（mcp.json v1）
 
-本章描述 `pm-mcp-kit::Config` 支持的 `mcp.json`（v1）schema、默认发现顺序与各字段约束。
+本章描述 `mcp_kit::Config` 支持的 `mcp.json`（v1）schema、默认发现顺序与各字段约束。
 
 > 说明：schema 是 fail-closed（`deny_unknown_fields`）。这对安全非常重要：拼写错误不会被静默忽略。
 
@@ -10,7 +10,6 @@
 
 1. `./.mcp.json`
 2. `./mcp.json`
-3. `./.codepm_data/spec/mcp.json`（legacy）
 
 CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
 
@@ -61,7 +60,7 @@ CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
   "argv": ["mcp-server-bin", "--stdio"],
   "env": { "KEY": "VALUE" },
   "stdout_log": {
-    "path": "./.codepm_data/logs/mcp/server.stdout.log",
+    "path": "./.mcp-kit/logs/mcp/server.stdout.log",
     "max_bytes_per_part": 1048576,
     "max_parts": 32
   }
@@ -76,6 +75,8 @@ CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
   - `path`（必填）：可为相对路径（相对 `--root` 解析）
   - `max_bytes_per_part`（可选，默认 1MiB，最小 1）
   - `max_parts`（可选，默认 32，最小 1；`0` 表示不做保留上限：无限保留）
+
+stdout_log 的旋转文件命名/保留策略见 [`日志与观测`](logging.md)。
 
 安全：
 
@@ -129,6 +130,8 @@ CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
 - 拒绝读取 `bearer_token_env_var` / `env_http_headers`（env secrets）
 
 详见 [`安全模型`](security.md)。
+
+streamable_http 的具体 HTTP 形态（SSE + POST、`mcp-session-id`、回包为 SSE 的场景）见 [`streamable_http 传输详解`](streamable_http.md)。
 
 ## client.roots 与 `roots/list`
 

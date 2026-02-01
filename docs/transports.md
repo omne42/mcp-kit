@@ -12,6 +12,8 @@
 - `env`（可选）：注入到 child process 的环境变量
 - `stdout_log`（可选）：将 server stdout 旋转落盘（便于排查协议/输出）
 
+stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
+
 行为要点：
 
 - `cwd`：child 的工作目录是 `--root`（CLI）或你传入 `Manager::connect(..., cwd)` 的目录
@@ -52,8 +54,10 @@
 行为要点：
 
 - 会自动添加 header：`MCP-Protocol-Version: <protocol_version>`
-- 默认不跟随 redirects（减少 SSRF 风险；可在 `pm-jsonrpc` 里 opt-in）
-- `pm-mcp-kit` 会把自己的 per-request timeout 设置到 `pm-jsonrpc` 的 HTTP request timeout
+- 默认不跟随 redirects（减少 SSRF 风险；可在 `mcp-jsonrpc` 里 opt-in）
+- `mcp-kit` 会把自己的 per-request timeout 设置到 `mcp-jsonrpc` 的 HTTP request timeout
+
+更完整的实现细节（SSE 数据格式、`mcp-session-id`、POST 回包形态、timeout 语义）见 [`streamable_http 传输详解`](streamable_http.md) 与 [`调优与限制`](tuning.md)。
 
 安全（Untrusted 默认策略）：
 
@@ -69,6 +73,6 @@
 如果你已经有一条读写管道，或者需要接入自建 transport（例如在测试里用 `tokio::io::duplex`）：
 
 - `Manager::connect_io(server, read, write)`
-- `Manager::connect_jsonrpc(server, pm_jsonrpc::Client)`
+- `Manager::connect_jsonrpc(server, mcp_jsonrpc::Client)`
 
 它们会复用同样的 initialize、超时、以及 server→client handler 逻辑。

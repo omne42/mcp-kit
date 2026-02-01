@@ -6,13 +6,13 @@
 
 从下到上分 3 层：
 
-1. `pm-jsonrpc`：负责“怎么把一条 JSON-RPC 消息送到对端，再把对端返回/推送的消息读回来”
-2. `pm-mcp-kit`：负责“按 MCP 约定 initialize，并把常用 MCP 方法封装成好用的 API”
+1. `mcp-jsonrpc`：负责“怎么把一条 JSON-RPC 消息送到对端，再把对端返回/推送的消息读回来”
+2. `mcp-kit`：负责“按 MCP 约定 initialize，并把常用 MCP 方法封装成好用的 API”
 3. `mcpctl`：基于配置的 CLI（把库能力暴露成命令行操作）
 
 这套拆分的关键好处是：
 
-- 上层可以仅依赖 `pm-mcp-kit`（不需要 CLI）
+- 上层可以仅依赖 `mcp-kit`（不需要 CLI）
 - 上层也可以绕过配置，直接把自建 transport 注入 `Manager::connect_io/connect_jsonrpc`
 
 ## 核心数据结构
@@ -20,8 +20,8 @@
 - `Config { client, servers: BTreeMap<String, ServerConfig> }`
 - `Manager`：连接缓存 + MCP initialize + request/notify 便捷方法
 - `Connection { child: Option<Child>, client }`（unix 连接没有 child）
-- `McpRequest` / `McpNotification`：轻量 typed method 抽象（类似 `example/codex/codex-rs/mcp-types` 的 request/notification trait）
-- `pm_mcp_kit::mcp`：常用 MCP method 的轻量 typed wrapper 子集（可选使用）
+- `McpRequest` / `McpNotification`：轻量 typed method 抽象（可对照仓库 `example/` 目录里的 `mcp-types` 例子）
+- `mcp_kit::mcp`：常用 MCP method 的轻量 typed wrapper 子集（可选使用）
 - `Session`：单连接 MCP 会话（已完成 initialize，可直接 request/notify 与调用便捷方法）
 - `Manager::initialize_result`：暴露每个 server 的 initialize 响应（便于上层读取 serverInfo/capabilities 等信息）
 
@@ -41,9 +41,9 @@ MCP/JSON-RPC 允许 server 主动发消息给 client：
 - notification：只需要消费
 - request：需要 client respond
 
-`pm-jsonrpc` 会把它们放进有界 channel。
+`mcp-jsonrpc` 会把它们放进有界 channel。
 
-`pm-mcp-kit::Manager` 会在安装连接时：
+`mcp_kit::Manager` 会在安装连接时：
 
 - `take_requests()`：起一个任务循环消费 server→client requests，并交给 `server_request_handler`
 - `take_notifications()`：起一个任务循环消费 server→client notifications，并交给 `server_notification_handler`
@@ -62,8 +62,8 @@ MCP/JSON-RPC 允许 server 主动发消息给 client：
 
 提供：
 
-- `pm-jsonrpc`：最小 JSON-RPC client（stdio / unix / streamable http），支持 notifications 与可选 stdout 旋转落盘。
-- `pm-mcp-kit`：`mcp.json` 解析、连接/初始化、请求超时与 server→client request/notification hook。
+- `mcp-jsonrpc`：最小 JSON-RPC client（stdio / unix / streamable http），支持 notifications 与可选 stdout 旋转落盘。
+- `mcp-kit`：`mcp.json` 解析、连接/初始化、请求超时与 server→client request/notification hook。
   - 安全默认：`Manager` 默认 `TrustMode::Untrusted`。
     - 拒绝 `transport=stdio|unix`（避免不可信仓库导致本地执行/本地 socket 滥用）
     - `transport=streamable_http` 仅允许 `https` 且非 localhost/私网目标；并拒绝发送 `Authorization`/`Cookie` 等敏感 header、拒绝读取 env secrets 用于认证 header
@@ -82,13 +82,13 @@ MCP/JSON-RPC 允许 server 主动发消息给 client：
 
 约束：
 
-- 本仓库不引入 CodePM 的 thread/process 等领域 ID。
+- 本仓库不引入任何上层应用的 thread/process 等领域 ID。
 - 单连接写入会被串行化（避免并发写导致 JSON-RPC 输出交错）；允许并发发起请求，但会在写入层面排队。
-- 需要处理 server→client 的 JSON-RPC request：`pm-mcp-kit::Manager` 默认对未知方法返回 `-32601 Method not found`，并提供可注入的 request/notification handler。
+- 需要处理 server→client 的 JSON-RPC request：`mcp_kit::Manager` 默认对未知方法返回 `-32601 Method not found`，并提供可注入的 request/notification handler。
 
 ## 策略（v1）
 
-- **日志**：由上层选择是否将 server stdout 旋转落盘（`pm-jsonrpc::SpawnOptions`，支持 `max_parts` 保留上限）。
+- **日志**：由上层选择是否将 server stdout 旋转落盘（`mcp_jsonrpc::SpawnOptions`，支持 `max_parts` 保留上限）。
 - **超时**：`Manager` 级别的 per-request timeout（默认 30s）。
 - **重连**：v1 不做自动重连；上层可通过 drop/重建连接实现。
 - **并发**：同一连接串行；不同 server 可由上层并发使用多个 `Manager` 或拆分任务。
