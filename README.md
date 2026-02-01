@@ -8,6 +8,12 @@
 - `pm-mcp-kit`：`mcp.json` 解析 + MCP 连接/生命周期管理（stdio / unix / streamable http）
 - `mcpctl`：基于配置的 MCP CLI（类似 “mcpctl”）
 
+## 文档
+
+- 文档入口：`docs/README.md`
+- GitBook 目录：`docs/SUMMARY.md`
+- 推荐阅读顺序：`docs/quickstart.md` → `docs/config.md` → `docs/library.md` → `docs/security.md`
+
 ## 快速开始
 
 ```bash

@@ -1,61 +1,149 @@
-# 配置
+# 配置（mcp.json v1）
 
-## 文件位置
+本章描述 `pm-mcp-kit::Config` 支持的 `mcp.json`（v1）schema、默认发现顺序与各字段约束。
 
-默认（发现顺序，均相对 `--root`，默认当前工作目录）：
+> 说明：schema 是 fail-closed（`deny_unknown_fields`）。这对安全非常重要：拼写错误不会被静默忽略。
+
+## 文件发现顺序
+
+默认发现顺序（均相对 `--root`，默认当前工作目录）：
 
 1. `./.mcp.json`
 2. `./mcp.json`
 3. `./.codepm_data/spec/mcp.json`（legacy）
 
-可用 `mcpctl --config <path>` 覆盖（绝对或相对 `--root`）。
+CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
 
-## schema（v1）
+## 顶层 schema
 
 ```json
 {
   "version": 1,
   "client": {
     "protocol_version": "2025-06-18",
-    "capabilities": {}
+    "capabilities": {},
+    "roots": [
+      { "uri": "file:///repo", "name": "workspace" }
+    ]
   },
   "servers": {
-    "server_name": {
-      "transport": "stdio",
-      "argv": ["mcp-server-bin", "--stdio"],
-      "env": { "KEY": "VALUE" },
-      "stdout_log": {
-        "path": "./.codepm_data/logs/mcp/server.stdout.log",
-        "max_bytes_per_part": 1048576,
-        "max_parts": 32
-      }
-    },
-    "server_unix": {
-      "transport": "unix",
-      "unix_path": "/tmp/mcp.sock"
-    },
-    "remote": {
-      "transport": "streamable_http",
-      "url": "https://example.com/mcp",
-      "http_headers": { "X-Client": "my-app" },
-      "bearer_token_env_var": "MCP_TOKEN",
-      "env_http_headers": { "X-Api-Key": "MCP_API_KEY" }
-    }
+    "server_name": { "transport": "stdio", "argv": ["bin", "--stdio"] }
   }
 }
 ```
 
-约束（fail-closed）：
+字段说明：
 
-- 顶层/servers.<name> 未知字段：拒绝（`deny_unknown_fields`）。
-- `client.protocol_version`：可选；若存在必须非空字符串。
-- `client.capabilities`：可选；若存在必须是 JSON object。
-- `servers.<name>.argv`：当 `transport=stdio` 时必填；非空数组；每项必须非空字符串。
-- `servers.<name>.unix_path`：当 `transport=unix` 时必填。
-- `server_name`：只允许 `[a-zA-Z0-9_-]`。
-- `transport`：v1 支持 `stdio` / `unix` / `streamable_http`。
-- `servers.<name>.stdout_log`：仅 `transport=stdio` 支持；`path` 允许相对路径（相对 `--root`）。`max_bytes_per_part` 默认 1MiB（最小 1）。`max_parts` 默认 32（最小 1），`0` 表示不做保留上限（无限保留）。
-- `transport=unix` 限制：不支持 `argv/env/stdout_log`（仅用于连接已有 unix socket server）。
-- `transport=streamable_http`：需要 `servers.<name>.url`；不支持 `argv/unix_path/env/stdout_log`。
-  - `bearer_token_env_var` / `env_http_headers` 会从本地环境变量读取 secrets；默认 `TrustMode::Untrusted` 下会拒绝读取，需要上层显式信任（见 `docs/design.md`）。
-  - `http_headers` 是静态 header；默认 `TrustMode::Untrusted` 下会拒绝发送 `Authorization/Cookie/Proxy-Authorization`。
+- `version`（必填）：目前只支持 `1`
+- `client`（可选）：覆盖 MCP initialize 中的 client 信息
+  - `protocol_version`（可选）：非空字符串
+  - `capabilities`（可选）：JSON object
+  - `roots`（可选）：启用 roots 能力并内建响应 `roots/list`（见下文）
+- `servers`（必填但可为空 object）：server 配置字典
+
+## server name 约束
+
+`servers` 的 key（server name）只允许字符：`[a-zA-Z0-9_-]`，且不能为空。
+
+## servers.<name> 通用字段
+
+所有 transport 共有字段：
+
+- `transport`（必填）：`"stdio" | "unix" | "streamable_http"`
+
+不同 transport 允许的字段不同；不允许的字段会报错。
+
+## transport=stdio
+
+```json
+{
+  "transport": "stdio",
+  "argv": ["mcp-server-bin", "--stdio"],
+  "env": { "KEY": "VALUE" },
+  "stdout_log": {
+    "path": "./.codepm_data/logs/mcp/server.stdout.log",
+    "max_bytes_per_part": 1048576,
+    "max_parts": 32
+  }
+}
+```
+
+字段：
+
+- `argv`（必填）：非空数组；每项必须非空字符串
+- `env`（可选）：KV 字典，注入到 child process
+- `stdout_log`（可选）：stdout 旋转落盘（便于排查协议输出）
+  - `path`（必填）：可为相对路径（相对 `--root` 解析）
+  - `max_bytes_per_part`（可选，默认 1MiB，最小 1）
+  - `max_parts`（可选，默认 32，最小 1；`0` 表示不做保留上限：无限保留）
+
+安全：
+
+- 默认 `TrustMode::Untrusted` 会拒绝 `stdio`（避免不可信仓库导致本地执行）。需要显式 `--trust` 或 `Manager::with_trust_mode(Trusted)`。
+
+## transport=unix
+
+```json
+{ "transport": "unix", "unix_path": "/tmp/mcp.sock" }
+```
+
+字段：
+
+- `unix_path`（必填）：可为相对路径（相对 `--root` 解析）
+
+约束：
+
+- 不支持 `argv/env/stdout_log`（仅用于连接已存在的 unix socket）
+
+安全：
+
+- 默认 `TrustMode::Untrusted` 会拒绝 `unix`（避免不可信仓库连接本地敏感 socket）。需要显式信任。
+
+## transport=streamable_http
+
+```json
+{
+  "transport": "streamable_http",
+  "url": "https://example.com/mcp",
+  "http_headers": { "X-Client": "my-app" },
+  "bearer_token_env_var": "MCP_TOKEN",
+  "env_http_headers": { "X-Api-Key": "MCP_API_KEY" }
+}
+```
+
+字段：
+
+- `url`（必填）：远程 MCP server URL
+- `http_headers`（可选）：静态 header
+- `bearer_token_env_var`（可选）：从 env 读取 token，注入 `Authorization: Bearer ...`
+- `env_http_headers`（可选）：从 env 读取 header 值
+
+约束：
+
+- 不支持 `argv/unix_path/env/stdout_log`
+
+安全（默认 Untrusted）：
+
+- 允许连接远程 `https` 且非 localhost/私网的 `url`
+- 拒绝发送敏感 header：`Authorization/Cookie/Proxy-Authorization`
+- 拒绝读取 `bearer_token_env_var` / `env_http_headers`（env secrets）
+
+详见 [`安全模型`](security.md)。
+
+## client.roots 与 `roots/list`
+
+当配置了 `client.roots`（或在代码里用 `Manager::with_roots(...)`）：
+
+- 会自动在 initialize 中声明 `capabilities.roots`
+- 会内建响应 server→client request：`roots/list`（返回你配置的 roots）
+
+`Root` 结构：
+
+```json
+{ "uri": "file:///repo", "name": "workspace" }
+```
+
+其中：
+
+- `uri` 必须非空
+- `name` 可选；若存在必须非空

@@ -1,42 +1,82 @@
 # mcpctl
 
-`mcpctl` 是基于 `mcp.json` 的 MCP client/runner（config-driven; stdio/unix/streamable_http）。
+`mcpctl` 是一个基于 `mcp.json` 的 MCP client/runner（config-driven; stdio/unix/streamable_http）。
 
-默认安全策略：
+它的定位是：
 
-- 默认不信任本地配置（`TrustMode::Untrusted`）
-  - 拒绝 `transport=stdio|unix`
-  - 允许 `transport=streamable_http`（默认仅 `https` 且非 localhost/私网）
-- 需要完全信任时使用 `--trust`
+- 快速验证配置是否正确（`list-servers`）
+- 探测 server 暴露的能力（tools/resources/prompts）
+- 发送 raw request/notification 进行调试
 
-## 常用示例
+## 运行方式
+
+当前仓库内（推荐）：
 
 ```bash
-# 以当前目录为 root
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- list-servers
-
-# 指定 root 与 config
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- --root /path/to/workspace --config ./.codepm_data/spec/mcp.json list-tools rg
-
-# 远程 streamable_http server（默认无需 --trust）
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- list-tools remote
-
-# 调用工具
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- call rg ripgrep.search --arguments-json '{"query":"foo"}'
-
-# 发送 raw request（任意 MCP/JSON-RPC 方法）
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- request rg tools/list
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- request rg resources/read --params-json '{"uri":"file:///path/to/file"}'
-
-# 发送 raw notification
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- notify rg notifications/initialized
-
-# 完全信任（允许 stdio/unix + 允许读取 env secrets / 发送认证 header）
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- --trust list-tools rg
-
-# 不完全信任，但放开部分 streamable_http 出站限制（仅影响远程）
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- --allow-host example.com list-tools remote
-cargo run -p pm-mcp-kit --features cli --bin mcpctl -- --allow-private-ip --allow-http list-tools remote
+cd mcp-kit
+cargo run -p pm-mcp-kit --features cli --bin mcpctl -- --help
 ```
 
-`list-servers` 会回显解析后的 `client` 与每个 server 的 `stdout_log` 配置，便于确认最终生效配置。
+> 注意：`mcpctl` 通过 feature `cli` 启用，避免 library 依赖方被迫引入 `clap`。
+
+## 全局参数（flags）
+
+- `--root <path>`：workspace root；用于相对路径解析，并作为 stdio server 的工作目录
+- `--config <path>`：覆盖配置文件路径（绝对或相对 `--root`）
+- `--json`：输出紧凑 JSON（默认 pretty JSON）
+- `--timeout-ms <ms>`：per-request 超时（默认 30000）
+
+安全相关：
+
+- `--trust`：完全信任 `mcp.json`（允许 stdio/unix、允许读取 env secrets、允许发送认证 header）
+- `--allow-http`：Untrusted 下允许连接 `http://`（默认只允许 https）
+- `--allow-localhost`：Untrusted 下允许连接 `localhost/*.localhost/*.local`
+- `--allow-private-ip`：Untrusted 下允许连接非公网 IP 字面量
+- `--allow-host <host>`：Untrusted 下设置 host allowlist（可重复）
+
+> `--allow-*` 只影响 `transport=streamable_http`，不会放开 stdio/unix（它们需要 `--trust`）。
+
+## 子命令（subcommands）
+
+### list-servers
+
+列出解析后的配置（包含 `client` 与 servers 的关键字段），用于确认最终生效值：
+
+```bash
+cargo run -p pm-mcp-kit --features cli --bin mcpctl -- list-servers
+```
+
+### list-tools / list-resources / list-prompts
+
+```bash
+cargo run -p pm-mcp-kit --features cli --bin mcpctl -- list-tools remote
+cargo run -p pm-mcp-kit --features cli --bin mcpctl -- list-resources remote
+cargo run -p pm-mcp-kit --features cli --bin mcpctl -- list-prompts remote
+```
+
+### call
+
+```bash
+cargo run -p pm-mcp-kit --features cli --bin mcpctl -- call remote my.tool --arguments-json '{"k":"v"}'
+```
+
+### request（raw JSON-RPC request）
+
+```bash
+cargo run -p pm-mcp-kit --features cli --bin mcpctl -- request remote tools/list
+cargo run -p pm-mcp-kit --features cli --bin mcpctl -- request remote resources/read --params-json '{"uri":"file:///path/to/file"}'
+```
+
+### notify（raw JSON-RPC notification）
+
+```bash
+cargo run -p pm-mcp-kit --features cli --bin mcpctl -- notify remote notifications/initialized
+```
+
+## 常见用法组合
+
+- 远程 server（https + 非 localhost/私网）：默认可用
+- 本地 stdio/unix 或需要读取 env secrets：加 `--trust`
+- 不完全信任但需要放开部分出站：使用 `--allow-host/--allow-http/...`
+
+安全细节见 [`安全模型`](security.md)。

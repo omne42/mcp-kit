@@ -32,3 +32,4 @@
 - `pm-jsonrpc` 的 `streamable_http` 增加超时能力：默认 connect timeout=10s；可选 per-request timeout（`pm-mcp-kit` 会用 `Manager` 的 per-request timeout 进行设置）。
 - `pm-jsonrpc` 的 `streamable_http` 默认不跟随 HTTP redirects（减少 SSRF 风险），可通过 `StreamableHttpOptions.follow_redirects` 显式开启。
 - `pm-jsonrpc` 的 stdout 旋转日志支持保留上限：`StdoutLog.max_parts`（`pm-mcp-kit` 配置字段 `servers.<name>.stdout_log.max_parts`）。
+- Docs: expand GitBook-style documentation under `docs/` and add `CONTRIBUTING.md`.

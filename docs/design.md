@@ -2,6 +2,19 @@
 
 目标：把 “mcp.json 配置解析 + JSON-RPC（stdio / unix / streamable http）+ MCP 会话管理” 做成独立库/CLI，供上层产品复用。
 
+## 架构总览
+
+从下到上分 3 层：
+
+1. `pm-jsonrpc`：负责“怎么把一条 JSON-RPC 消息送到对端，再把对端返回/推送的消息读回来”
+2. `pm-mcp-kit`：负责“按 MCP 约定 initialize，并把常用 MCP 方法封装成好用的 API”
+3. `mcpctl`：基于配置的 CLI（把库能力暴露成命令行操作）
+
+这套拆分的关键好处是：
+
+- 上层可以仅依赖 `pm-mcp-kit`（不需要 CLI）
+- 上层也可以绕过配置，直接把自建 transport 注入 `Manager::connect_io/connect_jsonrpc`
+
 ## 核心数据结构
 
 - `Config { client, servers: BTreeMap<String, ServerConfig> }`
@@ -11,6 +24,39 @@
 - `pm_mcp_kit::mcp`：常用 MCP method 的轻量 typed wrapper 子集（可选使用）
 - `Session`：单连接 MCP 会话（已完成 initialize，可直接 request/notify 与调用便捷方法）
 - `Manager::initialize_result`：暴露每个 server 的 initialize 响应（便于上层读取 serverInfo/capabilities 等信息）
+
+## 初始化流程（简化）
+
+以 `Manager::request(...)` 为例：
+
+1. 若未连接：根据 `ServerConfig.transport` 建立 JSON-RPC 连接（stdio/unix/streamable_http）
+2. 调用 MCP `initialize`，并缓存 initialize result
+3. 发送 `notifications/initialized`
+4. 发送用户请求（例如 `tools/list`）
+
+## server→client（反向消息）
+
+MCP/JSON-RPC 允许 server 主动发消息给 client：
+
+- notification：只需要消费
+- request：需要 client respond
+
+`pm-jsonrpc` 会把它们放进有界 channel。
+
+`pm-mcp-kit::Manager` 会在安装连接时：
+
+- `take_requests()`：起一个任务循环消费 server→client requests，并交给 `server_request_handler`
+- `take_notifications()`：起一个任务循环消费 server→client notifications，并交给 `server_notification_handler`
+
+默认 handler：
+
+- request：未知方法返回 `-32601 Method not found`
+- 若启用 roots：内建响应 `roots/list`
+
+## 并发与背压
+
+- 同一连接：写入串行化（避免 JSON-RPC 输出交错）；可以并发发起请求，但写入层会排队
+- server→client：有界队列；requests 队列满会立刻回复 `-32000 client overloaded`（保护客户端内存）
 
 ## 边界
 
