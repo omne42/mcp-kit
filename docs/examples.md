@@ -2,6 +2,11 @@
 
 本章给出一些“可复制”的配置与代码片段，方便作为模板。
 
+## 可运行示例
+
+- 源码：`crates/mcp-kit/examples/minimal_client.rs`
+- 运行：`cargo run -p mcp-kit --example minimal_client -- <server>`
+
 ## 1）最小远程配置（streamable_http）
 
 `.mcp.json`：

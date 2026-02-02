@@ -36,7 +36,7 @@ pub enum ServerRequestOutcome {
 pub struct ServerRequestContext {
     pub server_name: ServerName,
     pub method: String,
-    pub params: Value,
+    pub params: Option<Value>,
 }
 
 pub type ServerRequestHandler =
@@ -45,7 +45,7 @@ pub type ServerRequestHandler =
 pub struct ServerNotificationContext {
     pub server_name: ServerName,
     pub method: String,
-    pub params: Value,
+    pub params: Option<Value>,
 }
 
 pub type ServerNotificationHandler =

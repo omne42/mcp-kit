@@ -260,6 +260,32 @@ impl ClientHandle {
         self.write_line(&line).await
     }
 
+    pub async fn respond_error_raw_id(
+        &self,
+        id: Value,
+        code: i64,
+        message: impl Into<String>,
+        data: Option<Value>,
+    ) -> Result<(), Error> {
+        let mut error = serde_json::json!({
+            "code": code,
+            "message": message.into(),
+        });
+        if let Some(data) = data {
+            error["data"] = data;
+        }
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": error,
+        });
+
+        let mut line = serde_json::to_string(&response)?;
+        line.push('\n');
+        self.write_line(&line).await
+    }
+
     async fn write_line(&self, line: &str) -> Result<(), Error> {
         let mut write = self.write.lock().await;
         write.write_all(line.as_bytes()).await?;
@@ -452,7 +478,8 @@ impl Client {
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        if !content_type.starts_with("text/event-stream") {
+        let content_type_lower = content_type.to_ascii_lowercase();
+        if !content_type_lower.starts_with("text/event-stream") {
             return Err(Error::Protocol(format!(
                 "streamable http SSE connect failed: expected content-type text/event-stream, got {content_type}"
             )));
@@ -647,14 +674,14 @@ impl Drop for PendingRequestGuard {
 #[derive(Debug, Clone)]
 pub struct Notification {
     pub method: String,
-    pub params: Value,
+    pub params: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
 pub struct IncomingRequest {
     pub id: Id,
     pub method: String,
-    pub params: Value,
+    pub params: Option<Value>,
     responder: ClientHandle,
 }
 
@@ -700,6 +727,7 @@ where
             limits,
         } = ctx;
 
+        const INVALID_REQUEST: i64 = -32600;
         const METHOD_NOT_FOUND: i64 = -32601;
         const CLIENT_OVERLOADED: i64 = -32000;
         let mut log_state = match stdout_log {
@@ -735,9 +763,17 @@ where
                         continue;
                     };
 
-                    let params = value.get("params").cloned().unwrap_or(Value::Null);
+                    let params = value.get("params").cloned();
                     if let Some(id_value) = value.get("id") {
                         let Some(id) = parse_id(id_value) else {
+                            let _ = responder
+                                .respond_error_raw_id(
+                                    Value::Null,
+                                    INVALID_REQUEST,
+                                    "invalid request id",
+                                    None,
+                                )
+                                .await;
                             continue;
                         };
                         let request = IncomingRequest {
@@ -931,7 +967,8 @@ async fn http_post_bridge_loop(
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
 
-            if content_type.starts_with("text/event-stream") {
+            let content_type_lower = content_type.to_ascii_lowercase();
+            if content_type_lower.starts_with("text/event-stream") {
                 let stream = resp
                     .bytes_stream()
                     .map(|chunk| chunk.map_err(io::Error::other));
@@ -960,6 +997,24 @@ async fn http_post_bridge_loop(
                         )
                         .await;
                     }
+                }
+                continue;
+            }
+
+            let is_json_content_type = content_type.is_empty()
+                || content_type_lower.starts_with("application/json")
+                || (content_type_lower.starts_with("application/")
+                    && content_type_lower.contains("+json"));
+            if !is_json_content_type {
+                if let Some(id) = id {
+                    let _ = write_error_response(
+                        &writer,
+                        id,
+                        HTTP_TRANSPORT_ERROR,
+                        "unexpected content-type for json response".to_string(),
+                        Some(serde_json::json!({ "content_type": content_type })),
+                    )
+                    .await;
                 }
                 continue;
             }
@@ -996,6 +1051,21 @@ async fn http_post_bridge_loop(
                                     "max_bytes": limits.max_message_bytes,
                                     "actual_bytes": body.len(),
                                 })),
+                            )
+                            .await;
+                        }
+                        continue;
+                    }
+                    if serde_json::from_slice::<Value>(&body).is_err() {
+                        if let Some(id) = id {
+                            let body_preview = String::from_utf8_lossy(&body);
+                            let preview = truncate_string(body_preview.into_owned(), 4 * 1024);
+                            let _ = write_error_response(
+                                &writer,
+                                id,
+                                HTTP_TRANSPORT_ERROR,
+                                "http response is not valid json".to_string(),
+                                Some(serde_json::json!({ "body": preview })),
                             )
                             .await;
                         }

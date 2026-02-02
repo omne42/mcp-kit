@@ -96,7 +96,7 @@ async fn handles_server_to_client_request_and_responds() {
     let handler_task = tokio::spawn(async move {
         let req = requests.recv().await.expect("incoming request");
         assert_eq!(req.method, "demo/ping");
-        assert_eq!(req.params, serde_json::json!({ "n": 42 }));
+        assert_eq!(req.params, Some(serde_json::json!({ "n": 42 })));
         assert_eq!(req.id, Id::String("abc".to_string()));
         req.respond_ok(serde_json::json!({ "pong": true }))
             .await
