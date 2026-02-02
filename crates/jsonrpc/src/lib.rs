@@ -841,9 +841,6 @@ where
             limits,
         } = ctx;
 
-        const INVALID_REQUEST: i64 = -32600;
-        const METHOD_NOT_FOUND: i64 = -32601;
-        const CLIENT_OVERLOADED: i64 = -32000;
         let mut log_state = match stdout_log {
             Some(opts) => LogState::new(opts).await.ok(),
             None => None,
@@ -871,14 +868,80 @@ where
                             continue;
                         }
                     };
+                    handle_incoming_value(
+                        value,
+                        &pending,
+                        &stats,
+                        &notify_tx,
+                        &request_tx,
+                        &responder,
+                    )
+                    .await;
+                }
+                Ok(None) => {
+                    let err = Error::Protocol("server closed connection".to_string());
+                    drain_pending(&pending, &err);
+                    return;
+                }
+                Err(err) => {
+                    let err = Error::Io(err);
+                    drain_pending(&pending, &err);
+                    return;
+                }
+            }
+        }
+    })
+}
 
-                    let Some(method) = value.get("method").and_then(|v| v.as_str()) else {
-                        handle_response(&pending, value);
+async fn handle_incoming_value(
+    value: Value,
+    pending: &PendingRequests,
+    stats: &Arc<ClientStatsInner>,
+    notify_tx: &mpsc::Sender<Notification>,
+    request_tx: &mpsc::Sender<IncomingRequest>,
+    responder: &ClientHandle,
+) {
+    const INVALID_REQUEST: i64 = -32600;
+    const METHOD_NOT_FOUND: i64 = -32601;
+    const CLIENT_OVERLOADED: i64 = -32000;
+
+    let mut stack = vec![value];
+    while let Some(value) = stack.pop() {
+        match value {
+            Value::Array(items) => {
+                if items.is_empty() {
+                    let _ = responder
+                        .respond_error_raw_id(Value::Null, INVALID_REQUEST, "empty batch", None)
+                        .await;
+                    continue;
+                }
+                for item in items.into_iter().rev() {
+                    stack.push(item);
+                }
+            }
+            Value::Object(map) => {
+                let jsonrpc = map.get("jsonrpc").and_then(|v| v.as_str());
+
+                let method = map.get("method").and_then(|v| v.as_str());
+                if let Some(method) = method {
+                    if jsonrpc != Some("2.0") {
+                        if let Some(id_value) = map.get("id") {
+                            let id_value =
+                                parse_id(id_value).map_or(Value::Null, |_| id_value.clone());
+                            let _ = responder
+                                .respond_error_raw_id(
+                                    id_value,
+                                    INVALID_REQUEST,
+                                    "invalid jsonrpc version",
+                                    None,
+                                )
+                                .await;
+                        }
                         continue;
-                    };
+                    }
 
-                    let params = value.get("params").cloned();
-                    if let Some(id_value) = value.get("id") {
+                    let params = map.get("params").cloned();
+                    if let Some(id_value) = map.get("id") {
                         let Some(id) = parse_id(id_value) else {
                             let _ = responder
                                 .respond_error_raw_id(
@@ -890,6 +953,7 @@ where
                                 .await;
                             continue;
                         };
+
                         let request = IncomingRequest {
                             id: id.clone(),
                             method: method.to_string(),
@@ -934,20 +998,19 @@ where
                                 .fetch_add(1, Ordering::Relaxed);
                         }
                     }
+                    continue;
                 }
-                Ok(None) => {
-                    let err = Error::Protocol("server closed connection".to_string());
-                    drain_pending(&pending, &err);
-                    return;
-                }
-                Err(err) => {
-                    let err = Error::Io(err);
-                    drain_pending(&pending, &err);
-                    return;
-                }
+
+                handle_response(pending, Value::Object(map));
+            }
+            _ => {
+                // JSON-RPC messages must be objects or arrays.
+                let _ = responder
+                    .respond_error_raw_id(Value::Null, INVALID_REQUEST, "invalid message", None)
+                    .await;
             }
         }
-    })
+    }
 }
 
 async fn read_line_limited<R: tokio::io::AsyncBufRead + Unpin>(
@@ -1436,7 +1499,11 @@ fn parse_id(value: &Value) -> Option<Id> {
 }
 
 fn handle_response(pending: &PendingRequests, value: Value) {
-    let Some(id_value) = value.get("id") else {
+    let Value::Object(map) = value else {
+        return;
+    };
+
+    let Some(id_value) = map.get("id") else {
         return;
     };
     let Some(id) = parse_id(id_value) else {
@@ -1451,29 +1518,54 @@ fn handle_response(pending: &PendingRequests, value: Value) {
         return;
     };
 
-    if let Some(error) = value.get("error") {
-        let Some(code) = error.get("code").and_then(|v| v.as_i64()) else {
-            let _ = tx.send(Err(Error::Protocol("invalid error response".to_string())));
-            return;
-        };
-        let Some(message) = error.get("message").and_then(|v| v.as_str()) else {
-            let _ = tx.send(Err(Error::Protocol("invalid error response".to_string())));
-            return;
-        };
-        let data = error.get("data").cloned();
-        let _ = tx.send(Err(Error::Rpc {
-            code,
-            message: message.to_string(),
-            data,
-        }));
+    if map.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
+        let _ = tx.send(Err(Error::Protocol(
+            "invalid response jsonrpc version".to_string(),
+        )));
         return;
     }
 
-    let Some(result) = value.get("result").cloned() else {
-        let _ = tx.send(Err(Error::Protocol("missing result".to_string())));
-        return;
-    };
-    let _ = tx.send(Ok(result));
+    let has_error = map.contains_key("error");
+    let has_result = map.contains_key("result");
+    match (has_error, has_result) {
+        (true, false) => {
+            let Some(error) = map.get("error") else {
+                let _ = tx.send(Err(Error::Protocol("invalid error response".to_string())));
+                return;
+            };
+            let Value::Object(error) = error else {
+                let _ = tx.send(Err(Error::Protocol("invalid error response".to_string())));
+                return;
+            };
+
+            let Some(code) = error.get("code").and_then(|v| v.as_i64()) else {
+                let _ = tx.send(Err(Error::Protocol("invalid error response".to_string())));
+                return;
+            };
+            let Some(message) = error.get("message").and_then(|v| v.as_str()) else {
+                let _ = tx.send(Err(Error::Protocol("invalid error response".to_string())));
+                return;
+            };
+            let data = error.get("data").cloned();
+            let _ = tx.send(Err(Error::Rpc {
+                code,
+                message: message.to_string(),
+                data,
+            }));
+        }
+        (false, true) => {
+            let Some(result) = map.get("result").cloned() else {
+                let _ = tx.send(Err(Error::Protocol("invalid result response".to_string())));
+                return;
+            };
+            let _ = tx.send(Ok(result));
+        }
+        _ => {
+            let _ = tx.send(Err(Error::Protocol(
+                "invalid response: must include exactly one of result/error".to_string(),
+            )));
+        }
+    }
 }
 
 struct LogState {

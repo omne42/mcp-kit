@@ -58,3 +58,7 @@
 - Docs: document split `sse_url/http_url`, `--dns-check`, and updated `[DONE]` semantics for streamable_http.
 - Docs: expand GitBook-style documentation under `docs/` and add `CONTRIBUTING.md`.
 - `mcp-kit`：`mcp.json v1` 中 `http_headers` 现在也接受别名字段 `headers`（便于复用 Cursor 等配置片段）。
+
+### Fixed
+- `mcp-jsonrpc`：当 server→client request 的 `jsonrpc` 版本非法但 `id` 合法时，`-32600 Invalid Request` 现在会回显原始 `id`（而不是 `null`），保持 JSON-RPC 2.0 相关性语义。
+- `mcp-jsonrpc`：补齐 `streamable_http` 的回归覆盖（`mcp-session-id` 复用/更新、POST 返回 SSE + `[DONE]`、非 JSON `Content-Type` 的错误桥接）。

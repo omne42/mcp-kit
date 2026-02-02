@@ -232,3 +232,158 @@ async fn request_optional_omits_params_when_none() {
         .expect("server task completed")
         .expect("server task ok");
 }
+
+#[tokio::test]
+async fn request_roundtrip_supports_batch_responses() {
+    let (client_stream, server_stream) = tokio::io::duplex(4096);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let mut server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+        let line1 = lines
+            .next_line()
+            .await
+            .expect("read ok")
+            .expect("request line 1");
+        let line2 = lines
+            .next_line()
+            .await
+            .expect("read ok")
+            .expect("request line 2");
+
+        let msg1 = parse_line(&line1);
+        let msg2 = parse_line(&line2);
+        let id1 = msg1["id"].clone();
+        let id2 = msg2["id"].clone();
+
+        let batch = serde_json::json!([
+            { "jsonrpc": "2.0", "id": id2, "result": { "ok": 2 } },
+            { "jsonrpc": "2.0", "id": id1, "result": { "ok": 1 } }
+        ]);
+        let mut out = serde_json::to_string(&batch).unwrap();
+        out.push('\n');
+        server_write.write_all(out.as_bytes()).await.unwrap();
+        server_write.flush().await.unwrap();
+    });
+
+    let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .expect("client connect");
+    let handle = client.handle();
+
+    let t1 = tokio::spawn(async move {
+        handle
+            .request("demo/one", serde_json::json!({}))
+            .await
+            .expect("request 1 ok")
+    });
+
+    let handle = client.handle();
+    let t2 = tokio::spawn(async move {
+        handle
+            .request("demo/two", serde_json::json!({}))
+            .await
+            .expect("request 2 ok")
+    });
+
+    let r1 = tokio::time::timeout(Duration::from_secs(1), t1)
+        .await
+        .expect("task 1 completed")
+        .expect("task 1 ok");
+    let r2 = tokio::time::timeout(Duration::from_secs(1), t2)
+        .await
+        .expect("task 2 completed")
+        .expect("task 2 ok");
+
+    assert_eq!(r1, serde_json::json!({ "ok": 1 }));
+    assert_eq!(r2, serde_json::json!({ "ok": 2 }));
+
+    tokio::time::timeout(Duration::from_secs(1), &mut server_task)
+        .await
+        .expect("server task completed")
+        .expect("server task ok");
+}
+
+#[tokio::test]
+async fn responds_invalid_request_when_jsonrpc_is_not_2_0() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let mut server_task = tokio::spawn(async move {
+        let request = serde_json::json!({
+            "jsonrpc": "1.0",
+            "id": 1,
+            "method": "demo/ping",
+        });
+        let mut out = serde_json::to_string(&request).unwrap();
+        out.push('\n');
+        server_write.write_all(out.as_bytes()).await.unwrap();
+        server_write.flush().await.unwrap();
+
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+        let line = lines
+            .next_line()
+            .await
+            .expect("read ok")
+            .expect("response line");
+        let msg = parse_line(&line);
+        assert_eq!(msg["jsonrpc"], "2.0");
+        assert_eq!(msg["id"], 1);
+        assert_eq!(msg["error"]["code"], serde_json::json!(-32600));
+        assert_eq!(msg["error"]["message"], "invalid jsonrpc version");
+    });
+
+    let _client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .expect("client connect");
+
+    tokio::time::timeout(Duration::from_secs(1), &mut server_task)
+        .await
+        .expect("server task completed")
+        .expect("server task ok");
+}
+
+#[tokio::test]
+async fn request_fails_when_server_sends_invalid_response_structure() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let mut server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+        let line = lines
+            .next_line()
+            .await
+            .expect("read ok")
+            .expect("request line");
+        let msg = parse_line(&line);
+        let id = msg["id"].clone();
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "ok": true },
+            "error": { "code": -32000, "message": "should not have both" }
+        });
+        let mut out = serde_json::to_string(&response).unwrap();
+        out.push('\n');
+        server_write.write_all(out.as_bytes()).await.unwrap();
+        server_write.flush().await.unwrap();
+    });
+
+    let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .expect("client connect");
+    let err = client
+        .request("demo/request", serde_json::json!({}))
+        .await
+        .expect_err("request should fail");
+    assert!(matches!(err, mcp_jsonrpc::Error::Protocol(_)));
+
+    tokio::time::timeout(Duration::from_secs(1), &mut server_task)
+        .await
+        .expect("server task completed")
+        .expect("server task ok");
+}
