@@ -32,6 +32,7 @@
 - `mcp-jsonrpc` 增加 DoS 防护：限制单条消息大小并使用有界队列缓存 server→client 的 requests/notifications。
 - `mcp-jsonrpc`：无参 requests/notifications 不再发送 `"params": null`（会省略 `params`）；新增 `Client::request_optional`。
 - `mcp-jsonrpc`：server→client request 的 `id` 非法时会返回 `-32600 Invalid Request`（`id=null`），不再静默丢弃。
+- `mcp-jsonrpc`（BREAKING）：`ClientHandle::respond_error_raw_id` 改为 crate 内部 API（`pub(crate)`），不再对外暴露。
 - `mcp-jsonrpc`：`streamable_http` 的 SSE connect 会校验 `Content-Type: text/event-stream`（大小写不敏感）；POST 成功响应会校验 JSON `Content-Type` 与 JSON body，避免 pending 悬挂；HTTP 响应过大时会对对应 request 返回 error。
 - `mcp-jsonrpc`（BREAKING）：server→client 的 `Notification/IncomingRequest` 现在用 `Option<serde_json::Value>` 表达 `params`（保留 “省略 vs null” 语义）。
 - `mcp-kit`：`transport=unix|streamable_http` 现在只要配置里出现 `argv` 字段（即使为空数组）也会被拒绝。
@@ -42,4 +43,5 @@
 - `mcp-jsonrpc` 的 `streamable_http` 默认不跟随 HTTP redirects（减少 SSRF 风险），可通过 `StreamableHttpOptions.follow_redirects` 显式开启。
 - `mcp-jsonrpc` 的 stdout 旋转日志支持保留上限：`StdoutLog.max_parts`（`mcp-kit` 配置字段 `servers.<name>.stdout_log.max_parts`）。
 - Docs: add runnable example `crates/mcp-kit/examples/minimal_client.rs` and reference it from `docs/examples.md`.
+- Docs: clarify `StreamableHttpOptions.request_timeout` semantics in `docs/jsonrpc.md`.
 - Docs: expand GitBook-style documentation under `docs/` and add `CONTRIBUTING.md`.

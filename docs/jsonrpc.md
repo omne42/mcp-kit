@@ -59,7 +59,7 @@ if let Some(mut requests) = client.take_requests() {
 
 - `headers`：额外 header
 - `connect_timeout`：建立连接超时（默认 10s）
-- `request_timeout`：POST 请求/响应 body 的超时（注意：不要用于限制 SSE 长连接）
+- `request_timeout`：用于单次 POST 的 send/response（包括 POST 返回 SSE 时的响应流）；不要用于限制主 SSE（GET）长连接
 - `follow_redirects`：是否跟随 HTTP redirects（默认 `false`，减少 SSRF 风险）
 
 在 `mcp-kit` 中：

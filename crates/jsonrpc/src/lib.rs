@@ -260,7 +260,7 @@ impl ClientHandle {
         self.write_line(&line).await
     }
 
-    pub async fn respond_error_raw_id(
+    pub(crate) async fn respond_error_raw_id(
         &self,
         id: Value,
         code: i64,
