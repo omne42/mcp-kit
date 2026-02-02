@@ -13,7 +13,8 @@
 
 - `Client::spawn(program, args)` / `spawn_with_options`：stdio spawn child
 - `Client::connect_unix(path)`：连接已有 unix socket
-- `Client::connect_streamable_http(url)` / `connect_streamable_http_with_options`：远程 HTTP SSE + POST
+- `Client::connect_streamable_http(url)` / `connect_streamable_http_with_options`：远程 HTTP SSE + POST（同一个 URL）
+- `Client::connect_streamable_http_split_with_options(sse_url, http_url, ...)`：远程 HTTP SSE + POST（分离 URL）
 - `Client::connect_io(read, write)`：用任意 `AsyncRead/AsyncWrite` 作为 transport（测试/复用管道）
 
 ## Options：stdout log 与 DoS 防护

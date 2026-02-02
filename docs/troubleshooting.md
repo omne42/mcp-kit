@@ -69,6 +69,16 @@
 - CLI：加 `--allow-private-ip`
 - 代码：`UntrustedStreamableHttpPolicy { allow_private_ips: true, .. }`
 
+### refusing to connect hostname that resolves to non-global ip in untrusted mode
+
+原因：启用了 `dns_check`（或 CLI `--dns-check`），并且该 hostname 解析到了非公网 IP。
+
+解决（任选其一）：
+
+- 关闭 `dns_check`（或不传 `--dns-check`）
+- CLI：加 `--allow-private-ip`（允许私网/loopback）
+- 或使用 `--trust`（Trusted mode）
+
 ### refusing to send sensitive http header in untrusted mode
 
 原因：默认拒绝 `Authorization` / `Proxy-Authorization` / `Cookie`。

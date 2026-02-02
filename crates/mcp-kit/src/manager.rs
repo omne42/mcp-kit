@@ -20,6 +20,7 @@ use crate::{
 pub type ServerName = String;
 
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
+const DNS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
@@ -258,18 +259,52 @@ impl Manager {
                 (client, None)
             }
             Transport::StreamableHttp => {
-                let url = server_cfg
-                    .url
-                    .as_deref()
-                    .ok_or_else(|| anyhow::anyhow!("mcp server url must be set"))?;
+                let (sse_url, post_url) = match (
+                    server_cfg.url.as_deref(),
+                    server_cfg.sse_url.as_deref(),
+                    server_cfg.http_url.as_deref(),
+                ) {
+                    (Some(url), None, None) => (url, url),
+                    (None, Some(sse_url), Some(http_url)) => (sse_url, http_url),
+                    _ => {
+                        anyhow::bail!(
+                            "mcp server {server_name}: set url or (sse_url + http_url) for transport=streamable_http"
+                        )
+                    }
+                };
 
                 validate_streamable_http_config(
                     self.trust_mode,
                     &self.untrusted_streamable_http_policy,
                     server_name,
-                    url,
+                    sse_url,
                     server_cfg,
                 )?;
+                if post_url != sse_url {
+                    validate_streamable_http_config(
+                        self.trust_mode,
+                        &self.untrusted_streamable_http_policy,
+                        server_name,
+                        post_url,
+                        server_cfg,
+                    )?;
+                }
+                if self.trust_mode != TrustMode::Trusted {
+                    validate_streamable_http_url_untrusted_dns(
+                        &self.untrusted_streamable_http_policy,
+                        server_name,
+                        sse_url,
+                    )
+                    .await?;
+                    if post_url != sse_url {
+                        validate_streamable_http_url_untrusted_dns(
+                            &self.untrusted_streamable_http_policy,
+                            server_name,
+                            post_url,
+                        )
+                        .await?;
+                    }
+                }
 
                 let mut headers: std::collections::HashMap<String, String> = server_cfg
                     .http_headers
@@ -306,8 +341,9 @@ impl Manager {
                     }
                 }
 
-                let client = mcp_jsonrpc::Client::connect_streamable_http_with_options(
-                    url,
+                let client = mcp_jsonrpc::Client::connect_streamable_http_split_with_options(
+                    sse_url,
+                    post_url,
                     mcp_jsonrpc::StreamableHttpOptions {
                         headers,
                         request_timeout: Some(self.request_timeout),
@@ -316,7 +352,15 @@ impl Manager {
                     mcp_jsonrpc::SpawnOptions::default(),
                 )
                 .await
-                .with_context(|| format!("connect streamable http mcp server url={url}"))?;
+                .with_context(|| {
+                    if sse_url == post_url {
+                        format!("connect streamable http mcp server url={sse_url}")
+                    } else {
+                        format!(
+                            "connect streamable http mcp server sse_url={sse_url} http_url={post_url}"
+                        )
+                    }
+                })?;
                 (client, None)
             }
         };
@@ -548,7 +592,13 @@ impl Manager {
         cwd: &Path,
     ) -> anyhow::Result<Value> {
         self.get_or_connect(config, server_name, cwd).await?;
-        self.request_connected(server_name, method, params).await
+        let result = self.request_connected(server_name, method, params).await;
+        if let Err(err) = &result {
+            if should_disconnect_after_jsonrpc_error(err) {
+                self.disconnect(server_name);
+            }
+        }
+        result
     }
 
     pub async fn request_server(
@@ -560,7 +610,13 @@ impl Manager {
         cwd: &Path,
     ) -> anyhow::Result<Value> {
         self.connect(server_name, server_cfg, cwd).await?;
-        self.request_connected(server_name, method, params).await
+        let result = self.request_connected(server_name, method, params).await;
+        if let Err(err) = &result {
+            if should_disconnect_after_jsonrpc_error(err) {
+                self.disconnect(server_name);
+            }
+        }
+        result
     }
 
     pub async fn request_typed<R: McpRequest>(
@@ -618,7 +674,13 @@ impl Manager {
         cwd: &Path,
     ) -> anyhow::Result<()> {
         self.get_or_connect(config, server_name, cwd).await?;
-        self.notify_connected(server_name, method, params).await
+        let result = self.notify_connected(server_name, method, params).await;
+        if let Err(err) = &result {
+            if should_disconnect_after_jsonrpc_error(err) {
+                self.disconnect(server_name);
+            }
+        }
+        result
     }
 
     pub async fn notify_server(
@@ -630,7 +692,13 @@ impl Manager {
         cwd: &Path,
     ) -> anyhow::Result<()> {
         self.connect(server_name, server_cfg, cwd).await?;
-        self.notify_connected(server_name, method, params).await
+        let result = self.notify_connected(server_name, method, params).await;
+        if let Err(err) = &result {
+            if should_disconnect_after_jsonrpc_error(err) {
+                self.disconnect(server_name);
+            }
+        }
+        result
     }
 
     pub async fn notify_typed<N: McpNotification>(
@@ -1128,6 +1196,53 @@ fn validate_streamable_http_url_untrusted(
     Ok(())
 }
 
+async fn validate_streamable_http_url_untrusted_dns(
+    policy: &UntrustedStreamableHttpPolicy,
+    server_name: &str,
+    url: &str,
+) -> anyhow::Result<()> {
+    if !policy.dns_check || policy.allow_private_ips {
+        return Ok(());
+    }
+
+    let parsed =
+        reqwest::Url::parse(url).with_context(|| format!("invalid streamable http url: {url}"))?;
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("streamable http url must include a host: {url}"))?;
+    let host = host.trim_end_matches('.');
+    let host_for_ip = host.trim_start_matches('[').trim_end_matches(']');
+    if host_for_ip.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+
+    let port = parsed.port_or_known_default().ok_or_else(|| {
+        anyhow::anyhow!("streamable http url must include a port or known scheme: {url}")
+    })?;
+
+    let addrs = match tokio::time::timeout(
+        DNS_LOOKUP_TIMEOUT,
+        tokio::net::lookup_host((host_for_ip, port)),
+    )
+    .await
+    {
+        Ok(Ok(addrs)) => addrs,
+        Ok(Err(_)) | Err(_) => return Ok(()),
+    };
+
+    for addr in addrs {
+        let ip = normalize_ip(addr.ip());
+        if is_untrusted_always_disallowed_ip(ip) || is_untrusted_non_global_ip(ip) {
+            anyhow::bail!(
+                "refusing to connect hostname that resolves to non-global ip in untrusted mode: {server_name} host={host} ip={ip} (set Manager::with_trust_mode(TrustMode::Trusted) or allow_private_ips to override)"
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn host_matches_allowlist(host: &str, allowed: &str) -> bool {
     let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
     let allowed = allowed.trim().trim_end_matches('.').to_ascii_lowercase();
@@ -1143,6 +1258,19 @@ fn is_untrusted_sensitive_http_header(header: &str) -> bool {
         header.as_str(),
         "authorization" | "proxy-authorization" | "cookie"
     )
+}
+
+fn should_disconnect_after_jsonrpc_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<mcp_jsonrpc::Error>()
+            .is_some_and(|err| {
+                matches!(
+                    err,
+                    mcp_jsonrpc::Error::Io(_) | mcp_jsonrpc::Error::Protocol(_)
+                )
+            })
+    })
 }
 
 fn is_untrusted_always_disallowed_ip(ip: IpAddr) -> bool {
@@ -1453,6 +1581,8 @@ mod tests {
             argv: vec!["mcp-server".to_string()],
             unix_path: None,
             url: None,
+            sse_url: None,
+            http_url: None,
             bearer_token_env_var: None,
             http_headers: BTreeMap::new(),
             env_http_headers: BTreeMap::new(),
@@ -1477,6 +1607,8 @@ mod tests {
             argv: Vec::new(),
             unix_path: Some(PathBuf::from("/tmp/mcp.sock")),
             url: None,
+            sse_url: None,
+            http_url: None,
             bearer_token_env_var: None,
             http_headers: BTreeMap::new(),
             env_http_headers: BTreeMap::new(),
@@ -1501,6 +1633,8 @@ mod tests {
             argv: Vec::new(),
             unix_path: None,
             url: Some("https://example.com/mcp".to_string()),
+            sse_url: None,
+            http_url: None,
             bearer_token_env_var: Some("MCP_TOKEN".to_string()),
             http_headers: BTreeMap::new(),
             env_http_headers: BTreeMap::new(),
@@ -1525,6 +1659,8 @@ mod tests {
             argv: Vec::new(),
             unix_path: None,
             url: Some("http://example.com/mcp".to_string()),
+            sse_url: None,
+            http_url: None,
             bearer_token_env_var: None,
             http_headers: BTreeMap::new(),
             env_http_headers: BTreeMap::new(),
@@ -1549,6 +1685,8 @@ mod tests {
             argv: Vec::new(),
             unix_path: None,
             url: Some("https://localhost/mcp".to_string()),
+            sse_url: None,
+            http_url: None,
             bearer_token_env_var: None,
             http_headers: BTreeMap::new(),
             env_http_headers: BTreeMap::new(),
@@ -1573,6 +1711,8 @@ mod tests {
             argv: Vec::new(),
             unix_path: None,
             url: Some("https://192.168.0.10/mcp".to_string()),
+            sse_url: None,
+            http_url: None,
             bearer_token_env_var: None,
             http_headers: BTreeMap::new(),
             env_http_headers: BTreeMap::new(),
@@ -1600,6 +1740,8 @@ mod tests {
             argv: Vec::new(),
             unix_path: None,
             url: Some("https://[::ffff:127.0.0.1]/mcp".to_string()),
+            sse_url: None,
+            http_url: None,
             bearer_token_env_var: None,
             http_headers: BTreeMap::new(),
             env_http_headers: BTreeMap::new(),
@@ -1627,6 +1769,8 @@ mod tests {
             argv: Vec::new(),
             unix_path: None,
             url: Some("https://user:pass@example.com/mcp".to_string()),
+            sse_url: None,
+            http_url: None,
             bearer_token_env_var: None,
             http_headers: BTreeMap::new(),
             env_http_headers: BTreeMap::new(),
@@ -1657,6 +1801,8 @@ mod tests {
             argv: Vec::new(),
             unix_path: None,
             url: Some("https://example.com/mcp".to_string()),
+            sse_url: None,
+            http_url: None,
             bearer_token_env_var: None,
             http_headers,
             env_http_headers: BTreeMap::new(),
@@ -1705,5 +1851,36 @@ mod tests {
         let err = validate_streamable_http_url_untrusted(&policy, "srv", "https://evil.com/mcp")
             .unwrap_err();
         assert!(err.to_string().contains("allowlist"));
+    }
+
+    #[tokio::test]
+    async fn untrusted_policy_dns_check_blocks_localhost_without_allow_private_ip() {
+        let policy = UntrustedStreamableHttpPolicy {
+            allow_localhost: true,
+            dns_check: true,
+            ..Default::default()
+        };
+
+        validate_streamable_http_url_untrusted(&policy, "srv", "https://localhost/mcp").unwrap();
+        let err =
+            validate_streamable_http_url_untrusted_dns(&policy, "srv", "https://localhost/mcp")
+                .await
+                .unwrap_err();
+        assert!(err.to_string().contains("resolves to non-global ip"));
+    }
+
+    #[tokio::test]
+    async fn untrusted_policy_dns_check_allows_localhost_with_allow_private_ip() {
+        let policy = UntrustedStreamableHttpPolicy {
+            allow_localhost: true,
+            allow_private_ips: true,
+            dns_check: true,
+            ..Default::default()
+        };
+
+        validate_streamable_http_url_untrusted(&policy, "srv", "https://localhost/mcp").unwrap();
+        validate_streamable_http_url_untrusted_dns(&policy, "srv", "https://localhost/mcp")
+            .await
+            .unwrap();
     }
 }

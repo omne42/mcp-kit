@@ -16,6 +16,11 @@ pub struct UntrustedStreamableHttpPolicy {
     pub allow_localhost: bool,
     /// When false (default), reject loopback/link-local/private IP literals.
     pub allow_private_ips: bool,
+    /// When true, perform a best-effort DNS resolution check and reject hostnames that resolve
+    /// to non-global IPs (unless `allow_private_ips` is also enabled).
+    ///
+    /// Default: false (no DNS lookups).
+    pub dns_check: bool,
     /// Optional host allowlist. When non-empty, only these hosts (or their subdomains)
     /// are allowed in untrusted mode.
     pub allowed_hosts: Vec<String>,
@@ -27,6 +32,7 @@ impl Default for UntrustedStreamableHttpPolicy {
             require_https: true,
             allow_localhost: false,
             allow_private_ips: false,
+            dns_check: false,
             allowed_hosts: Vec::new(),
         }
     }

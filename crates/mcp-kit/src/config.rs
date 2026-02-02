@@ -41,6 +41,10 @@ struct ServerConfigFile {
     #[serde(default)]
     url: Option<String>,
     #[serde(default)]
+    sse_url: Option<String>,
+    #[serde(default)]
+    http_url: Option<String>,
+    #[serde(default)]
     bearer_token_env_var: Option<String>,
     #[serde(default)]
     http_headers: BTreeMap<String, String>,
@@ -105,6 +109,8 @@ pub struct ServerConfig {
     pub argv: Vec<String>,
     pub unix_path: Option<PathBuf>,
     pub url: Option<String>,
+    pub sse_url: Option<String>,
+    pub http_url: Option<String>,
     pub bearer_token_env_var: Option<String>,
     pub http_headers: BTreeMap<String, String>,
     pub env_http_headers: BTreeMap<String, String>,
@@ -259,6 +265,11 @@ impl Config {
                             "mcp server {name}: url is only valid for transport=streamable_http"
                         );
                     }
+                    if server.sse_url.is_some() || server.http_url.is_some() {
+                        anyhow::bail!(
+                            "mcp server {name}: sse_url/http_url are only valid for transport=streamable_http"
+                        );
+                    }
                     if server.bearer_token_env_var.is_some()
                         || !server.http_headers.is_empty()
                         || !server.env_http_headers.is_empty()
@@ -287,6 +298,11 @@ impl Config {
                     if server.url.is_some() {
                         anyhow::bail!(
                             "mcp server {name}: url is only valid for transport=streamable_http"
+                        );
+                    }
+                    if server.sse_url.is_some() || server.http_url.is_some() {
+                        anyhow::bail!(
+                            "mcp server {name}: sse_url/http_url are only valid for transport=streamable_http"
                         );
                     }
                     if server.bearer_token_env_var.is_some()
@@ -341,15 +357,42 @@ impl Config {
                             "mcp server {name}: stdout_log is not supported for transport=streamable_http"
                         );
                     }
-
-                    let Some(url) = server.url else {
-                        anyhow::bail!(
-                            "mcp server {name}: url is required for transport=streamable_http"
-                        );
+                    let (url, sse_url, http_url) = match (
+                        server.url,
+                        server.sse_url,
+                        server.http_url,
+                    ) {
+                        (Some(url), None, None) => {
+                            if url.trim().is_empty() {
+                                anyhow::bail!("mcp server {name}: url must not be empty");
+                            }
+                            (Some(url), None, None)
+                        }
+                        (None, Some(sse_url), Some(http_url)) => {
+                            if sse_url.trim().is_empty() {
+                                anyhow::bail!("mcp server {name}: sse_url must not be empty");
+                            }
+                            if http_url.trim().is_empty() {
+                                anyhow::bail!("mcp server {name}: http_url must not be empty");
+                            }
+                            (None, Some(sse_url), Some(http_url))
+                        }
+                        (None, None, None) => {
+                            anyhow::bail!(
+                                "mcp server {name}: url (or sse_url + http_url) is required for transport=streamable_http"
+                            );
+                        }
+                        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+                            anyhow::bail!(
+                                "mcp server {name}: set either url or (sse_url + http_url), not both"
+                            );
+                        }
+                        (None, Some(_), None) | (None, None, Some(_)) => {
+                            anyhow::bail!(
+                                "mcp server {name}: sse_url and http_url must both be set for transport=streamable_http"
+                            );
+                        }
                     };
-                    if url.trim().is_empty() {
-                        anyhow::bail!("mcp server {name}: url must not be empty");
-                    }
 
                     if let Some(env_var) = &server.bearer_token_env_var {
                         if env_var.trim().is_empty() {
@@ -388,7 +431,9 @@ impl Config {
                             transport: Transport::StreamableHttp,
                             argv: Vec::new(),
                             unix_path: None,
-                            url: Some(url),
+                            url,
+                            sse_url,
+                            http_url,
                             bearer_token_env_var: server.bearer_token_env_var,
                             http_headers: server.http_headers,
                             env_http_headers: server.env_http_headers,
@@ -407,6 +452,8 @@ impl Config {
                     argv,
                     unix_path,
                     url: None,
+                    sse_url: None,
+                    http_url: None,
                     bearer_token_env_var: None,
                     http_headers: BTreeMap::new(),
                     env_http_headers: BTreeMap::new(),
@@ -646,11 +693,61 @@ mod tests {
         assert!(server.argv.is_empty());
         assert!(server.unix_path.is_none());
         assert_eq!(server.url.as_deref(), Some("https://example.com/mcp"));
+        assert!(server.sse_url.is_none());
+        assert!(server.http_url.is_none());
         assert!(server.bearer_token_env_var.is_none());
         assert!(server.http_headers.is_empty());
         assert!(server.env_http_headers.is_empty());
         assert!(server.env.is_empty());
         assert!(server.stdout_log.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_parses_streamable_http_transport_with_split_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "sse_url": "https://example.com/sse", "http_url": "https://example.com/mcp" } } }"#,
+        )
+        .await
+        .unwrap();
+
+        let cfg = Config::load(dir.path(), None).await.unwrap();
+        let server = cfg.servers.get("remote").unwrap();
+        assert_eq!(server.transport, Transport::StreamableHttp);
+        assert!(server.argv.is_empty());
+        assert!(server.unix_path.is_none());
+        assert!(server.url.is_none());
+        assert_eq!(server.sse_url.as_deref(), Some("https://example.com/sse"));
+        assert_eq!(server.http_url.as_deref(), Some("https://example.com/mcp"));
+    }
+
+    #[tokio::test]
+    async fn load_denies_streamable_http_with_url_and_split_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "url": "https://example.com/mcp", "sse_url": "https://example.com/sse", "http_url": "https://example.com/mcp" } } }"#,
+        )
+        .await
+        .unwrap();
+
+        let err = Config::load(dir.path(), None).await.unwrap_err();
+        assert!(err.to_string().contains("set either url or"));
+    }
+
+    #[tokio::test]
+    async fn load_denies_streamable_http_with_partial_split_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "sse_url": "https://example.com/sse" } } }"#,
+        )
+        .await
+        .unwrap();
+
+        let err = Config::load(dir.path(), None).await.unwrap_err();
+        assert!(err.to_string().contains("sse_url and http_url"));
     }
 
     #[tokio::test]

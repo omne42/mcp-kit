@@ -36,7 +36,7 @@
 ### 安全
 
 - `TrustMode::{Untrusted, Trusted}`
-- `UntrustedStreamableHttpPolicy`：Untrusted 下的远程出站策略（https/host/ip/allowlist）
+- `UntrustedStreamableHttpPolicy`：Untrusted 下的远程出站策略（https/host/ip/allowlist/dns_check）
 
 ## mcp-jsonrpc
 

@@ -114,7 +114,8 @@ stdout_log 的旋转文件命名/保留策略见 [`日志与观测`](logging.md)
 
 字段：
 
-- `url`（必填）：远程 MCP server URL
+- `url`（可选）：远程 MCP server URL（同时用于 SSE 与 POST）
+- `sse_url` + `http_url`（可选）：分离的 SSE URL 与 POST URL（两者必须同时设置；不能与 `url` 同时出现）
 - `http_headers`（可选）：静态 header
 - `bearer_token_env_var`（可选）：从 env 读取 token，注入 `Authorization: Bearer ...`
 - `env_http_headers`（可选）：从 env 读取 header 值

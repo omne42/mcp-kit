@@ -38,6 +38,7 @@ CLI 对应：
 - `require_https = true`：只允许 `https://`
 - `allow_localhost = false`：拒绝 `localhost` / `*.localhost` / `*.local`
 - `allow_private_ips = false`：拒绝 loopback/link-local/private 等非公网 IP 字面量
+- `dns_check = false`：默认不做 DNS 解析检查（可选开启；见下文）
 - `allowed_hosts = []`：默认不做 host allowlist；一旦配置 allowlist，则只允许 allowlist 命中的 host/子域名
 
 另外，Untrusted 下还会拒绝：
@@ -97,6 +98,11 @@ Untrusted 下对 `127.0.0.1`、`10.0.0.0/8` 等 **IP 字面量** 会做拒绝/�
 
 - 使用 `allowed_hosts`（或 CLI `--allow-host`）做 host allowlist
 - 避免在 Untrusted 下开启 `--allow-localhost/--allow-private-ip/--allow-http`
+
+如果你希望做“域名解析到私网”的 best-effort 拦截，可以开启 `dns_check`（或 CLI `--dns-check`）。开启后：
+
+- hostnames 会做一次 DNS 解析；若解析到非公网 IP，会被拒绝（除非同时允许 `allow_private_ips` 或使用 `Trusted`）
+- 仍然不能完全防住 DNS rebinding；更强的威胁模型需要更底层的网络出站控制
 
 ### Redirects 默认禁用
 

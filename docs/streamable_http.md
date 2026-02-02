@@ -9,7 +9,7 @@
 ## 一句话理解
 
 - 建立一个 **GET SSE** 长连接：持续接收 JSON-RPC 消息（以及可能的 response stream）
-- 每发起一次 JSON-RPC 请求：通过 **POST** 把 JSON 发给同一个 URL，然后把响应“桥接”为 JSON-RPC response
+- 每发起一次 JSON-RPC 请求：通过 **POST** 把 JSON 发给 `http_url`（默认等于 `url`），然后把响应“桥接”为 JSON-RPC response
 
 ## URL 与请求方式
 
@@ -17,10 +17,10 @@
 
 在 `mcp-jsonrpc` 中：
 
-- SSE：`GET <url>`，并设置 `Accept: text/event-stream`
-- POST：`POST <url>`，并设置 `Content-Type: application/json`
+- SSE：`GET <sse_url>`（默认等于 `url`），并设置 `Accept: text/event-stream`
+- POST：`POST <http_url>`（默认等于 `url`），并设置 `Content-Type: application/json`
 
-> 当前实现使用同一个 URL 同时承担 SSE 与 POST。
+> 默认使用同一个 `url` 同时承担 SSE 与 POST；也支持分离的 `sse_url/http_url`。
 
 ## 会话粘连：`mcp-session-id` header
 
@@ -38,7 +38,7 @@
 
 - 会把同一个 event 中的多行 `data:` 拼接起来（用 `\n` 连接）
 - 遇到空行表示一个 event 结束，此时把累计的 `data` 当作“一条 JSON-RPC 消息”，写入内部 JSON-RPC 读循环
-- 如果累计 `data` 恰好是 `[DONE]`，则结束 SSE pump
+- 如果累计 `data` 恰好是 `[DONE]`，则认为该 SSE 流结束（仅用于 POST 返回 SSE 的响应流；主 SSE（GET）不会把 `[DONE]` 当作断开信号）
 
 简化示例：
 

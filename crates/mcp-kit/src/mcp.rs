@@ -4,7 +4,7 @@
 //! to provide ergonomic, strongly-typed method names + params for clients.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::{McpNotification, McpRequest, Root};
 
@@ -86,6 +86,8 @@ pub struct ToolInputSchema {
     pub required: Option<Vec<String>>,
     #[serde(default = "json_schema_object_type_default")]
     pub r#type: String,
+    #[serde(flatten, default, skip_serializing_if = "Map::is_empty")]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -96,6 +98,8 @@ pub struct ToolOutputSchema {
     pub required: Option<Vec<String>>,
     #[serde(default = "json_schema_object_type_default")]
     pub r#type: String,
+    #[serde(flatten, default, skip_serializing_if = "Map::is_empty")]
+    pub extra: Map<String, Value>,
 }
 
 fn json_schema_object_type_default() -> String {

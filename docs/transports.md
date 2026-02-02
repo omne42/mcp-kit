@@ -46,7 +46,8 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 
 配置字段（仅 streamable_http 支持）：
 
-- `url`（必填）：例如 `https://example.com/mcp`
+- `url`（可选）：例如 `https://example.com/mcp`（同时用于 SSE 与 POST）
+- `sse_url` + `http_url`（可选）：分离的 SSE 与 POST URL（两者必须同时设置；不能与 `url` 同时出现）
 - `http_headers`（可选）：静态 header（不涉及 secrets 时可在 Untrusted 下使用）
 - `bearer_token_env_var`（可选）：从 env 读取 token 并注入 `Authorization: Bearer ...`（Untrusted 下拒绝）
 - `env_http_headers`（可选）：从 env 读取 header 值（Untrusted 下拒绝）

@@ -49,6 +49,13 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     allow_private_ip: bool,
 
+    /// Enable best-effort DNS checks for streamable_http hostnames in untrusted mode.
+    ///
+    /// When enabled, hostnames that resolve to non-global IPs are rejected unless
+    /// `--allow-private-ip` is also set.
+    #[arg(long, default_value_t = false)]
+    dns_check: bool,
+
     /// Allowlist hostnames for streamable_http in untrusted mode (repeatable).
     ///
     /// When set, only these hosts (or their subdomains) are allowed unless `--trust` is used.
@@ -109,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
         && (cli.allow_http
             || cli.allow_localhost
             || cli.allow_private_ip
+            || cli.dns_check
             || !cli.allow_host.is_empty())
     {
         let mut policy = mcp_kit::UntrustedStreamableHttpPolicy::default();
@@ -120,6 +128,9 @@ async fn main() -> anyhow::Result<()> {
         }
         if cli.allow_private_ip {
             policy.allow_private_ips = true;
+        }
+        if cli.dns_check {
+            policy.dns_check = true;
         }
         if !cli.allow_host.is_empty() {
             policy.allowed_hosts = cli.allow_host.clone();
@@ -143,6 +154,8 @@ async fn main() -> anyhow::Result<()> {
                         "argv": &cfg.argv,
                         "unix_path": cfg.unix_path.as_ref().map(|p| p.display().to_string()),
                         "url": cfg.url.as_deref(),
+                        "sse_url": cfg.sse_url.as_deref(),
+                        "http_url": cfg.http_url.as_deref(),
                         "bearer_token_env_var": cfg.bearer_token_env_var.as_deref(),
                         "env_keys": cfg.env.keys().cloned().collect::<Vec<_>>(),
                         "http_header_keys": cfg.http_headers.keys().cloned().collect::<Vec<_>>(),
