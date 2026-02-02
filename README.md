@@ -89,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
 
 如需把单个 server 的会话交给其他库持有，可用 `Manager::get_or_connect_session` / `Manager::connect_*_session` 取出 `Session`，再调用 `Session::{list_tools, call_tool, read_resource}` 等。
 
-`mcp_kit::mcp` 模块提供了一组**常用方法的轻量 typed wrapper**（可对照仓库 `example/` 目录里的 `mcp-types` 例子），不覆盖完整 MCP schema；缺的部分可继续用 `serde_json::Value` 或自行实现 `McpRequest`/`McpNotification`。
+`mcp_kit::mcp` 模块提供了一组**常用方法的轻量 typed wrapper**（参考 `docs/examples.md` 的用法示例），不覆盖完整 MCP schema；缺的部分可继续用 `serde_json::Value` 或自行实现 `McpRequest`/`McpNotification`。
 
 ## 常用命令
 

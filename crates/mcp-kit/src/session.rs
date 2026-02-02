@@ -53,10 +53,9 @@ impl Session {
     }
 
     pub async fn request(&self, method: &str, params: Option<Value>) -> anyhow::Result<Value> {
-        let params = params.unwrap_or(Value::Null);
         let outcome = tokio::time::timeout(
             self.request_timeout,
-            self.connection.client.request(method, params),
+            self.connection.client.request_optional(method, params),
         )
         .await;
         outcome
@@ -95,11 +94,23 @@ impl Session {
         params: Option<R::Params>,
     ) -> anyhow::Result<R::Result> {
         let params = match params {
-            Some(params) => Some(serde_json::to_value(params).context("serialize MCP params")?),
+            Some(params) => Some(serde_json::to_value(params).with_context(|| {
+                format!(
+                    "serialize MCP params: {} (server={})",
+                    R::METHOD,
+                    self.server_name
+                )
+            })?),
             None => None,
         };
         let result = self.request(R::METHOD, params).await?;
-        serde_json::from_value(result).context("deserialize MCP result")
+        serde_json::from_value(result).with_context(|| {
+            format!(
+                "deserialize MCP result: {} (server={})",
+                R::METHOD,
+                self.server_name
+            )
+        })
     }
 
     pub async fn notify_typed<N: McpNotification>(
@@ -107,7 +118,13 @@ impl Session {
         params: Option<N::Params>,
     ) -> anyhow::Result<()> {
         let params = match params {
-            Some(params) => Some(serde_json::to_value(params).context("serialize MCP params")?),
+            Some(params) => Some(serde_json::to_value(params).with_context(|| {
+                format!(
+                    "serialize MCP params: {} (server={})",
+                    N::METHOD,
+                    self.server_name
+                )
+            })?),
             None => None,
         };
         self.notify(N::METHOD, params).await

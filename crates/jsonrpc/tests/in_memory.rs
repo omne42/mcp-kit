@@ -113,3 +113,81 @@ async fn handles_server_to_client_request_and_responds() {
         .expect("server task completed")
         .expect("server task ok");
 }
+
+#[tokio::test]
+async fn notify_omits_params_when_none() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, _server_write) = tokio::io::split(server_stream);
+
+    let mut server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+        let line = lines
+            .next_line()
+            .await
+            .expect("read ok")
+            .expect("notification line");
+
+        let msg = parse_line(&line);
+        assert_eq!(msg["jsonrpc"], "2.0");
+        assert_eq!(msg["method"], "demo/notify");
+        assert!(msg.get("id").is_none());
+        assert!(msg.get("params").is_none());
+    });
+
+    let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .expect("client connect");
+    client.notify("demo/notify", None).await.expect("notify ok");
+
+    tokio::time::timeout(Duration::from_secs(1), &mut server_task)
+        .await
+        .expect("server task completed")
+        .expect("server task ok");
+}
+
+#[tokio::test]
+async fn request_optional_omits_params_when_none() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let mut server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+        let line = lines
+            .next_line()
+            .await
+            .expect("read ok")
+            .expect("request line");
+
+        let msg = parse_line(&line);
+        assert_eq!(msg["jsonrpc"], "2.0");
+        assert_eq!(msg["method"], "demo/noparams");
+        assert!(msg.get("params").is_none());
+        let id = msg["id"].clone();
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "ok": true },
+        });
+        let mut out = serde_json::to_string(&response).unwrap();
+        out.push('\n');
+        server_write.write_all(out.as_bytes()).await.unwrap();
+        server_write.flush().await.unwrap();
+    });
+
+    let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .expect("client connect");
+    let result = client
+        .request_optional("demo/noparams", None)
+        .await
+        .expect("request ok");
+    assert_eq!(result, serde_json::json!({ "ok": true }));
+
+    tokio::time::timeout(Duration::from_secs(1), &mut server_task)
+        .await
+        .expect("server task completed")
+        .expect("server task ok");
+}

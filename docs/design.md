@@ -20,7 +20,7 @@
 - `Config { client, servers: BTreeMap<String, ServerConfig> }`
 - `Manager`：连接缓存 + MCP initialize + request/notify 便捷方法
 - `Connection { child: Option<Child>, client }`（unix 连接没有 child）
-- `McpRequest` / `McpNotification`：轻量 typed method 抽象（可对照仓库 `example/` 目录里的 `mcp-types` 例子）
+- `McpRequest` / `McpNotification`：轻量 typed method 抽象（参考 `docs/examples.md` 的用法示例）
 - `mcp_kit::mcp`：常用 MCP method 的轻量 typed wrapper 子集（可选使用）
 - `Session`：单连接 MCP 会话（已完成 initialize，可直接 request/notify 与调用便捷方法）
 - `Manager::initialize_result`：暴露每个 server 的 initialize 响应（便于上层读取 serverInfo/capabilities 等信息）

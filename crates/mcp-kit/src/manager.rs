@@ -571,13 +571,20 @@ impl Manager {
         cwd: &Path,
     ) -> anyhow::Result<R::Result> {
         let params = match params {
-            Some(params) => Some(serde_json::to_value(params).context("serialize MCP params")?),
+            Some(params) => Some(serde_json::to_value(params).with_context(|| {
+                format!("serialize MCP params: {} (server={server_name})", R::METHOD)
+            })?),
             None => None,
         };
         let result = self
             .request(config, server_name, R::METHOD, params, cwd)
             .await?;
-        serde_json::from_value(result).context("deserialize MCP result")
+        serde_json::from_value(result).with_context(|| {
+            format!(
+                "deserialize MCP result: {} (server={server_name})",
+                R::METHOD
+            )
+        })
     }
 
     pub async fn request_typed_connected<R: McpRequest>(
@@ -586,13 +593,20 @@ impl Manager {
         params: Option<R::Params>,
     ) -> anyhow::Result<R::Result> {
         let params = match params {
-            Some(params) => Some(serde_json::to_value(params).context("serialize MCP params")?),
+            Some(params) => Some(serde_json::to_value(params).with_context(|| {
+                format!("serialize MCP params: {} (server={server_name})", R::METHOD)
+            })?),
             None => None,
         };
         let result = self
             .request_connected(server_name, R::METHOD, params)
             .await?;
-        serde_json::from_value(result).context("deserialize MCP result")
+        serde_json::from_value(result).with_context(|| {
+            format!(
+                "deserialize MCP result: {} (server={server_name})",
+                R::METHOD
+            )
+        })
     }
 
     pub async fn notify(
@@ -627,7 +641,9 @@ impl Manager {
         cwd: &Path,
     ) -> anyhow::Result<()> {
         let params = match params {
-            Some(params) => Some(serde_json::to_value(params).context("serialize MCP params")?),
+            Some(params) => Some(serde_json::to_value(params).with_context(|| {
+                format!("serialize MCP params: {} (server={server_name})", N::METHOD)
+            })?),
             None => None,
         };
         self.notify(config, server_name, N::METHOD, params, cwd)
@@ -640,7 +656,9 @@ impl Manager {
         params: Option<N::Params>,
     ) -> anyhow::Result<()> {
         let params = match params {
-            Some(params) => Some(serde_json::to_value(params).context("serialize MCP params")?),
+            Some(params) => Some(serde_json::to_value(params).with_context(|| {
+                format!("serialize MCP params: {} (server={server_name})", N::METHOD)
+            })?),
             None => None,
         };
         self.notify_connected(server_name, N::METHOD, params).await
@@ -952,6 +970,18 @@ impl Manager {
             .context("mcp initialize timed out")?
             .with_context(|| format!("mcp initialize failed (server={server_name})"))?;
 
+        if let Some(server_protocol_version) =
+            result.get("protocolVersion").and_then(|v| v.as_str())
+        {
+            if server_protocol_version != self.protocol_version {
+                anyhow::bail!(
+                    "mcp initialize protocolVersion mismatch (server={server_name}): client={}, server={}",
+                    self.protocol_version,
+                    server_protocol_version
+                );
+            }
+        }
+
         Self::notify_raw(
             self.request_timeout,
             client,
@@ -969,8 +999,7 @@ impl Manager {
         method: &str,
         params: Option<Value>,
     ) -> anyhow::Result<Value> {
-        let params = params.unwrap_or(Value::Null);
-        let outcome = tokio::time::timeout(timeout, client.request(method, params)).await;
+        let outcome = tokio::time::timeout(timeout, client.request_optional(method, params)).await;
         outcome
             .with_context(|| format!("mcp request timed out: {method}"))?
             .with_context(|| format!("mcp request failed: {method}"))
@@ -1327,11 +1356,13 @@ mod tests {
             let note_value: Value = serde_json::from_str(&note_line).unwrap();
             assert_eq!(note_value["jsonrpc"], "2.0");
             assert_eq!(note_value["method"], "notifications/initialized");
+            assert!(note_value.get("params").is_none());
 
             let ping_line = lines.next_line().await.unwrap().unwrap();
             let ping_value: Value = serde_json::from_str(&ping_line).unwrap();
             assert_eq!(ping_value["jsonrpc"], "2.0");
             assert_eq!(ping_value["method"], "ping");
+            assert!(ping_value.get("params").is_none());
             let ping_id = ping_value["id"].clone();
 
             let response = serde_json::json!({
@@ -1366,6 +1397,48 @@ mod tests {
                 .unwrap(),
             serde_json::json!({ "ok": true })
         );
+
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connect_io_rejects_initialize_protocol_version_mismatch() {
+        let (client_stream, server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let server_task = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            assert_eq!(init_value["jsonrpc"], "2.0");
+            assert_eq!(init_value["method"], "initialize");
+            let id = init_value["id"].clone();
+
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "protocolVersion": "1900-01-01" },
+            });
+            let mut response_line = serde_json::to_string(&response).unwrap();
+            response_line.push('\n');
+            server_write
+                .write_all(response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+        });
+
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
+        let err = match manager
+            .connect_io_session("srv", client_read, client_write)
+            .await
+        {
+            Ok(_) => panic!("expected protocolVersion mismatch"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("protocolVersion mismatch"));
 
         server_task.await.unwrap();
     }

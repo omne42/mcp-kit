@@ -13,7 +13,7 @@
 - `mcp-kit`：`mcp.json`（v1）解析、MCP server 连接与连接缓存管理（`Config/Manager/Connection`）。
 - `mcpctl`：基于配置的 MCP CLI（list-servers/list-tools/list-resources/list-prompts/call）。
 - `McpRequest` / `McpNotification`：轻量 typed method trait + `Manager::{request_typed, notify_typed}`。
-- `mcp_kit::mcp`：常用 MCP methods 的轻量 typed wrapper 子集（参考 `example/codex/codex-rs/mcp-types`）。
+- `mcp_kit::mcp`：常用 MCP methods 的轻量 typed wrapper 子集（参考 `docs/examples.md`）。
 - `transport=streamable_http`：原生支持远程 MCP server（HTTP SSE + POST），配置字段 `servers.<name>.url`。
 - `TrustMode`：安全默认不信任本地配置；需要显式切换到 Trusted 才允许从配置启动/连接 server。
 - `roots/list`：当配置了 `client.roots` 时，内建响应 server→client request，并自动声明 `capabilities.roots`。
@@ -30,8 +30,11 @@
 - `mcp_kit::Manager` 支持自定义 untrusted 下的 `streamable_http` 出站策略：`with_untrusted_streamable_http_policy(UntrustedStreamableHttpPolicy)`。
 - `mcpctl` 默认不信任本地配置：本地 stdio/unix 或需要读取 env secrets 的远程 server 需要 `--trust`。
 - `mcp-jsonrpc` 增加 DoS 防护：限制单条消息大小并使用有界队列缓存 server→client 的 requests/notifications。
+- `mcp-jsonrpc`：无参 requests/notifications 不再发送 `"params": null`（会省略 `params`）；新增 `Client::request_optional`。
+- `mcp-jsonrpc`：`streamable_http` 的 SSE connect 会校验 `Content-Type: text/event-stream`；HTTP 响应过大时会对对应 request 返回 error（避免 pending 悬挂）。
 - `mcp-kit`：`transport=unix|streamable_http` 现在只要配置里出现 `argv` 字段（即使为空数组）也会被拒绝。
 - `mcp_kit::mcp`（BREAKING）：无参请求/通知的 `Params` 改为 `()`；部分 list 请求的 `Params` 由 `Option<...>` 改为必填结构体；`Result` type alias 弃用，改用 `JsonValue`（或 `serde_json::Value`）。
+- `mcp-kit`：`Session/Manager` 的无参请求不再产生 `"params": null`；typed request 的 (de)serialize 错误包含 method/server；`initialize` 会检测 `protocolVersion` mismatch。
 - `mcp-jsonrpc` 的 `streamable_http` 增加超时能力：默认 connect timeout=10s；可选 per-request timeout（`mcp-kit` 会用 `Manager` 的 per-request timeout 进行设置）。
 - `mcp-jsonrpc` 的 `streamable_http` 默认不跟随 HTTP redirects（减少 SSRF 风险），可通过 `StreamableHttpOptions.follow_redirects` 显式开启。
 - `mcp-jsonrpc` 的 stdout 旋转日志支持保留上限：`StdoutLog.max_parts`（`mcp-kit` 配置字段 `servers.<name>.stdout_log.max_parts`）。

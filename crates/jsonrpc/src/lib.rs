@@ -167,7 +167,9 @@ impl ClientHandle {
         let mut msg = Map::new();
         msg.insert("jsonrpc".to_string(), Value::String("2.0".to_string()));
         msg.insert("method".to_string(), Value::String(method.to_string()));
-        msg.insert("params".to_string(), params.unwrap_or(Value::Null));
+        if let Some(params) = params.filter(|v| !v.is_null()) {
+            msg.insert("params".to_string(), params);
+        }
         let msg = Value::Object(msg);
 
         let mut line = serde_json::to_string(&msg)?;
@@ -177,6 +179,14 @@ impl ClientHandle {
     }
 
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, Error> {
+        self.request_optional(method, Some(params)).await
+    }
+
+    pub async fn request_optional(
+        &self,
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<Value, Error> {
         let id = Id::Integer(self.next_id.fetch_add(1, Ordering::Relaxed));
 
         let (tx, rx) = oneshot::channel::<Result<Value, Error>>();
@@ -186,12 +196,14 @@ impl ClientHandle {
         }
         let mut guard = PendingRequestGuard::new(self.pending.clone(), id.clone());
 
-        let req = serde_json::json!({
+        let mut req = serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": method,
-            "params": params,
         });
+        if let Some(params) = params.filter(|v| !v.is_null()) {
+            req["params"] = params;
+        }
 
         let mut line = serde_json::to_string(&req)?;
         line.push('\n');
@@ -435,6 +447,17 @@ impl Client {
             )));
         }
 
+        let content_type = sse_resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !content_type.starts_with("text/event-stream") {
+            return Err(Error::Protocol(format!(
+                "streamable http SSE connect failed: expected content-type text/event-stream, got {content_type}"
+            )));
+        }
+
         if let Some(value) = sse_resp.headers().get("mcp-session-id") {
             if let Ok(value) = value.to_str() {
                 *session_id.lock().await = Some(value.to_string());
@@ -555,6 +578,14 @@ impl Client {
 
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, Error> {
         self.handle.request(method, params).await
+    }
+
+    pub async fn request_optional(
+        &self,
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<Value, Error> {
+        self.handle.request_optional(method, params).await
     }
 
     pub async fn wait(&mut self) -> Result<std::process::ExitStatus, Error> {
@@ -955,6 +986,19 @@ async fn http_post_bridge_loop(
             match body {
                 Ok(body) if !body.is_empty() => {
                     if body.len() > limits.max_message_bytes {
+                        if let Some(id) = id {
+                            let _ = write_error_response(
+                                &writer,
+                                id,
+                                HTTP_TRANSPORT_ERROR,
+                                "http response too large".to_string(),
+                                Some(serde_json::json!({
+                                    "max_bytes": limits.max_message_bytes,
+                                    "actual_bytes": body.len(),
+                                })),
+                            )
+                            .await;
+                        }
                         continue;
                     }
                     let _ = write_json_line(&writer, &body).await;
