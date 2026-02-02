@@ -18,7 +18,9 @@
 
 ### deny_unknown_fields / 未知字段导致解析失败
 
-原因：schema 是 fail-closed，顶层和 `servers.<name>` 都启用了 `deny_unknown_fields`。
+原因：对 `mcp.json v1` schema，`mcp-kit` 采用 fail-closed：顶层和 `servers.<name>` 都启用了 `deny_unknown_fields`。
+
+说明：如果你使用的是 Cursor/Claude Code 常见的 `.mcp.json` / `mcpServers` 兼容格式，未知字段通常会被忽略；但字段类型不匹配、缺少必要字段仍会报错。
 
 解决：删除拼写错误/未支持的字段；或升级代码以支持新字段。
 

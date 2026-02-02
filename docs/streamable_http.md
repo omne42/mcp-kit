@@ -22,6 +22,16 @@
 
 > 默认使用同一个 `url` 同时承担 SSE 与 POST；也支持分离的 `sse_url/http_url`。
 
+### 兼容：握手前 SSE 可能返回 405
+
+一些实现会在 “initialize/initialized” 完成前拒绝建立 inbound SSE（`GET` 返回 `405 Method Not Allowed`）。
+
+`mcp-jsonrpc` 的行为：
+
+- 初次 `GET SSE` 返回 405：不会直接报错；client 仍可通过 POST 工作
+- 当某次 POST 返回 `202 Accepted`（或首次获得 `mcp-session-id`）后，会自动重试建立 inbound SSE
+- 一旦 inbound SSE 建立成功，如果后续 SSE 断开/失败，会 **fail-fast** 关闭 client（避免静默丢失推送）
+
 ## 会话粘连：`mcp-session-id` header
 
 如果 server 在响应头返回 `mcp-session-id`：

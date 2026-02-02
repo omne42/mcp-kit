@@ -46,7 +46,7 @@ struct ServerConfigFile {
     http_url: Option<String>,
     #[serde(default)]
     bearer_token_env_var: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "headers")]
     http_headers: BTreeMap<String, String>,
     #[serde(default)]
     env_http_headers: BTreeMap<String, String>,
@@ -54,6 +54,55 @@ struct ServerConfigFile {
     env: BTreeMap<String, String>,
     #[serde(default)]
     stdout_log: Option<StdoutLogConfigFile>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ExternalCommandConfigFile {
+    String(String),
+    Array(Vec<String>),
+}
+
+#[derive(Debug, Deserialize)]
+struct ExternalServerConfigFile {
+    #[serde(default)]
+    transport: Option<Transport>,
+    #[serde(rename = "type", default)]
+    server_type: Option<String>,
+    #[serde(default)]
+    command: Option<ExternalCommandConfigFile>,
+    #[serde(default)]
+    args: Option<Vec<String>>,
+    #[serde(default)]
+    argv: Option<Vec<String>>,
+    #[serde(default)]
+    unix_path: Option<PathBuf>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    sse_url: Option<String>,
+    #[serde(default)]
+    http_url: Option<String>,
+    #[serde(default)]
+    bearer_token_env_var: Option<String>,
+    #[serde(default, alias = "headers")]
+    http_headers: BTreeMap<String, String>,
+    #[serde(default)]
+    env_http_headers: BTreeMap<String, String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    environment: BTreeMap<String, String>,
+    #[serde(default)]
+    stdout_log: Option<StdoutLogConfigFile>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    description: Option<String>,
+    #[serde(flatten)]
+    #[allow(dead_code)]
+    extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -171,10 +220,34 @@ impl Config {
             }
         };
 
-        let cfg: ConfigFile = serde_json::from_str(&contents).with_context(|| match &path {
+        let parse_ctx = match &path {
             Some(path) => format!("parse {}", path.display()),
             None => "parse mcp config".to_string(),
-        })?;
+        };
+
+        let json: Value = serde_json::from_str(&contents).with_context(|| parse_ctx.clone())?;
+        let cfg: ConfigFile = match json {
+            Value::Object(mut root) => {
+                if root.contains_key("version") {
+                    serde_json::from_value(Value::Object(root))
+                        .with_context(|| parse_ctx.clone())?
+                } else if root.contains_key("servers") {
+                    anyhow::bail!(
+                        "unsupported mcp.json format: missing `version` (expected v{MCP_CONFIG_VERSION})"
+                    );
+                } else if let Some(mcp_servers) = root.remove("mcpServers") {
+                    let Value::Object(servers) = mcp_servers else {
+                        anyhow::bail!(
+                            "unsupported mcpServers format: `mcpServers` must be an object"
+                        );
+                    };
+                    return Self::load_external_servers(thread_root, path, servers);
+                } else {
+                    return Self::load_external_servers(thread_root, path, root);
+                }
+            }
+            _ => anyhow::bail!("invalid mcp config: expected a JSON object"),
+        };
         if cfg.version != MCP_CONFIG_VERSION {
             anyhow::bail!(
                 "unsupported mcp.json version {} (expected {})",
@@ -461,6 +534,360 @@ impl Config {
                     stdout_log,
                 },
             );
+        }
+
+        Ok(Self {
+            path,
+            client,
+            servers,
+        })
+    }
+
+    fn load_external_servers(
+        thread_root: &Path,
+        path: Option<PathBuf>,
+        servers_value: serde_json::Map<String, Value>,
+    ) -> anyhow::Result<Self> {
+        let client = ClientConfig::default();
+        let mut servers = BTreeMap::<String, ServerConfig>::new();
+
+        for (name, server_value) in servers_value {
+            if name == "$schema" {
+                continue;
+            }
+            if !is_valid_server_name(&name) {
+                anyhow::bail!("invalid mcp server name: {name}");
+            }
+
+            let server: ExternalServerConfigFile = serde_json::from_value(server_value)
+                .with_context(|| {
+                    if let Some(path) = &path {
+                        format!("parse {} servers.{name}", path.display())
+                    } else {
+                        format!("parse mcp config servers.{name}")
+                    }
+                })?;
+
+            if matches!(server.enabled, Some(false)) {
+                continue;
+            }
+
+            let transport = match server.transport {
+                Some(transport) => transport,
+                None => {
+                    if server.command.is_some()
+                        || server.argv.is_some()
+                        || server.args.as_ref().is_some_and(|args| !args.is_empty())
+                    {
+                        Transport::Stdio
+                    } else if server.unix_path.is_some() {
+                        Transport::Unix
+                    } else if server.url.is_some()
+                        || server.sse_url.is_some()
+                        || server.http_url.is_some()
+                        || server.server_type.is_some()
+                    {
+                        Transport::StreamableHttp
+                    } else {
+                        anyhow::bail!(
+                            "mcp server {name}: missing transport (expected command/argv, unix_path, or url)"
+                        );
+                    }
+                }
+            };
+
+            let server_type = server
+                .server_type
+                .as_deref()
+                .map(|v| v.trim().to_ascii_lowercase());
+            if let Some(server_type) = server_type.as_deref() {
+                match server_type {
+                    "http" | "sse" | "streamable_http" => {}
+                    _ => {
+                        anyhow::bail!("mcp server {name}: unsupported type: {server_type}");
+                    }
+                }
+            }
+
+            let stdout_log = match server.stdout_log {
+                Some(log) => {
+                    if log.path.as_os_str().is_empty() {
+                        anyhow::bail!("mcp server {name}: stdout_log.path must not be empty");
+                    }
+                    let path = if log.path.is_absolute() {
+                        log.path
+                    } else {
+                        thread_root.join(log.path)
+                    };
+                    let max_bytes_per_part = log
+                        .max_bytes_per_part
+                        .unwrap_or(DEFAULT_STDOUT_LOG_MAX_BYTES_PER_PART)
+                        .max(1);
+                    let max_parts = log.max_parts.unwrap_or(DEFAULT_STDOUT_LOG_MAX_PARTS);
+                    let max_parts = if max_parts == 0 {
+                        None
+                    } else {
+                        Some(max_parts.max(1))
+                    };
+                    Some(StdoutLogConfig {
+                        path,
+                        max_bytes_per_part,
+                        max_parts,
+                    })
+                }
+                None => None,
+            };
+
+            match transport {
+                Transport::Stdio => {
+                    if server.unix_path.is_some() {
+                        anyhow::bail!(
+                            "mcp server {name}: unix_path is only valid for transport=unix"
+                        );
+                    }
+                    if server.url.is_some() || server.sse_url.is_some() || server.http_url.is_some()
+                    {
+                        anyhow::bail!(
+                            "mcp server {name}: url/sse_url/http_url are only valid for transport=streamable_http"
+                        );
+                    }
+                    if server.bearer_token_env_var.is_some()
+                        || !server.http_headers.is_empty()
+                        || !server.env_http_headers.is_empty()
+                    {
+                        anyhow::bail!(
+                            "mcp server {name}: http headers/auth are only valid for transport=streamable_http"
+                        );
+                    }
+
+                    let argv = match (server.argv, server.command) {
+                        (Some(argv), _) => argv,
+                        (None, Some(command)) => {
+                            let mut argv = match command {
+                                ExternalCommandConfigFile::String(cmd) => vec![cmd],
+                                ExternalCommandConfigFile::Array(cmd) => cmd,
+                            };
+                            if let Some(args) = server.args {
+                                argv.extend(args);
+                            }
+                            argv
+                        }
+                        (None, None) => Vec::new(),
+                    };
+                    if argv.is_empty() {
+                        anyhow::bail!("mcp server {name}: argv must not be empty");
+                    }
+                    for (idx, arg) in argv.iter().enumerate() {
+                        if arg.trim().is_empty() {
+                            anyhow::bail!("mcp server {name}: argv[{idx}] must not be empty");
+                        }
+                    }
+
+                    let mut env = server.env;
+                    for (k, v) in server.environment {
+                        env.insert(k, v);
+                    }
+                    for (key, value) in env.iter() {
+                        if key.trim().is_empty() {
+                            anyhow::bail!("mcp server {name}: env key must not be empty");
+                        }
+                        if value.trim().is_empty() {
+                            anyhow::bail!("mcp server {name}: env[{key}] must not be empty");
+                        }
+                    }
+
+                    servers.insert(
+                        name,
+                        ServerConfig {
+                            transport: Transport::Stdio,
+                            argv,
+                            unix_path: None,
+                            url: None,
+                            sse_url: None,
+                            http_url: None,
+                            bearer_token_env_var: None,
+                            http_headers: BTreeMap::new(),
+                            env_http_headers: BTreeMap::new(),
+                            env,
+                            stdout_log,
+                        },
+                    );
+                }
+                Transport::Unix => {
+                    if server.command.is_some() || server.argv.is_some() || server.args.is_some() {
+                        anyhow::bail!(
+                            "mcp server {name}: command/args/argv are only valid for transport=stdio"
+                        );
+                    }
+                    if server.url.is_some() || server.sse_url.is_some() || server.http_url.is_some()
+                    {
+                        anyhow::bail!(
+                            "mcp server {name}: url/sse_url/http_url are only valid for transport=streamable_http"
+                        );
+                    }
+                    if !server.env.is_empty()
+                        || !server.environment.is_empty()
+                        || stdout_log.is_some()
+                    {
+                        anyhow::bail!(
+                            "mcp server {name}: env/stdout_log are not supported for transport=unix"
+                        );
+                    }
+                    if server.bearer_token_env_var.is_some()
+                        || !server.http_headers.is_empty()
+                        || !server.env_http_headers.is_empty()
+                    {
+                        anyhow::bail!(
+                            "mcp server {name}: http headers/auth are only valid for transport=streamable_http"
+                        );
+                    }
+
+                    let unix_path = server.unix_path.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "mcp server {name}: unix_path is required for transport=unix"
+                        )
+                    })?;
+                    if unix_path.as_os_str().is_empty() {
+                        anyhow::bail!("mcp server {name}: unix_path must not be empty");
+                    }
+                    let unix_path = if unix_path.is_absolute() {
+                        unix_path
+                    } else {
+                        thread_root.join(unix_path)
+                    };
+
+                    servers.insert(
+                        name,
+                        ServerConfig {
+                            transport: Transport::Unix,
+                            argv: Vec::new(),
+                            unix_path: Some(unix_path),
+                            url: None,
+                            sse_url: None,
+                            http_url: None,
+                            bearer_token_env_var: None,
+                            http_headers: BTreeMap::new(),
+                            env_http_headers: BTreeMap::new(),
+                            env: BTreeMap::new(),
+                            stdout_log: None,
+                        },
+                    );
+                }
+                Transport::StreamableHttp => {
+                    if server.command.is_some() || server.argv.is_some() || server.args.is_some() {
+                        anyhow::bail!(
+                            "mcp server {name}: command/args/argv are only valid for transport=stdio"
+                        );
+                    }
+                    if server.unix_path.is_some() {
+                        anyhow::bail!(
+                            "mcp server {name}: unix_path is only valid for transport=unix"
+                        );
+                    }
+                    if !server.env.is_empty() || !server.environment.is_empty() {
+                        anyhow::bail!(
+                            "mcp server {name}: env is not supported for transport=streamable_http"
+                        );
+                    }
+                    if stdout_log.is_some() {
+                        anyhow::bail!(
+                            "mcp server {name}: stdout_log is not supported for transport=streamable_http"
+                        );
+                    }
+
+                    let (url, sse_url, http_url) = match (
+                        server.url,
+                        server.sse_url,
+                        server.http_url,
+                    ) {
+                        (Some(url), None, None) => {
+                            if url.trim().is_empty() {
+                                anyhow::bail!("mcp server {name}: url must not be empty");
+                            }
+                            (Some(url), None, None)
+                        }
+                        (None, Some(sse_url), Some(http_url)) => {
+                            if sse_url.trim().is_empty() {
+                                anyhow::bail!("mcp server {name}: sse_url must not be empty");
+                            }
+                            if http_url.trim().is_empty() {
+                                anyhow::bail!("mcp server {name}: http_url must not be empty");
+                            }
+                            (None, Some(sse_url), Some(http_url))
+                        }
+                        (None, Some(sse_url), None) => {
+                            if sse_url.trim().is_empty() {
+                                anyhow::bail!("mcp server {name}: sse_url must not be empty");
+                            }
+                            (Some(sse_url), None, None)
+                        }
+                        (None, None, Some(http_url)) => {
+                            if http_url.trim().is_empty() {
+                                anyhow::bail!("mcp server {name}: http_url must not be empty");
+                            }
+                            (Some(http_url), None, None)
+                        }
+                        (None, None, None) => {
+                            anyhow::bail!(
+                                "mcp server {name}: url (or sse_url + http_url) is required for transport=streamable_http"
+                            );
+                        }
+                        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+                            anyhow::bail!(
+                                "mcp server {name}: set either url or (sse_url + http_url), not both"
+                            );
+                        }
+                    };
+
+                    if let Some(env_var) = &server.bearer_token_env_var {
+                        if env_var.trim().is_empty() {
+                            anyhow::bail!(
+                                "mcp server {name}: bearer_token_env_var must not be empty"
+                            );
+                        }
+                    }
+
+                    for (header, value) in server.http_headers.iter() {
+                        if header.trim().is_empty() {
+                            anyhow::bail!("mcp server {name}: http_headers key must not be empty");
+                        }
+                        if value.trim().is_empty() {
+                            anyhow::bail!(
+                                "mcp server {name}: http_headers[{header}] must not be empty"
+                            );
+                        }
+                    }
+                    for (header, env_var) in server.env_http_headers.iter() {
+                        if header.trim().is_empty() {
+                            anyhow::bail!(
+                                "mcp server {name}: env_http_headers key must not be empty"
+                            );
+                        }
+                        if env_var.trim().is_empty() {
+                            anyhow::bail!(
+                                "mcp server {name}: env_http_headers[{header}] must not be empty"
+                            );
+                        }
+                    }
+
+                    servers.insert(
+                        name,
+                        ServerConfig {
+                            transport: Transport::StreamableHttp,
+                            argv: Vec::new(),
+                            unix_path: None,
+                            url,
+                            sse_url,
+                            http_url,
+                            bearer_token_env_var: server.bearer_token_env_var,
+                            http_headers: server.http_headers,
+                            env_http_headers: server.env_http_headers,
+                            env: BTreeMap::new(),
+                            stdout_log: None,
+                        },
+                    );
+                }
+            }
         }
 
         Ok(Self {
@@ -804,6 +1231,70 @@ mod tests {
 
         let err = Config::load(dir.path(), None).await.unwrap_err();
         assert!(err.to_string().contains("transport=unix"));
+    }
+
+    #[tokio::test]
+    async fn load_parses_claude_code_style_dot_mcp_json() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join(".mcp.json"),
+            r#"{
+  "filesystem": {
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+    "env": { "LOG_LEVEL": "debug" }
+  }
+}"#,
+        )
+        .await
+        .unwrap();
+
+        let cfg = Config::load(dir.path(), None).await.unwrap();
+        let server = cfg.servers.get("filesystem").unwrap();
+        assert_eq!(cfg.path.as_ref().unwrap(), &dir.path().join(".mcp.json"));
+        assert_eq!(server.transport, Transport::Stdio);
+        assert_eq!(
+            server.argv,
+            vec![
+                "npx".to_string(),
+                "-y".to_string(),
+                "@modelcontextprotocol/server-filesystem".to_string(),
+                "/tmp".to_string()
+            ]
+        );
+        assert_eq!(
+            server.env.get("LOG_LEVEL").map(String::as_str),
+            Some("debug")
+        );
+    }
+
+    #[tokio::test]
+    async fn load_parses_cursor_mcp_servers_wrapper() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{
+  "$schema": "https://cursor.com/mcp.schema.json",
+  "mcpServers": {
+    "litellm": {
+      "url": "http://example.com/mcp",
+      "type": "http",
+      "headers": { "X-Test": "1" }
+    }
+  }
+}"#,
+        )
+        .await
+        .unwrap();
+
+        let cfg = Config::load(dir.path(), None).await.unwrap();
+        let server = cfg.servers.get("litellm").unwrap();
+        assert_eq!(server.transport, Transport::StreamableHttp);
+        assert_eq!(server.url.as_deref(), Some("http://example.com/mcp"));
+        assert_eq!(
+            server.http_headers.get("X-Test").map(String::as_str),
+            Some("1")
+        );
     }
 
     #[tokio::test]

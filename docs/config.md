@@ -2,7 +2,9 @@
 
 本章描述 `mcp_kit::Config` 支持的 `mcp.json`（v1）schema、默认发现顺序与各字段约束。
 
-> 说明：schema 是 fail-closed（`deny_unknown_fields`）。这对安全非常重要：拼写错误不会被静默忽略。
+> 说明：`mcp.json v1` schema 是 fail-closed（`deny_unknown_fields`）。这对安全非常重要：拼写错误不会被静默忽略。
+>
+> 另外，`Config::load` 也支持一些生态里常见的 `.mcp.json` / `mcpServers` 兼容格式（best-effort，会忽略未支持字段），见下文「兼容格式」。
 
 ## 文件发现顺序
 
@@ -12,6 +14,53 @@
 2. `./mcp.json`
 
 CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
+
+## 兼容格式（best-effort）
+
+除了本文档描述的 `mcp.json v1`，`mcp-kit` 还支持两种常见格式，便于直接复用 Cursor / Claude Code 等工具的配置。
+
+### Cursor / `mcpServers` 包裹格式
+
+示例（来自多种 MCP 客户端的常见写法）：
+
+```json
+{
+  "mcpServers": {
+    "litellm": {
+      "url": "http://localhost:4000/everything/mcp",
+      "type": "http",
+      "headers": { "Authorization": "Bearer sk-..." }
+    }
+  }
+}
+```
+
+映射规则（当前实现）：
+
+- 每个 entry 会被视为一个 server
+- `url` / `headers` 会映射到 `transport=streamable_http`（HTTP SSE + POST）
+- `type` 目前仅用于校验（接受：`http|sse|streamable_http`），不改变映射
+
+### Claude Code `.mcp.json` 直接 server map
+
+示例：
+
+```json
+{
+  "filesystem": {
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/allowed/path"],
+    "env": { "LOG_LEVEL": "debug" }
+  }
+}
+```
+
+映射规则（当前实现）：
+
+- `command` + `args` → `transport=stdio` 的 `argv`
+- `env` 会注入到 child process
+
+> 注意：兼容格式不会解析 `client` 配置（`protocol_version/capabilities/roots`）；如果你需要这些功能，使用 `mcp.json v1`。
 
 ## 顶层 schema
 
