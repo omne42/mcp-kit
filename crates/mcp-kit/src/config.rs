@@ -281,7 +281,7 @@ impl Config {
                     (argv, None)
                 }
                 Transport::Unix => {
-                    if server.argv.as_ref().is_some_and(|v| !v.is_empty()) {
+                    if server.argv.is_some() {
                         anyhow::bail!("mcp server {name}: argv is not allowed for transport=unix");
                     }
                     if server.url.is_some() {
@@ -321,7 +321,7 @@ impl Config {
                     (Vec::new(), Some(unix_path))
                 }
                 Transport::StreamableHttp => {
-                    if server.argv.as_ref().is_some_and(|v| !v.is_empty()) {
+                    if server.argv.is_some() {
                         anyhow::bail!(
                             "mcp server {name}: argv is not allowed for transport=streamable_http"
                         );
@@ -693,6 +693,34 @@ mod tests {
 
         let err = Config::load(dir.path(), None).await.unwrap_err();
         assert!(err.to_string().contains("transport=unix"));
+    }
+
+    #[tokio::test]
+    async fn load_denies_unix_transport_with_empty_argv() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{ "version": 1, "servers": { "sock": { "transport": "unix", "argv": [], "unix_path": "/tmp/mcp.sock" } } }"#,
+        )
+        .await
+        .unwrap();
+
+        let err = Config::load(dir.path(), None).await.unwrap_err();
+        assert!(err.to_string().contains("transport=unix"));
+    }
+
+    #[tokio::test]
+    async fn load_denies_streamable_http_with_empty_argv() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "argv": [], "url": "https://example.com/mcp" } } }"#,
+        )
+        .await
+        .unwrap();
+
+        let err = Config::load(dir.path(), None).await.unwrap_err();
+        assert!(err.to_string().contains("transport=streamable_http"));
     }
 
     #[tokio::test]

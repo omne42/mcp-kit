@@ -21,7 +21,7 @@ use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -120,11 +120,36 @@ pub enum Id {
 
 type PendingRequests = Arc<Mutex<HashMap<Id, oneshot::Sender<Result<Value, Error>>>>>;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClientStats {
+    pub invalid_json_lines: u64,
+    pub dropped_notifications_full: u64,
+    pub dropped_notifications_closed: u64,
+}
+
+#[derive(Debug, Default)]
+struct ClientStatsInner {
+    invalid_json_lines: AtomicU64,
+    dropped_notifications_full: AtomicU64,
+    dropped_notifications_closed: AtomicU64,
+}
+
+impl ClientStatsInner {
+    fn snapshot(&self) -> ClientStats {
+        ClientStats {
+            invalid_json_lines: self.invalid_json_lines.load(Ordering::Relaxed),
+            dropped_notifications_full: self.dropped_notifications_full.load(Ordering::Relaxed),
+            dropped_notifications_closed: self.dropped_notifications_closed.load(Ordering::Relaxed),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ClientHandle {
     write: Arc<tokio::sync::Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
     next_id: Arc<AtomicI64>,
     pending: PendingRequests,
+    stats: Arc<ClientStatsInner>,
 }
 
 impl std::fmt::Debug for ClientHandle {
@@ -134,6 +159,10 @@ impl std::fmt::Debug for ClientHandle {
 }
 
 impl ClientHandle {
+    pub fn stats(&self) -> ClientStats {
+        self.stats.snapshot()
+    }
+
     pub async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), Error> {
         let mut msg = Map::new();
         msg.insert("jsonrpc".to_string(), Value::String("2.0".to_string()));
@@ -237,6 +266,10 @@ pub struct Client {
 }
 
 impl Client {
+    pub fn stats(&self) -> ClientStats {
+        self.handle.stats()
+    }
+
     pub async fn connect_io<R, W>(read: R, write: W) -> Result<Self, Error>
     where
         R: AsyncRead + Unpin + Send + 'static,
@@ -465,20 +498,25 @@ impl Client {
         let (notify_tx, notify_rx) = mpsc::channel::<Notification>(notify_cap);
         let (request_tx, request_rx) = mpsc::channel::<IncomingRequest>(request_cap);
         let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
+        let stats = Arc::new(ClientStatsInner::default());
         let write = Arc::new(tokio::sync::Mutex::new(Box::new(write) as _));
         let handle = ClientHandle {
             write,
             next_id: Arc::new(AtomicI64::new(1)),
             pending: pending.clone(),
+            stats: stats.clone(),
         };
         let task = spawn_reader_task(
             read,
-            pending,
-            notify_tx,
-            request_tx,
-            handle.clone(),
-            options.stdout_log,
-            options.limits,
+            ReaderTaskContext {
+                pending,
+                stats,
+                notify_tx,
+                request_tx,
+                responder: handle.clone(),
+                stdout_log: options.stdout_log,
+                limits: options.limits,
+            },
         );
 
         Ok(Self {
@@ -606,19 +644,31 @@ impl IncomingRequest {
     }
 }
 
-fn spawn_reader_task<R>(
-    reader: R,
+struct ReaderTaskContext {
     pending: PendingRequests,
+    stats: Arc<ClientStatsInner>,
     notify_tx: mpsc::Sender<Notification>,
     request_tx: mpsc::Sender<IncomingRequest>,
     responder: ClientHandle,
     stdout_log: Option<StdoutLog>,
     limits: Limits,
-) -> tokio::task::JoinHandle<()>
+}
+
+fn spawn_reader_task<R>(reader: R, ctx: ReaderTaskContext) -> tokio::task::JoinHandle<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
+        let ReaderTaskContext {
+            pending,
+            stats,
+            notify_tx,
+            request_tx,
+            responder,
+            stdout_log,
+            limits,
+        } = ctx;
+
         const METHOD_NOT_FOUND: i64 = -32601;
         const CLIENT_OVERLOADED: i64 = -32000;
         let mut log_state = match stdout_log {
@@ -643,7 +693,10 @@ where
                     }
                     let value: Value = match serde_json::from_slice(&line) {
                         Ok(value) => value,
-                        Err(_) => continue,
+                        Err(_) => {
+                            stats.invalid_json_lines.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
                     };
 
                     let Some(method) = value.get("method").and_then(|v| v.as_str()) else {
@@ -684,10 +737,22 @@ where
                         continue;
                     }
 
-                    let _ = notify_tx.try_send(Notification {
+                    match notify_tx.try_send(Notification {
                         method: method.to_string(),
                         params,
-                    });
+                    }) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            stats
+                                .dropped_notifications_full
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            stats
+                                .dropped_notifications_closed
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
                 }
                 Ok(None) => {
                     let err = Error::Protocol("server closed connection".to_string());
@@ -1379,5 +1444,69 @@ mod streamable_http_tests {
             out,
             b"{\"jsonrpc\":\"2.0\",\"method\":\"demo/notify\",\"params\":{}}\n"
         );
+    }
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn stats_tracks_invalid_json_lines() {
+        let (client_stream, server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (_server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let client = Client::connect_io(client_read, client_write).await.unwrap();
+
+        server_write.write_all(b"not-json\n").await.unwrap();
+        server_write.flush().await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if client.stats().invalid_json_lines >= 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stats_tracks_dropped_notifications() {
+        let (client_stream, server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (_server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let mut options = SpawnOptions::default();
+        options.limits.notifications_capacity = 1;
+        let client = Client::connect_io_with_options(client_read, client_write, options)
+            .await
+            .unwrap();
+
+        let note = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "demo/notify",
+            "params": {},
+        });
+        let mut out = serde_json::to_string(&note).unwrap();
+        out.push('\n');
+        server_write.write_all(out.as_bytes()).await.unwrap();
+        server_write.write_all(out.as_bytes()).await.unwrap();
+        server_write.flush().await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if client.stats().dropped_notifications_full >= 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 }

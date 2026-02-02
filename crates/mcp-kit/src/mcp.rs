@@ -8,21 +8,24 @@ use serde_json::Value;
 
 use crate::{McpNotification, McpRequest, Root};
 
-pub type Result = Value;
+pub type JsonValue = Value;
+
+#[deprecated(note = "Use `JsonValue` (or `serde_json::Value`) instead.")]
+pub type Result = JsonValue;
 
 pub enum PingRequest {}
 
 impl McpRequest for PingRequest {
     const METHOD: &'static str = "ping";
-    type Params = Option<Value>;
-    type Result = Result;
+    type Params = ();
+    type Result = JsonValue;
 }
 
 pub enum ListRootsRequest {}
 
 impl McpRequest for ListRootsRequest {
     const METHOD: &'static str = "roots/list";
-    type Params = Option<Value>;
+    type Params = ();
     type Result = ListRootsResult;
 }
 
@@ -35,7 +38,7 @@ pub enum ListToolsRequest {}
 
 impl McpRequest for ListToolsRequest {
     const METHOD: &'static str = "tools/list";
-    type Params = Option<ListToolsRequestParams>;
+    type Params = ListToolsRequestParams;
     type Result = ListToolsResult;
 }
 
@@ -161,7 +164,7 @@ pub enum ListResourcesRequest {}
 
 impl McpRequest for ListResourcesRequest {
     const METHOD: &'static str = "resources/list";
-    type Params = Option<ListResourcesRequestParams>;
+    type Params = ListResourcesRequestParams;
     type Result = ListResourcesResult;
 }
 
@@ -224,7 +227,7 @@ pub enum ListResourceTemplatesRequest {}
 
 impl McpRequest for ListResourceTemplatesRequest {
     const METHOD: &'static str = "resources/templates/list";
-    type Params = Option<ListResourceTemplatesRequestParams>;
+    type Params = ListResourceTemplatesRequestParams;
     type Result = ListResourceTemplatesResult;
 }
 
@@ -307,7 +310,7 @@ pub enum SubscribeRequest {}
 impl McpRequest for SubscribeRequest {
     const METHOD: &'static str = "resources/subscribe";
     type Params = SubscribeRequestParams;
-    type Result = Result;
+    type Result = JsonValue;
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -320,7 +323,7 @@ pub enum UnsubscribeRequest {}
 impl McpRequest for UnsubscribeRequest {
     const METHOD: &'static str = "resources/unsubscribe";
     type Params = UnsubscribeRequestParams;
-    type Result = Result;
+    type Result = JsonValue;
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -332,7 +335,7 @@ pub enum ListPromptsRequest {}
 
 impl McpRequest for ListPromptsRequest {
     const METHOD: &'static str = "prompts/list";
-    type Params = Option<ListPromptsRequestParams>;
+    type Params = ListPromptsRequestParams;
     type Result = ListPromptsResult;
 }
 
@@ -408,7 +411,7 @@ pub enum SetLevelRequest {}
 impl McpRequest for SetLevelRequest {
     const METHOD: &'static str = "logging/setLevel";
     type Params = SetLevelRequestParams;
-    type Result = Result;
+    type Result = JsonValue;
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -421,40 +424,40 @@ pub enum CompleteRequest {}
 impl McpRequest for CompleteRequest {
     const METHOD: &'static str = "completion/complete";
     type Params = Value;
-    type Result = Result;
+    type Result = JsonValue;
 }
 
 pub enum InitializedNotification {}
 
 impl McpNotification for InitializedNotification {
     const METHOD: &'static str = "notifications/initialized";
-    type Params = Option<Value>;
+    type Params = ();
 }
 
 pub enum RootsListChangedNotification {}
 
 impl McpNotification for RootsListChangedNotification {
     const METHOD: &'static str = "notifications/roots/list_changed";
-    type Params = Option<Value>;
+    type Params = ();
 }
 
 pub enum ToolsListChangedNotification {}
 
 impl McpNotification for ToolsListChangedNotification {
     const METHOD: &'static str = "notifications/tools/list_changed";
-    type Params = Option<Value>;
+    type Params = ();
 }
 
 pub enum PromptsListChangedNotification {}
 
 impl McpNotification for PromptsListChangedNotification {
     const METHOD: &'static str = "notifications/prompts/list_changed";
-    type Params = Option<Value>;
+    type Params = ();
 }
 
 pub enum ResourcesListChangedNotification {}
 
 impl McpNotification for ResourcesListChangedNotification {
     const METHOD: &'static str = "notifications/resources/list_changed";
-    type Params = Option<Value>;
+    type Params = ();
 }
