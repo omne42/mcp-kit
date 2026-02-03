@@ -287,13 +287,9 @@ impl Config {
         let json: Value = serde_json::from_str(&contents).with_context(|| parse_ctx.clone())?;
         let cfg: ConfigFile = match json {
             Value::Object(mut root) => {
-                if root.contains_key("version") {
+                if matches!(root.get("version"), Some(Value::Number(_))) {
                     serde_json::from_value(Value::Object(root))
                         .with_context(|| parse_ctx.clone())?
-                } else if root.contains_key("servers") {
-                    anyhow::bail!(
-                        "unsupported mcp.json format: missing `version` (expected v{MCP_CONFIG_VERSION})"
-                    );
                 } else if let Some(mcp_servers) = root.remove("mcpServers") {
                     let Value::Object(servers) = mcp_servers else {
                         anyhow::bail!(
@@ -301,6 +297,10 @@ impl Config {
                         );
                     };
                     return Self::load_external_servers(thread_root, path, servers);
+                } else if root.contains_key("servers") {
+                    anyhow::bail!(
+                        "unsupported mcp.json format: missing `version` (expected v{MCP_CONFIG_VERSION})"
+                    );
                 } else {
                     return Self::load_external_servers(thread_root, path, root);
                 }
@@ -1453,6 +1453,42 @@ mod tests {
         assert_eq!(
             server.http_headers.get("X-Test").map(String::as_str),
             Some("1")
+        );
+    }
+
+    #[tokio::test]
+    async fn load_parses_mcp_servers_wrapper_even_with_version_string() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join("plugin.json"),
+            r#"{
+  "name": "my-plugin",
+  "version": "1.0.0",
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "echo", "hi"]
+    }
+  }
+}"#,
+        )
+        .await
+        .unwrap();
+
+        let cfg = Config::load(dir.path(), Some(PathBuf::from("plugin.json")))
+            .await
+            .unwrap();
+        assert_eq!(cfg.path.as_ref().unwrap(), &dir.path().join("plugin.json"));
+        let server = cfg.servers.get("filesystem").unwrap();
+        assert_eq!(server.transport, Transport::Stdio);
+        assert_eq!(
+            server.argv,
+            vec![
+                "npx".to_string(),
+                "-y".to_string(),
+                "echo".to_string(),
+                "hi".to_string()
+            ]
         );
     }
 

@@ -37,7 +37,8 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     allow_http: bool,
 
-    /// Allow connecting to `localhost` / `*.localhost` / `*.local` in untrusted mode.
+    /// Allow connecting to `localhost` / `*.localhost` / `*.local` / `*.localdomain`, and
+    /// single-label hosts (no dots) in untrusted mode.
     ///
     /// WARNING: This weakens the default SSRF/safety protections.
     #[arg(long, default_value_t = false)]

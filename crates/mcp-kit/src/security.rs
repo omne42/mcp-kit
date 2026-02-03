@@ -12,7 +12,8 @@ pub enum TrustMode {
 pub struct UntrustedStreamableHttpPolicy {
     /// When true (default), only allow `https://` URLs in untrusted mode.
     pub require_https: bool,
-    /// When false (default), reject `localhost`, `*.localhost`, and `*.local` domains.
+    /// When false (default), reject `localhost`, `*.localhost`, `*.local`, and `*.localdomain`
+    /// domains, as well as single-label hosts (no `.`).
     pub allow_localhost: bool,
     /// When false (default), reject loopback/link-local/private IP literals.
     pub allow_private_ips: bool,
