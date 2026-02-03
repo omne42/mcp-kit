@@ -82,7 +82,7 @@ fn print_help() {
         "  - This demonstrates custom mcp-jsonrpc StreamableHttpOptions + Manager::connect_jsonrpc."
     );
     eprintln!(
-        "  - Safety: when you build the HTTP client yourself, you bypass Manager's Untrusted streamable_http policy checks."
+        "  - Safety: this example explicitly uses TrustMode::Trusted because building the HTTP client yourself bypasses Manager's Untrusted streamable_http policy checks."
     );
 }
 
@@ -129,7 +129,8 @@ async fn main() -> Result<()> {
         "streamable-http-custom-options",
         env!("CARGO_PKG_VERSION"),
         Duration::from_secs(30),
-    );
+    )
+    .with_trust_mode(mcp_kit::TrustMode::Trusted);
     manager.connect_jsonrpc("remote", client).await?;
 
     let tools = manager

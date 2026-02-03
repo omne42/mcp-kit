@@ -1128,17 +1128,15 @@ impl Config {
                             }
                             (None, Some(sse_url), Some(http_url))
                         }
-                        (None, Some(sse_url), None) => {
-                            if sse_url.trim().is_empty() {
-                                anyhow::bail!("mcp server {name}: sse_url must not be empty");
-                            }
-                            (Some(sse_url), None, None)
+                        (None, Some(_), None) => {
+                            anyhow::bail!(
+                                "mcp server {name}: set either url or (sse_url + http_url), not sse_url alone"
+                            );
                         }
-                        (None, None, Some(http_url)) => {
-                            if http_url.trim().is_empty() {
-                                anyhow::bail!("mcp server {name}: http_url must not be empty");
-                            }
-                            (Some(http_url), None, None)
+                        (None, None, Some(_)) => {
+                            anyhow::bail!(
+                                "mcp server {name}: set either url or (sse_url + http_url), not http_url alone"
+                            );
                         }
                         (None, None, None) => {
                             anyhow::bail!(

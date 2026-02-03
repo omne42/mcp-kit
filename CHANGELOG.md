@@ -7,7 +7,13 @@
 
 ## [Unreleased]
 
+## [0.1.1] - Unreleased
+
 ### Added
+- `mcp-kit`：新增 `Manager::disconnect_and_wait` + `Connection::{wait, wait_with_timeout}` + `Session::{wait, wait_with_timeout}`，用于更明确的关闭/回收语义。
+- `mcp-kit`：新增 `Manager::{connect_io_unchecked, connect_jsonrpc_unchecked}`，用于测试/显式接入自定义 transport（会绕过 `Untrusted` 安全护栏）。
+- `mcp-jsonrpc`：`SpawnOptions` 新增 `kill_on_drop`（默认 `true`）、`stdout_log_redactor` 与 `diagnostics.invalid_json_sample_lines`（用于脱敏与诊断采样）。
+- `mcp-jsonrpc`：`StreamableHttpOptions` 新增 `error_body_preview_bytes`（默认 `0`，避免意外泄露）。
 - `mcp-jsonrpc`：最小 JSON-RPC client（stdio / unix / streamable http），支持 notifications 与可选 stdout 旋转落盘。
 - `mcp-jsonrpc`：新增 `ClientStats` / `Client::stats()` / `ClientHandle::stats()`，统计无效 JSON 行与因队列满/关闭导致的 notifications 丢弃数量。
 - `mcp-jsonrpc`：新增 `Client::connect_streamable_http_split_with_options(sse_url, http_url, ...)`，支持分离的 SSE 与 POST URL。
@@ -23,7 +29,7 @@
 - `transport=streamable_http`：支持分离配置 `servers.<name>.sse_url` + `servers.<name>.http_url`。
 - `TrustMode`：安全默认不信任本地配置；需要显式切换到 Trusted 才允许从配置启动/连接 server。
 - `roots/list`：当配置了 `client.roots` 时，内建响应 server→client request，并自动声明 `capabilities.roots`。
-- `Manager::{connect_io, connect_jsonrpc}`：支持接入自定义 JSON-RPC 连接（便于测试与复用 transport）。
+- `Manager::{connect_io, connect_jsonrpc}`：支持接入自定义 JSON-RPC 连接（需要 `TrustMode::Trusted`）。
 - `ServerConfig::streamable_http_split(sse_url, http_url)`：便捷构造 split URL 的 `transport=streamable_http` 配置（用于手写/测试场景）。
 - `Manager::initialize_result`：暴露 server initialize 响应。
 - `Manager`：补齐 MCP 常用请求便捷方法（`ping`、`resources/templates/list`、`resources/read`、`resources/subscribe`、`resources/unsubscribe`、`prompts/get`、`logging/setLevel`、`completion/complete`）。
@@ -41,6 +47,11 @@
 - `mcp-kit`：新增 `Manager::with_allow_stdout_log_outside_root(bool)`，用于显式放开 stdout_log 写入范围。
 
 ### Changed
+- `mcp-kit`（BREAKING）：`Manager::{connect_io, connect_jsonrpc}` 现在默认要求 `TrustMode::Trusted`；如需显式绕过可用 `*_unchecked` 变体（用于测试/受控环境）。
+- `mcp-kit`（BREAKING）：外部兼容格式中 `sse_url`/`http_url` 现在要求成对出现；单独设置会 fail-closed（单端点请用 `url`）。
+- `mcp-kit`：`Manager` 的 request/notify 错误上下文现在包含 `server=<name>`，便于多 server 场景排查。
+- `mcp_kit::mcp`（BREAKING）：`Role` 反序列化现在支持未知值（落到 `Role::Other(String)`），提升协议演进鲁棒性。
+- `mcp-jsonrpc`：streamable_http 的桥接错误默认不再回显 HTTP body 预览，并对网络错误中的 URL 做脱敏处理（减少 secrets 泄露风险）。
 - `Config::load` 默认路径发现：`./.mcp.json` / `./mcp.json`。
 - `mcpctl` 现在需要 `--features cli` 构建（避免 library 依赖方被迫引入 clap）。
 - `mcp_kit::Manager` 默认 `TrustMode::Untrusted`：拒绝 `transport=stdio|unix`；`streamable_http` 仅允许 `https` 且非 localhost/私网目标，并拒绝发送敏感 header/读取 env secrets 用于认证；需显式 `with_trust_mode(TrustMode::Trusted)` 覆盖。
@@ -94,6 +105,7 @@
 - `mcp-jsonrpc`：移除未使用的 `anyhow` 依赖，保持依赖最小化。
 
 ### Fixed
+- `mcp-jsonrpc`：streamable_http POST bridge 在收到无效 JSON 时会 fail-fast 关闭连接，避免 pending request 无限悬挂。
 - `mcp-jsonrpc`：当 server→client request 的 `jsonrpc` 版本非法但 `id` 合法时，`-32600 Invalid Request` 现在会回显原始 `id`（而不是 `null`），保持 JSON-RPC 2.0 相关性语义。
 - `mcp-jsonrpc`：补齐 `streamable_http` 的回归覆盖（`mcp-session-id` 复用/更新、POST 返回 SSE + `[DONE]`、非 JSON `Content-Type` 的错误桥接）。
 - `mcp-jsonrpc`：当入站消息包含 `method` 但类型非法时，会返回 `-32600 Invalid Request`（若有 `id`）并避免误当作 response 消费 pending。

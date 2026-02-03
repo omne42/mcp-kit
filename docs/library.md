@@ -172,13 +172,18 @@ manager = manager.with_untrusted_streamable_http_policy(UntrustedStreamableHttpP
 
 细节见 [`安全模型`](security.md)。
 
-## 自定义 transport：`connect_io` / `connect_jsonrpc`
+## 自定义 transport：`connect_io` / `connect_jsonrpc`（高级）
 
 用于测试、复用已有管道，或接入自定义 JSON-RPC transport：
 
-- `Manager::connect_io(server, read, write)`
-- `Manager::connect_jsonrpc(server, client)`
+- `Manager::connect_io(server, read, write)`（需要 `TrustMode::Trusted`）
+- `Manager::connect_jsonrpc(server, client)`（需要 `TrustMode::Trusted`）
 
-这两者会复用同样的 initialize 与 handler 逻辑。
+这两者会复用同样的 initialize 与 handler 逻辑，但**不会**对你自建的 transport 做 `Untrusted` 下的安全校验（例如 streamable_http 的 URL/headers 出站限制）。
+
+如果你明确知道自己在做什么（例如测试、或已在外部完成校验），可以使用更显式的 “unchecked” 入口：
+
+- `Manager::connect_io_unchecked(...)`
+- `Manager::connect_jsonrpc_unchecked(...)`
 
 如果你需要调整 `mcp-jsonrpc` 的 `Limits` 或 streamable_http 的网络选项（例如 connect_timeout / redirects），推荐先用 `mcp-jsonrpc` 构建 `Client`，再用 `connect_jsonrpc` 接入；细节见 [`调优与限制`](tuning.md)。

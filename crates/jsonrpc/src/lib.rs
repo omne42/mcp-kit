@@ -16,7 +16,7 @@
 //! - Automatic reconnect
 //! - Rich typed schemas beyond `serde_json::Value`
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -33,10 +33,47 @@ use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::io::StreamReader;
 
-#[derive(Debug, Clone, Default)]
+pub type StdoutLogRedactor = Arc<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
+
+#[derive(Clone)]
 pub struct SpawnOptions {
     pub stdout_log: Option<StdoutLog>,
+    /// Optional transformation applied to each captured stdout line before it is written to
+    /// `stdout_log`.
+    ///
+    /// This can be used to redact secrets before they are written to disk.
+    pub stdout_log_redactor: Option<StdoutLogRedactor>,
     pub limits: Limits,
+    pub diagnostics: DiagnosticsOptions,
+    /// When true (default), kill the child process if the `Client` is dropped.
+    ///
+    /// Note: this is best-effort and does not guarantee the child is reaped. Prefer an explicit
+    /// `Client::wait*` call when you own the child lifecycle.
+    pub kill_on_drop: bool,
+}
+
+impl std::fmt::Debug for SpawnOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpawnOptions")
+            .field("stdout_log", &self.stdout_log)
+            .field("stdout_log_redactor", &self.stdout_log_redactor.is_some())
+            .field("limits", &self.limits)
+            .field("diagnostics", &self.diagnostics)
+            .field("kill_on_drop", &self.kill_on_drop)
+            .finish()
+    }
+}
+
+impl Default for SpawnOptions {
+    fn default() -> Self {
+        Self {
+            stdout_log: None,
+            stdout_log_redactor: None,
+            limits: Limits::default(),
+            diagnostics: DiagnosticsOptions::default(),
+            kill_on_drop: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +90,10 @@ pub struct StreamableHttpOptions {
     ///
     /// For safety, the default is to disable redirects to reduce SSRF risk.
     pub follow_redirects: bool,
+    /// Maximum bytes of HTTP response body to include in bridged JSON-RPC error data.
+    ///
+    /// Default: 0 (do not include body previews) to reduce accidental secrets exposure.
+    pub error_body_preview_bytes: usize,
 }
 
 impl Default for StreamableHttpOptions {
@@ -62,6 +103,28 @@ impl Default for StreamableHttpOptions {
             connect_timeout: Some(Duration::from_secs(10)),
             request_timeout: None,
             follow_redirects: false,
+            error_body_preview_bytes: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DiagnosticsOptions {
+    /// Capture up to N invalid JSON lines (best-effort) for debugging.
+    ///
+    /// Default: 0 (disabled).
+    pub invalid_json_sample_lines: usize,
+    /// Maximum bytes per captured invalid JSON line.
+    ///
+    /// Default: 256.
+    pub invalid_json_sample_max_bytes: usize,
+}
+
+impl Default for DiagnosticsOptions {
+    fn default() -> Self {
+        Self {
+            invalid_json_sample_lines: 0,
+            invalid_json_sample_max_bytes: 256,
         }
     }
 }
@@ -153,12 +216,57 @@ impl ClientStatsInner {
     }
 }
 
+#[derive(Debug)]
+struct DiagnosticsState {
+    invalid_json_samples: Mutex<VecDeque<String>>,
+    invalid_json_sample_lines: usize,
+    invalid_json_sample_max_bytes: usize,
+}
+
+impl DiagnosticsState {
+    fn new(opts: &DiagnosticsOptions) -> Option<Arc<Self>> {
+        if opts.invalid_json_sample_lines == 0 {
+            return None;
+        }
+        Some(Arc::new(Self {
+            invalid_json_samples: Mutex::new(VecDeque::new()),
+            invalid_json_sample_lines: opts.invalid_json_sample_lines,
+            invalid_json_sample_max_bytes: opts.invalid_json_sample_max_bytes.max(1),
+        }))
+    }
+
+    fn record_invalid_json_line(&self, line: &[u8]) {
+        let mut guard = self
+            .invalid_json_samples
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        if guard.len() >= self.invalid_json_sample_lines {
+            return;
+        }
+
+        let mut s = String::from_utf8_lossy(line).into_owned();
+        s = truncate_string(s, self.invalid_json_sample_max_bytes);
+        guard.push_back(s);
+    }
+
+    fn invalid_json_samples(&self) -> Vec<String> {
+        self.invalid_json_samples
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+}
+
 #[derive(Clone)]
 pub struct ClientHandle {
     write: Arc<tokio::sync::Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
     next_id: Arc<AtomicI64>,
     pending: PendingRequests,
     stats: Arc<ClientStatsInner>,
+    diagnostics: Option<Arc<DiagnosticsState>>,
     closed: Arc<AtomicBool>,
     close_reason: Arc<Mutex<Option<String>>>,
 }
@@ -172,6 +280,13 @@ impl std::fmt::Debug for ClientHandle {
 impl ClientHandle {
     pub fn stats(&self) -> ClientStats {
         self.stats.snapshot()
+    }
+
+    pub fn invalid_json_samples(&self) -> Vec<String> {
+        self.diagnostics
+            .as_ref()
+            .map(|d| d.invalid_json_samples())
+            .unwrap_or_default()
     }
 
     pub fn is_closed(&self) -> bool {
@@ -442,6 +557,7 @@ impl Client {
     ) -> Result<Self, Error> {
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
+        cmd.kill_on_drop(options.kill_on_drop);
 
         let mut child = cmd.spawn()?;
         let stdin = child
@@ -520,7 +636,12 @@ impl Client {
                 },
                 None => send.await,
             }
-            .map_err(|err| Error::Protocol(format!("connect streamable http failed: {err}")))?;
+            .map_err(|err| {
+                Error::Protocol(format!(
+                    "connect streamable http failed: {}",
+                    redact_reqwest_error(&err)
+                ))
+            })?;
 
             if resp.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
                 return Ok(None);
@@ -559,6 +680,7 @@ impl Client {
         let connect_timeout = http_options.connect_timeout;
         let request_timeout = http_options.request_timeout;
         let follow_redirects = http_options.follow_redirects;
+        let error_body_preview_bytes = http_options.error_body_preview_bytes;
 
         let mut headers = reqwest::header::HeaderMap::new();
         for (key, value) in http_options.headers {
@@ -606,6 +728,7 @@ impl Client {
         let sse_wake_post = sse_wake_tx.clone();
         let limits_post = limits.clone();
         let request_timeout_post = request_timeout;
+        let error_body_preview_bytes_post = error_body_preview_bytes;
         let handle_post = transport_handle.clone();
         let post_task = tokio::spawn(async move {
             HttpPostBridge {
@@ -618,6 +741,7 @@ impl Client {
                 sse_wake: sse_wake_post,
                 limits: limits_post,
                 request_timeout: request_timeout_post,
+                error_body_preview_bytes: error_body_preview_bytes_post,
             }
             .run()
             .await;
@@ -685,7 +809,13 @@ impl Client {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        let SpawnOptions { stdout_log, limits } = options;
+        let SpawnOptions {
+            stdout_log,
+            stdout_log_redactor,
+            limits,
+            diagnostics,
+            ..
+        } = options;
 
         let notify_cap = limits.notifications_capacity.max(1);
         let request_cap = limits.requests_capacity.max(1);
@@ -694,11 +824,13 @@ impl Client {
         let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
         let stats = Arc::new(ClientStatsInner::default());
         let write = Arc::new(tokio::sync::Mutex::new(Box::new(write) as _));
+        let diagnostics_state = DiagnosticsState::new(&diagnostics);
         let handle = ClientHandle {
             write,
             next_id: Arc::new(AtomicI64::new(1)),
             pending: pending.clone(),
             stats: stats.clone(),
+            diagnostics: diagnostics_state.clone(),
             closed: Arc::new(AtomicBool::new(false)),
             close_reason: Arc::new(Mutex::new(None)),
         };
@@ -716,6 +848,8 @@ impl Client {
                 request_tx,
                 responder: handle.clone(),
                 stdout_log,
+                stdout_log_redactor,
+                diagnostics_state,
                 limits,
             },
         );
@@ -932,6 +1066,8 @@ struct ReaderTaskContext {
     request_tx: mpsc::Sender<IncomingRequest>,
     responder: ClientHandle,
     stdout_log: Option<LogState>,
+    stdout_log_redactor: Option<StdoutLogRedactor>,
+    diagnostics_state: Option<Arc<DiagnosticsState>>,
     limits: Limits,
 }
 
@@ -947,6 +1083,8 @@ where
             request_tx,
             responder,
             stdout_log,
+            stdout_log_redactor,
+            diagnostics_state,
             limits,
         } = ctx;
 
@@ -962,7 +1100,11 @@ where
                         continue;
                     }
                     if let Some(state) = &mut log_state {
-                        if let Err(err) = state.write_line_bytes(&line).await {
+                        let write_result = match &stdout_log_redactor {
+                            Some(redactor) => state.write_line_bytes(&redactor(&line)).await,
+                            None => state.write_line_bytes(&line).await,
+                        };
+                        if let Err(err) = write_result {
                             eprintln!("jsonrpc: stdout log write failed: {err}");
                             log_state = None;
                         }
@@ -971,6 +1113,9 @@ where
                         Ok(value) => value,
                         Err(_) => {
                             stats.invalid_json_lines.fetch_add(1, Ordering::Relaxed);
+                            if let Some(diagnostics) = &diagnostics_state {
+                                diagnostics.record_invalid_json_line(&line);
+                            }
                             continue;
                         }
                     };
@@ -1187,6 +1332,7 @@ struct HttpPostBridge {
     sse_wake: mpsc::Sender<()>,
     limits: Limits,
     request_timeout: Option<Duration>,
+    error_body_preview_bytes: usize,
 }
 
 impl HttpPostBridge {
@@ -1203,6 +1349,7 @@ impl HttpPostBridge {
             sse_wake,
             limits,
             request_timeout,
+            error_body_preview_bytes,
         } = self;
 
         let mut reader = tokio::io::BufReader::new(bridge_read);
@@ -1226,7 +1373,16 @@ impl HttpPostBridge {
 
             let parsed: Value = match serde_json::from_slice(&line) {
                 Ok(v) => v,
-                Err(_) => continue,
+                Err(err) => {
+                    handle
+                        .close_with_reason(format!(
+                            "streamable http POST bridge received invalid JSON from client: {err}"
+                        ))
+                        .await;
+                    let mut writer = writer.lock().await;
+                    let _ = writer.shutdown().await;
+                    return;
+                }
             };
             let id = parsed.get("id").cloned();
 
@@ -1271,7 +1427,7 @@ impl HttpPostBridge {
                             &writer,
                             id,
                             HTTP_TRANSPORT_ERROR,
-                            format!("http request failed: {err}"),
+                            format!("http request failed: {}", redact_reqwest_error(&err)),
                             None,
                         )
                         .await;
@@ -1398,14 +1554,20 @@ impl HttpPostBridge {
                         }
                         if serde_json::from_slice::<Value>(&body).is_err() {
                             if let Some(id) = id {
-                                let body_preview = String::from_utf8_lossy(&body);
-                                let preview = truncate_string(body_preview.into_owned(), 4 * 1024);
+                                let data = if error_body_preview_bytes > 0 {
+                                    let body_preview = String::from_utf8_lossy(&body).into_owned();
+                                    let preview =
+                                        truncate_string(body_preview, error_body_preview_bytes);
+                                    Some(serde_json::json!({ "body": preview }))
+                                } else {
+                                    None
+                                };
                                 let _ = write_error_response(
                                     &writer,
                                     id,
                                     HTTP_TRANSPORT_ERROR,
                                     "http response is not valid json".to_string(),
-                                    Some(serde_json::json!({ "body": preview })),
+                                    data,
                                 )
                                 .await;
                             }
@@ -1433,14 +1595,17 @@ impl HttpPostBridge {
             }
 
             if let Some(id) = id {
-                let body_text = match request_timeout {
-                    Some(timeout) => match tokio::time::timeout(timeout, resp.text()).await {
-                        Ok(body) => body.ok(),
-                        Err(_) => None,
-                    },
-                    None => resp.text().await.ok(),
-                }
-                .map(|body| truncate_string(body, 4 * 1024));
+                let body_text = if error_body_preview_bytes == 0 {
+                    None
+                } else {
+                    let read = read_response_body_preview_text(resp, error_body_preview_bytes);
+                    match request_timeout {
+                        Some(timeout) => tokio::time::timeout(timeout, read)
+                            .await
+                            .unwrap_or_default(),
+                        None => read.await,
+                    }
+                };
                 let _ = write_error_response(
                     &writer,
                     id,
@@ -1452,6 +1617,61 @@ impl HttpPostBridge {
             }
         }
     }
+}
+
+async fn read_response_body_preview_text(
+    resp: reqwest::Response,
+    max_bytes: usize,
+) -> Option<String> {
+    if max_bytes == 0 {
+        return None;
+    }
+
+    let mut out = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.ok()?;
+
+        let remaining = max_bytes.saturating_add(1).saturating_sub(out.len());
+        if remaining == 0 {
+            break;
+        }
+
+        let take = remaining.min(chunk.len());
+        out.extend_from_slice(&chunk[..take]);
+        if out.len() >= max_bytes {
+            break;
+        }
+    }
+
+    if out.is_empty() {
+        return None;
+    }
+
+    let preview = String::from_utf8_lossy(&out).into_owned();
+    Some(truncate_string(preview, max_bytes))
+}
+
+fn redact_reqwest_error(err: &reqwest::Error) -> String {
+    let mut msg = err.to_string();
+    let Some(url) = err.url() else {
+        return msg;
+    };
+
+    let full = url.as_str();
+    let redacted = redact_url_for_error(url);
+    msg = msg.replace(full, &redacted);
+    msg
+}
+
+fn redact_url_for_error(url: &reqwest::Url) -> String {
+    let mut url = url.clone();
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_path("/");
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string()
 }
 
 async fn pump_sse(
@@ -1754,7 +1974,19 @@ async fn open_stdout_log_append(path: &Path) -> Result<tokio::fs::File, std::io:
     options.create(true).append(true);
     #[cfg(unix)]
     {
+        // Best-effort: ensure new log files are not world-readable. Existing files keep their
+        // original permissions.
+        options.mode(0o600);
         options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        // Best-effort: avoid following reparse points (including symlinks) on open.
+        // This mitigates TOCTOU risks where the log path could be replaced between checks.
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
 
     options.open(path).await

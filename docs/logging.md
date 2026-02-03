@@ -49,10 +49,11 @@
 - `path` 可为相对路径（相对 `--root` 解析）
 - 默认要求 `stdout_log.path` 位于 `--root` 之下；如需写到 `--root` 外，需显式开启（CLI：`--allow-stdout-log-outside-root`；代码：`Manager::with_allow_stdout_log_outside_root(true)`）
 - 出于安全考虑，`stdout_log.path` 不允许包含任何 symlink 路径组件（含父目录/目标文件）
+- best-effort：在 unix 下新建 log 文件会尝试使用 `0600` 权限（避免默认 world-readable）
 - `max_bytes_per_part` 最小为 `1`
 - `max_parts=0` 在 `mcp-kit` 配置里表示“不限制保留数量”（无限保留）
 
-> 注意：stdout_log 会把协议数据落盘，可能包含敏感信息。建议放到项目专用目录，并结合访问控制与清理策略使用。
+> 注意：stdout_log 会把协议数据落盘，可能包含敏感信息。建议放到项目专用目录，并结合访问控制与清理策略使用；如需脱敏，可用 `mcp_jsonrpc::SpawnOptions.stdout_log_redactor` 在落盘前做 redaction。
 
 ## 旋转文件命名规则
 

@@ -66,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
 - **Remote-first**：原生支持远程 `transport=streamable_http`（HTTP SSE + POST）。
 - **Safe-by-default**：默认 `TrustMode::Untrusted`，拒绝本地 `stdio/unix`，并对远程出站做保守校验（https/host/ip/sensitive headers/env secrets）。
 - **低依赖、低仪式感**：数据层以 `serde_json::Value` 为主；typed wrapper 只覆盖常用 MCP 方法子集。
-- **可组合/可测试**：既能用 `Manager` 管多个 server，也能把单连接的 `Session` 交给其他模块持有；支持 `connect_io/connect_jsonrpc` 接入自定义 transport。
+- **可组合/可测试**：既能用 `Manager` 管多个 server，也能把单连接的 `Session` 交给其他模块持有；支持 `connect_io/connect_jsonrpc`（Trusted）以及更显式的 `*_unchecked` 入口接入自定义 transport。
 - **CLI 先行**：`mcpctl` 适合快速验证配置、探测 tools/resources/prompts，并能显式切换 `--trust` 或收紧/放开 Untrusted 出站策略。
 
 ## 组件一览

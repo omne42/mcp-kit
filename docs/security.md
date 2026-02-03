@@ -121,6 +121,12 @@ Untrusted 下对 `127.0.0.1`、`10.0.0.0/8` 等 **IP 字面量** 会做拒绝/�
 
 `mcp-jsonrpc` 的 streamable_http 默认不跟随 HTTP redirects（`follow_redirects=false`），这是额外的一层 SSRF 风险降低。即使在 `Trusted` 下，该默认仍然生效（除非你在自己的 `mcp_jsonrpc::Client` 中显式开启）。
 
+### 自定义 transport（`connect_jsonrpc` / `connect_io`）
+
+当你用 `Manager::connect_jsonrpc(...)` / `connect_io(...)` 接入自建 transport 时，`Manager` 无法再对该 transport 做 `Untrusted` 下的 URL/headers 等安全校验。
+
+因此这两者默认要求 `TrustMode::Trusted`；如果你确实需要在 Untrusted 下使用（例如测试），请显式使用 `connect_jsonrpc_unchecked` / `connect_io_unchecked`，并把它视为一次“我知道我在绕过安全护栏”的选择。
+
 ### 仍然把 `mcp.json` 当作不可信输入
 
 即使你愿意在某些场景使用 `--trust`，也建议把它当作一次“显式的安全决策”：

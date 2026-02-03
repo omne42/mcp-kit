@@ -81,6 +81,7 @@ async fn main() -> Result<()> {
         env!("CARGO_PKG_VERSION"),
         Duration::from_secs(5),
     )
+    .with_trust_mode(mcp_kit::TrustMode::Trusted)
     .with_roots(vec![Root {
         uri: directory_uri(&cwd)?,
         name: Some("cwd".to_string()),

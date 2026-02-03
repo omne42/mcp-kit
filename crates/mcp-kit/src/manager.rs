@@ -129,6 +129,79 @@ pub struct Connection {
     pub client: mcp_jsonrpc::Client,
 }
 
+impl Connection {
+    /// Closes the JSON-RPC client and (if present) waits for the underlying child process to exit.
+    ///
+    /// Note: this can hang indefinitely if the child process does not exit. Prefer
+    /// `Connection::wait_with_timeout` if you need an upper bound.
+    pub async fn wait(mut self) -> anyhow::Result<Option<std::process::ExitStatus>> {
+        let status = self.client.wait().await.context("close jsonrpc client")?;
+        if status.is_some() {
+            return Ok(status);
+        }
+
+        match &mut self.child {
+            Some(child) => Ok(Some(child.wait().await?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Closes the JSON-RPC client and waits for the underlying child process to exit, up to
+    /// `timeout`.
+    pub async fn wait_with_timeout(
+        mut self,
+        timeout: Duration,
+        on_timeout: mcp_jsonrpc::WaitOnTimeout,
+    ) -> anyhow::Result<Option<std::process::ExitStatus>> {
+        let status = self
+            .client
+            .wait_with_timeout(timeout, on_timeout)
+            .await
+            .context("close jsonrpc client")?;
+        if status.is_some() {
+            return Ok(status);
+        }
+
+        let Some(child) = &mut self.child else {
+            return Ok(None);
+        };
+
+        match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(status) => Ok(Some(status?)),
+            Err(_) => match on_timeout {
+                mcp_jsonrpc::WaitOnTimeout::ReturnError => {
+                    anyhow::bail!("wait timed out after {timeout:?}")
+                }
+                mcp_jsonrpc::WaitOnTimeout::Kill { kill_timeout } => {
+                    let child_id = child.id();
+                    if let Err(err) = child.start_kill() {
+                        match child.try_wait() {
+                            Ok(Some(status)) => return Ok(Some(status)),
+                            Ok(None) => {
+                                anyhow::bail!(
+                                    "wait timed out after {timeout:?}; failed to kill child (id={child_id:?}): {err}"
+                                )
+                            }
+                            Err(try_wait_err) => {
+                                anyhow::bail!(
+                                    "wait timed out after {timeout:?}; failed to kill child (id={child_id:?}): {err}; try_wait failed: {try_wait_err}"
+                                )
+                            }
+                        }
+                    }
+
+                    match tokio::time::timeout(kill_timeout, child.wait()).await {
+                        Ok(status) => Ok(Some(status?)),
+                        Err(_) => anyhow::bail!(
+                            "wait timed out after {timeout:?}; killed child (id={child_id:?}) but it did not exit within {kill_timeout:?}"
+                        ),
+                    }
+                }
+            },
+        }
+    }
+}
+
 impl Default for Manager {
     fn default() -> Self {
         Self::new(
@@ -511,7 +584,30 @@ impl Manager {
         Ok(())
     }
 
+    /// Attach an already-connected `mcp_jsonrpc::Client` and perform MCP initialize.
+    ///
+    /// This requires `TrustMode::Trusted` because attaching a custom client can bypass
+    /// `Untrusted`-mode safety checks (for example, by constructing a custom streamable_http
+    /// client with different redirect/proxy/header behavior).
     pub async fn connect_jsonrpc(
+        &mut self,
+        server_name: &str,
+        client: mcp_jsonrpc::Client,
+    ) -> anyhow::Result<()> {
+        if self.trust_mode == TrustMode::Untrusted {
+            anyhow::bail!(
+                "refusing to attach custom JSON-RPC client in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) or use Manager::connect_jsonrpc_unchecked)"
+            );
+        }
+
+        self.connect_jsonrpc_unchecked(server_name, client).await
+    }
+
+    /// Like `Manager::connect_jsonrpc`, but does not enforce `TrustMode`.
+    ///
+    /// This is intended for controlled environments (e.g. tests) where you explicitly accept the
+    /// risk of bypassing `Untrusted`-mode safety checks.
+    pub async fn connect_jsonrpc_unchecked(
         &mut self,
         server_name: &str,
         mut client: mcp_jsonrpc::Client,
@@ -525,7 +621,35 @@ impl Manager {
         Ok(())
     }
 
+    /// Attach a custom `AsyncRead + AsyncWrite` transport as a JSON-RPC connection and perform
+    /// MCP initialize.
+    ///
+    /// This requires `TrustMode::Trusted` because attaching a custom transport can bypass
+    /// `Untrusted`-mode safety checks.
     pub async fn connect_io<R, W>(
+        &mut self,
+        server_name: &str,
+        read: R,
+        write: W,
+    ) -> anyhow::Result<()>
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        if self.trust_mode == TrustMode::Untrusted {
+            anyhow::bail!(
+                "refusing to attach custom JSON-RPC IO in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) or use Manager::connect_io_unchecked)"
+            );
+        }
+
+        self.connect_io_unchecked(server_name, read, write).await
+    }
+
+    /// Like `Manager::connect_io`, but does not enforce `TrustMode`.
+    ///
+    /// This is intended for controlled environments (e.g. tests) where you explicitly accept the
+    /// risk of bypassing `Untrusted`-mode safety checks.
+    pub async fn connect_io_unchecked<R, W>(
         &mut self,
         server_name: &str,
         read: R,
@@ -542,7 +666,7 @@ impl Manager {
         let client = mcp_jsonrpc::Client::connect_io(read, write)
             .await
             .context("connect jsonrpc io")?;
-        self.connect_jsonrpc(server_name, client).await
+        self.connect_jsonrpc_unchecked(server_name, client).await
     }
 
     fn is_connected_and_alive(&mut self, server_name: &str) -> bool {
@@ -677,6 +801,21 @@ impl Manager {
     pub fn disconnect(&mut self, server_name: &str) -> bool {
         self.init_results.remove(server_name);
         self.conns.remove(server_name).is_some()
+    }
+
+    pub async fn disconnect_and_wait(
+        &mut self,
+        server_name: &str,
+        timeout: Duration,
+        on_timeout: mcp_jsonrpc::WaitOnTimeout,
+    ) -> anyhow::Result<Option<std::process::ExitStatus>> {
+        let Some(conn) = self.take_connection(server_name) else {
+            return Ok(None);
+        };
+
+        conn.wait_with_timeout(timeout, on_timeout)
+            .await
+            .with_context(|| format!("disconnect mcp server: {server_name}"))
     }
 
     pub fn take_connection(&mut self, server_name: &str) -> Option<Connection> {
@@ -1144,7 +1283,7 @@ impl Manager {
                 .conns
                 .get(server_name)
                 .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?;
-            Self::request_raw(timeout, &conn.client, method, params).await
+            Self::request_raw(timeout, server_name, &conn.client, method, params).await
         };
 
         if let Err(err) = &result {
@@ -1172,7 +1311,7 @@ impl Manager {
                 .conns
                 .get(server_name)
                 .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?;
-            Self::notify_raw(timeout, &conn.client, method, params).await
+            Self::notify_raw(timeout, server_name, &conn.client, method, params).await
         };
 
         if let Err(err) = &result {
@@ -1228,6 +1367,7 @@ impl Manager {
 
         Self::notify_raw(
             self.request_timeout,
+            server_name,
             client,
             "notifications/initialized",
             None,
@@ -1239,26 +1379,30 @@ impl Manager {
 
     async fn request_raw(
         timeout: Duration,
+        server_name: &str,
         client: &mcp_jsonrpc::Client,
         method: &str,
         params: Option<Value>,
     ) -> anyhow::Result<Value> {
         let outcome = tokio::time::timeout(timeout, client.request_optional(method, params)).await;
         outcome
-            .with_context(|| format!("mcp request timed out: {method}"))?
-            .with_context(|| format!("mcp request failed: {method}"))
+            .with_context(|| format!("mcp request timed out: {method} (server={server_name})"))?
+            .with_context(|| format!("mcp request failed: {method} (server={server_name})"))
     }
 
     async fn notify_raw(
         timeout: Duration,
+        server_name: &str,
         client: &mcp_jsonrpc::Client,
         method: &str,
         params: Option<Value>,
     ) -> anyhow::Result<()> {
         let outcome = tokio::time::timeout(timeout, client.notify(method, params)).await;
         outcome
-            .with_context(|| format!("mcp notification timed out: {method}"))?
-            .with_context(|| format!("mcp notification failed: {method}"))
+            .with_context(|| {
+                format!("mcp notification timed out: {method} (server={server_name})")
+            })?
+            .with_context(|| format!("mcp notification failed: {method} (server={server_name})"))
     }
 }
 
@@ -1670,7 +1814,8 @@ mod tests {
             assert_eq!(note_value["method"], "notifications/initialized");
         });
 
-        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted);
         manager
             .connect_io("srv", client_read, client_write)
             .await
@@ -1745,7 +1890,8 @@ mod tests {
             server_write.flush().await.unwrap();
         });
 
-        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(1));
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(1))
+            .with_trust_mode(TrustMode::Trusted);
         manager
             .connect_io("srv", client_read, client_write)
             .await
@@ -1755,7 +1901,10 @@ mod tests {
             .request_connected("srv", "ping", None)
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("mcp request failed: ping"));
+        assert!(
+            err.to_string()
+                .contains("mcp request failed: ping (server=srv)")
+        );
 
         // Connection is dropped after Protocol/Io errors to avoid keeping a stale/broken client.
         assert!(!manager.is_connected("srv"));
@@ -1819,7 +1968,8 @@ mod tests {
             server_write.flush().await.unwrap();
         });
 
-        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted);
         let session = manager
             .connect_io_session("srv", client_read, client_write)
             .await
@@ -1870,7 +2020,8 @@ mod tests {
             server_write.flush().await.unwrap();
         });
 
-        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted);
         let err = match manager
             .connect_io_session("srv", client_read, client_write)
             .await
@@ -1917,7 +2068,8 @@ mod tests {
             assert_eq!(note_value["method"], "notifications/initialized");
         });
 
-        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted);
         manager
             .connect_io("srv", client_read, client_write)
             .await
@@ -2011,6 +2163,35 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("untrusted mode"));
+    }
+
+    #[tokio::test]
+    async fn untrusted_manager_refuses_custom_jsonrpc_attachments() {
+        let (client_stream, _server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+
+        let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+            .await
+            .unwrap();
+
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
+        assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
+
+        let err = manager
+            .connect_jsonrpc("srv", client)
+            .await
+            .expect_err("should refuse in untrusted mode");
+        assert!(err.to_string().contains("untrusted mode"));
+        assert!(err.to_string().contains("connect_jsonrpc_unchecked"));
+
+        let (client_stream, _server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let err = manager
+            .connect_io("srv2", client_read, client_write)
+            .await
+            .expect_err("should refuse in untrusted mode");
+        assert!(err.to_string().contains("untrusted mode"));
+        assert!(err.to_string().contains("connect_io_unchecked"));
     }
 
     #[tokio::test]

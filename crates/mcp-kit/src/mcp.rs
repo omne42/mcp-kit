@@ -3,7 +3,7 @@
 //! These types are intentionally a *subset* of the full MCP schema and are designed
 //! to provide ergonomic, strongly-typed method names + params for clients.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use crate::{McpNotification, McpRequest, Root};
@@ -219,12 +219,38 @@ pub struct Annotations {
     pub priority: Option<f64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Role {
-    #[serde(rename = "assistant")]
     Assistant,
-    #[serde(rename = "user")]
     User,
+    Other(String),
+}
+
+impl Role {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Role::Assistant => "assistant",
+            Role::User => "user",
+            Role::Other(other) => other,
+        }
+    }
+}
+
+impl Serialize for Role {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Role {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(match s.as_str() {
+            "assistant" => Role::Assistant,
+            "user" => Role::User,
+            _ => Role::Other(s),
+        })
+    }
 }
 
 pub enum ListResourceTemplatesRequest {}

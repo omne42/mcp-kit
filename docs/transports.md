@@ -88,7 +88,12 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 
 如果你已经有一条读写管道，或者需要接入自建 transport（例如在测试里用 `tokio::io::duplex`）：
 
-- `Manager::connect_io(server, read, write)`
-- `Manager::connect_jsonrpc(server, mcp_jsonrpc::Client)`
+- `Manager::connect_io(server, read, write)`（需要 `TrustMode::Trusted`）
+- `Manager::connect_jsonrpc(server, mcp_jsonrpc::Client)`（需要 `TrustMode::Trusted`）
 
-它们会复用同样的 initialize、超时、以及 server→client handler 逻辑。
+如果你明确知道自己在做什么（例如测试），可以显式使用：
+
+- `Manager::connect_io_unchecked(...)`
+- `Manager::connect_jsonrpc_unchecked(...)`
+
+它们会复用同样的 initialize、超时、以及 server→client handler 逻辑，但会绕过 `Untrusted` 的安全护栏。

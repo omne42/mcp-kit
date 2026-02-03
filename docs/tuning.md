@@ -80,12 +80,13 @@ server→client requests（需要 respond）同样进入有界队列：
 如果你需要自定义 Limits（或 streamable_http 的 connect_timeout / follow_redirects 等），推荐路径是：
 
 1. 直接用 `mcp-jsonrpc` 构建 client（带 options）
-2. 用 `Manager::connect_jsonrpc(...)` 或 `connect_jsonrpc_session(...)` 接入
+2. 显式切换到 `TrustMode::Trusted` 后，用 `Manager::connect_jsonrpc(...)` 或 `connect_jsonrpc_session(...)` 接入
 
 示例（调大 server→client requests 队列）：
 
 ```rust
 use mcp_jsonrpc::{Client, Limits, SpawnOptions};
+use mcp_kit::TrustMode;
 
 let mut client = Client::connect_streamable_http_with_options(
     "https://example.com/mcp",
@@ -100,10 +101,11 @@ let mut client = Client::connect_streamable_http_with_options(
 )
 .await?;
 
+manager = manager.with_trust_mode(TrustMode::Trusted);
 manager.connect_jsonrpc("remote", client).await?;
 ```
 
-> 安全提示：当你自己构建 `mcp_jsonrpc::Client` 并用 `connect_jsonrpc` 接入时，`Manager` 不会再对 streamable_http 的 URL/headers 做 Untrusted 出站校验。请仅在你**完全信任** URL/headers 的场景使用；否则建议继续走 `Manager::from_config` / `Manager::connect` + `UntrustedStreamableHttpPolicy`。详见 [`安全模型`](security.md)。
+> 安全提示：当你自己构建 `mcp_jsonrpc::Client` 并用 `connect_jsonrpc` 接入时，`Manager` 不会再对 streamable_http 的 URL/headers 做 Untrusted 出站校验，因此该入口要求 `TrustMode::Trusted`。如果你确实需要在 Untrusted 下接入自建 transport（例如测试），可以显式使用 `connect_jsonrpc_unchecked`，但请把它视为“我知道我在绕过安全护栏”的选择。详见 [`安全模型`](security.md)。
 
 > 这条路径同样适用于 `connect_io_with_options`（例如测试时使用 `tokio::io::duplex`）。
 

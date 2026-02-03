@@ -119,7 +119,7 @@
 
 ## 超时与协议问题
 
-### mcp request timed out: `<method>`
+### mcp request timed out
 
 原因：网络问题、server 卡住、或 timeout 太短。
 
@@ -135,4 +135,4 @@
 解决：
 
 - 确保你在消费 `requests` channel（`mcp-kit` 默认会接管并消费）
-- 或使用自建 `mcp_jsonrpc::Client`，调大 `SpawnOptions.limits.requests_capacity` 再 `Manager::connect_jsonrpc(...)`
+- 或使用自建 `mcp_jsonrpc::Client`，调大 `SpawnOptions.limits.requests_capacity`，并在 `TrustMode::Trusted` 下用 `Manager::connect_jsonrpc(...)` 接入（或在测试场景用 `connect_jsonrpc_unchecked`）

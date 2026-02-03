@@ -139,6 +139,42 @@ async fn main() -> anyhow::Result<()> {
 
     let config = mcp_kit::Config::load(&root, cli.config.clone()).await?;
 
+    if cli.trust {
+        eprintln!("WARNING: --trust disables the default safety restrictions.");
+        eprintln!("  - Allows spawning local processes / connecting unix sockets from config.");
+        eprintln!("  - Allows reading env secrets for remote auth headers.");
+        eprintln!("Only use this with trusted repositories and trusted server binaries.");
+
+        let risky_stdio = config
+            .servers
+            .iter()
+            .filter(|(_, cfg)| cfg.transport == mcp_kit::Transport::Stdio && cfg.inherit_env)
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        if !risky_stdio.is_empty() {
+            eprintln!(
+                "WARNING: stdio servers with inherit_env=true may inherit host secrets: {}",
+                risky_stdio.join(", ")
+            );
+            eprintln!(
+                "Consider setting servers.<name>.inherit_env=false and passing only required vars via servers.<name>.env."
+            );
+        }
+
+        let has_stdout_log = config
+            .servers
+            .values()
+            .any(|cfg| cfg.transport == mcp_kit::Transport::Stdio && cfg.stdout_log.is_some());
+        if has_stdout_log {
+            eprintln!("WARNING: stdout_log writes protocol data to disk and may contain secrets.");
+        }
+    } else if !cli.allow_host.is_empty() && !cli.dns_check && !cli.allow_private_ip {
+        eprintln!("NOTE: --allow-host does not enable DNS checks by default.");
+        eprintln!(
+            "Consider adding --dns-check to reduce SSRF risk from hostnames resolving to non-global IPs."
+        );
+    }
+
     let timeout = Duration::from_millis(cli.timeout_ms);
     let mut manager =
         mcp_kit::Manager::from_config(&config, "mcpctl", env!("CARGO_PKG_VERSION"), timeout);

@@ -22,7 +22,10 @@
 `SpawnOptions`：
 
 - `stdout_log: Option<StdoutLog>`：把“读到的每一行”写到旋转日志（常用于 stdio server 的 stdout 协议排查）
+- `stdout_log_redactor`：可选的 stdout_log 行级 redactor（用于在落盘前脱敏）
 - `limits: Limits`：限制单消息大小与队列容量（减少 DoS 风险）
+- `diagnostics`：可选的诊断采样（例如捕获少量无效 JSON 行，便于排查 stdout 污染）
+- `kill_on_drop`：当 `Client` 被 drop 时，是否 best-effort kill child（默认 `true`）
 
 stdout_log 的旋转文件命名与保留策略见 [`日志与观测`](logging.md)。
 
@@ -35,6 +38,8 @@ stdout_log 的旋转文件命名与保留策略见 [`日志与观测`](logging.m
 当 server→client requests 队列满时，`mcp-jsonrpc` 会对该 request 立即回应 `-32000 client overloaded`（而不是无限堆积）。
 
 关于如何调整 timeout/limits 以适配高吞吐或大消息场景，见 [`调优与限制`](tuning.md)。
+
+提示：如果你开启了 diagnostics 的 invalid JSON 采样，可用 `ClientHandle::invalid_json_samples()` 取出样本行（默认不启用，避免噪音与额外开销）。
 
 ## 安装 handler：处理 server→client
 
@@ -103,6 +108,7 @@ if let Some(status) = status {
 - `connect_timeout`：建立连接超时（默认 10s）
 - `request_timeout`：用于单次 POST 的 send/response（包括 POST 返回 SSE 时的响应流）；不要用于限制主 SSE（GET）长连接
 - `follow_redirects`：是否跟随 HTTP redirects（默认 `false`，减少 SSRF 风险）
+- `error_body_preview_bytes`：HTTP 错误/非 JSON 响应时，桥接到 JSON-RPC error data 的 body 预览最大字节数（默认 `0`，避免意外泄露）
 
 在 `mcp-kit` 中：
 

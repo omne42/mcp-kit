@@ -43,6 +43,7 @@ CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
 
 - 每个 entry 会被视为一个 server
 - `url` / `headers` 会映射到 `transport=streamable_http`（HTTP SSE + POST）
+- 如需分离 URL，可用 `sse_url` + `http_url`（两者必须同时设置；单端点请用 `url`）
 - `type` 目前仅用于校验（接受：`http|sse|streamable_http`），不改变映射
 
 > 备注：

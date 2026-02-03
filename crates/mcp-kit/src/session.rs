@@ -35,16 +35,55 @@ impl Session {
         &self.initialize_result
     }
 
+    /// Returns the underlying connection.
+    ///
+    /// This is an escape hatch for advanced use cases. Prefer `Session::{request,notify}` unless
+    /// you specifically need access to the underlying JSON-RPC client or child process handle.
     pub fn connection(&self) -> &Connection {
         &self.connection
     }
 
+    /// Returns the underlying connection (mutable).
+    ///
+    /// Warning: mutating the underlying client can bypass `Session`'s timeout wrappers and can
+    /// make lifecycle/ownership less clear. If you take over lifecycle control, you are
+    /// responsible for closing and waiting for any associated child process.
     pub fn connection_mut(&mut self) -> &mut Connection {
         &mut self.connection
     }
 
+    /// Consumes this session and returns the underlying connection.
+    ///
+    /// After calling this, the caller owns the connection lifecycle. In particular, if the
+    /// connection was created via a `transport=stdio` server, you should call
+    /// `Connection::wait_with_timeout` (or equivalent) to avoid leaving a child process running.
     pub fn into_connection(self) -> Connection {
         self.connection
+    }
+
+    /// Closes this session and (if present) waits for the underlying child process to exit.
+    ///
+    /// Note: this can hang indefinitely if the child does not exit. Prefer
+    /// `Session::wait_with_timeout` if you need an upper bound.
+    pub async fn wait(self) -> anyhow::Result<Option<std::process::ExitStatus>> {
+        let server_name = self.server_name.clone();
+        self.connection
+            .wait()
+            .await
+            .with_context(|| format!("close session (server={server_name})"))
+    }
+
+    /// Closes this session and waits for the underlying child process to exit, up to `timeout`.
+    pub async fn wait_with_timeout(
+        self,
+        timeout: Duration,
+        on_timeout: mcp_jsonrpc::WaitOnTimeout,
+    ) -> anyhow::Result<Option<std::process::ExitStatus>> {
+        let server_name = self.server_name.clone();
+        self.connection
+            .wait_with_timeout(timeout, on_timeout)
+            .await
+            .with_context(|| format!("close session (server={server_name})"))
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
