@@ -41,6 +41,10 @@ CLI 对应：
 - `dns_check = false`：默认不做 DNS 解析检查（可选开启；见下文）
 - `allowed_hosts = []`：默认不做 host allowlist；一旦配置 allowlist，则只允许 allowlist 命中的 host/子域名
 
+补充说明：
+
+- allowlist（`allowed_hosts` / `--allow-host`）不会覆盖 `allow_localhost=false` 下的 `localhost/localdomain/单标签 host` 拒绝逻辑；如需允许这些 host，请显式开启 `allow_localhost` / `--allow-localhost` 或直接使用 `Trusted`。
+
 另外，Untrusted 下还会拒绝：
 
 - URL 中带 `user:pass@host` 形式的“URL credentials”

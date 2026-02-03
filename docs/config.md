@@ -121,7 +121,9 @@ CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
 字段：
 
 - `argv`（必填）：非空数组；每项必须非空字符串
-- `inherit_env`（可选，默认 `true`）：是否继承当前进程环境变量。若为 `false`，会清空子进程环境，只透传少量基础变量（如 `PATH`/`HOME`/`TEMP` 等）并再注入 `env`，以降低宿主 secrets 泄露风险。
+- `inherit_env`（可选，默认 `true`）：是否继承当前进程环境变量。若为 `false`，会清空子进程环境，只透传少量基础变量并再注入 `env`，以降低宿主 secrets 泄露风险：
+  - 基线 env 白名单（当前实现）：`PATH`、`HOME`、`USERPROFILE`、`TMPDIR`、`TEMP`、`TMP`、`SystemRoot`、`SYSTEMROOT`
+  - 兼容性提示：如果你的 server 依赖其它变量（如 `LANG/LC_*`、`XDG_*`、证书/代理相关变量等），请显式写入 `servers.<name>.env`（或保持 `inherit_env=true`）
 - `env`（可选）：KV 字典，注入到 child process
 - `stdout_log`（可选）：stdout 旋转落盘（便于排查协议输出）
   - `path`（必填）：可为相对路径（相对 `--root` 解析）
@@ -179,11 +181,13 @@ stdout_log 的旋转文件命名/保留策略见 [`日志与观测`](logging.md)
 
 安全（默认 Untrusted）：
 
-- 允许连接远程 `https` 且非 localhost/私网的 `url`
+- 允许连接远程 `https` 且 host 看起来是公网域名的 `url`（默认拒绝 `localhost/*.localhost/*.local/*.localdomain`、**单标签 host**、以及私网/loopback IP 字面量）
 - 拒绝发送敏感 header：`Authorization/Cookie/Proxy-Authorization`
 - 拒绝读取 `bearer_token_env_var` / `env_http_headers`（env secrets）
 
 详见 [`安全模型`](security.md)。
+
+> 注意：即使你配置了 `allowed_hosts` / CLI `--allow-host`，它也不会覆盖 `localhost/localdomain/单标签 host` 的默认拦截；如需允许这些 host，请显式开启 `allow_localhost` / CLI `--allow-localhost`，或直接使用 `Trusted`。
 
 streamable_http 的具体 HTTP 形态（SSE + POST、`mcp-session-id`、回包为 SSE 的场景）见 [`streamable_http 传输详解`](streamable_http.md)。
 

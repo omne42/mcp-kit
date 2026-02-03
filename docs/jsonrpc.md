@@ -54,6 +54,19 @@ if let Some(mut requests) = client.take_requests() {
 
 `mcp_kit::Manager` 会在 install connection 时自动接管这部分（并提供可注入 handler），一般上层不需要直接操作 `mcp-jsonrpc` 的 channel。
 
+## 等待 child 退出：`Client::wait`
+
+对 stdio spawn 的 client，你可能希望在关闭连接后等待子进程退出：
+
+```rust
+let status = client.wait().await?;
+if let Some(status) = status {
+    eprintln!("child exited: {status}");
+}
+```
+
+注意：对不包含 child 的连接（`connect_io` / `connect_unix` / `connect_streamable_http*`），`wait()` 会返回 `Ok(None)`。
+
 ## Streamable HTTP 的安全/行为
 
 `StreamableHttpOptions`：

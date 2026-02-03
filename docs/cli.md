@@ -30,12 +30,14 @@ cargo run -p mcp-kit --features cli --bin mcpctl -- --help
 
 - `--trust`：完全信任 `mcp.json`（允许 stdio/unix、允许读取 env secrets、允许发送认证 header）
 - `--allow-http`：Untrusted 下允许连接 `http://`（默认只允许 https）
-- `--allow-localhost`：Untrusted 下允许连接 `localhost/*.localhost/*.local`
+- `--allow-localhost`：Untrusted 下允许连接 `localhost/*.localhost/*.local/*.localdomain`，以及**单标签 host**（不含 `.` 的 host，如 `https://example/...`；常见于本地/企业网搜索域解析）
 - `--allow-private-ip`：Untrusted 下允许连接非公网 IP 字面量
 - `--dns-check`：Untrusted 下对 hostnames 做 best-effort DNS 校验（解析到非公网 IP 会拒绝；除非同时允许 `--allow-private-ip`）
 - `--allow-host <host>`：Untrusted 下设置 host allowlist（可重复）
 
 > `--allow-*` / `--dns-check` 只影响 `transport=streamable_http`，不会放开 stdio/unix（它们需要 `--trust`）。
+>
+> 注意：`--allow-host` allowlist **不会**覆盖上述 `localhost/localdomain/单标签 host` 的拦截；如需允许这些 host，请显式 `--allow-localhost` 或直接 `--trust`。
 
 ## 子命令（subcommands）
 
@@ -46,6 +48,10 @@ cargo run -p mcp-kit --features cli --bin mcpctl -- --help
 ```bash
 cargo run -p mcp-kit --features cli --bin mcpctl -- list-servers
 ```
+
+说明：
+
+- 为了避免意外打印 secrets，`list-servers` 对 `env/http_headers/env_http_headers` 只输出 key 列表（`env_keys/http_header_keys/env_http_header_keys`），不输出具体值。
 
 ### list-tools / list-resources / list-prompts
 

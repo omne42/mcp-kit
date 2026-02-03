@@ -12,6 +12,7 @@
 - `Transport`：`Stdio | Unix | StreamableHttp`
 - `ServerConfig`：按 transport 聚合后的 server 配置
   - `ServerConfig::streamable_http_split(sse_url, http_url)`：便捷构造 split URL 的 `transport=streamable_http`
+  - `inherit_env`：仅 `transport=stdio` 生效；是否继承宿主环境变量（默认 `true`）
 - `StdoutLogConfig`：stdio server stdout 旋转日志配置
 - `Root`：MCP roots 能力（`client.roots`）
 
@@ -22,6 +23,7 @@
   - `connect` / `get_or_connect`
   - `request` / `notify` / `request_typed` / `notify_typed`
   - `list_tools` / `call_tool` / `read_resource` / `get_prompt` 等常用 MCP 方法
+  - 注意：`is_connected/connected_server_names` 与 `*_connected` 系列方法需要 `&mut self`（会做连接存活性检查，并在 I/O/协议错误时自动清理坏连接）
   - `connect_io` / `connect_jsonrpc`：接入自定义 transport
   - `with_server_request_handler` / `with_server_notification_handler`：处理 server→client
 - `Session`：单连接 MCP 会话（已 initialize）
@@ -45,6 +47,7 @@
 
 - `Client`：JSON-RPC 连接（stdio/unix/streamable_http/io）
   - `request(method, params)` / `notify(method, params)`
+  - `wait()`：等待 child 退出；对无 child 的连接返回 `Ok(None)`
   - `take_requests()` / `take_notifications()`：消费 server→client 消息
 - `ClientHandle`：可 clone 的写端句柄（用于 respond server→client requests）
 - `IncomingRequest` / `Notification`

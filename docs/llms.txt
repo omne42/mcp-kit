@@ -482,7 +482,9 @@ CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
 字段：
 
 - `argv`（必填）：非空数组；每项必须非空字符串
-- `inherit_env`（可选，默认 `true`）：是否继承当前进程环境变量。若为 `false`，会清空子进程环境，只透传少量基础变量（如 `PATH`/`HOME`/`TEMP` 等）并再注入 `env`，以降低宿主 secrets 泄露风险。
+- `inherit_env`（可选，默认 `true`）：是否继承当前进程环境变量。若为 `false`，会清空子进程环境，只透传少量基础变量并再注入 `env`，以降低宿主 secrets 泄露风险：
+  - 基线 env 白名单（当前实现）：`PATH`、`HOME`、`USERPROFILE`、`TMPDIR`、`TEMP`、`TMP`、`SystemRoot`、`SYSTEMROOT`
+  - 兼容性提示：如果你的 server 依赖其它变量（如 `LANG/LC_*`、`XDG_*`、证书/代理相关变量等），请显式写入 `servers.<name>.env`（或保持 `inherit_env=true`）
 - `env`（可选）：KV 字典，注入到 child process
 - `stdout_log`（可选）：stdout 旋转落盘（便于排查协议输出）
   - `path`（必填）：可为相对路径（相对 `--root` 解析）
@@ -540,11 +542,13 @@ stdout_log 的旋转文件命名/保留策略见 [`日志与观测`](logging.md)
 
 安全（默认 Untrusted）：
 
-- 允许连接远程 `https` 且非 localhost/私网的 `url`
+- 允许连接远程 `https` 且 host 看起来是公网域名的 `url`（默认拒绝 `localhost/*.localhost/*.local/*.localdomain`、**单标签 host**、以及私网/loopback IP 字面量）
 - 拒绝发送敏感 header：`Authorization/Cookie/Proxy-Authorization`
 - 拒绝读取 `bearer_token_env_var` / `env_http_headers`（env secrets）
 
 详见 [`安全模型`](security.md)。
+
+> 注意：即使你配置了 `allowed_hosts` / CLI `--allow-host`，它也不会覆盖 `localhost/localdomain/单标签 host` 的默认拦截；如需允许这些 host，请显式开启 `allow_localhost` / CLI `--allow-localhost`，或直接使用 `Trusted`。
 
 streamable_http 的具体 HTTP 形态（SSE + POST、`mcp-session-id`、回包为 SSE 的场景）见 [`streamable_http 传输详解`](streamable_http.md)。
 
@@ -602,12 +606,14 @@ cargo run -p mcp-kit --features cli --bin mcpctl -- --help
 
 - `--trust`：完全信任 `mcp.json`（允许 stdio/unix、允许读取 env secrets、允许发送认证 header）
 - `--allow-http`：Untrusted 下允许连接 `http://`（默认只允许 https）
-- `--allow-localhost`：Untrusted 下允许连接 `localhost/*.localhost/*.local`
+- `--allow-localhost`：Untrusted 下允许连接 `localhost/*.localhost/*.local/*.localdomain`，以及**单标签 host**（不含 `.` 的 host，如 `https://example/...`；常见于本地/企业网搜索域解析）
 - `--allow-private-ip`：Untrusted 下允许连接非公网 IP 字面量
 - `--dns-check`：Untrusted 下对 hostnames 做 best-effort DNS 校验（解析到非公网 IP 会拒绝；除非同时允许 `--allow-private-ip`）
 - `--allow-host <host>`：Untrusted 下设置 host allowlist（可重复）
 
 > `--allow-*` / `--dns-check` 只影响 `transport=streamable_http`，不会放开 stdio/unix（它们需要 `--trust`）。
+>
+> 注意：`--allow-host` allowlist **不会**覆盖上述 `localhost/localdomain/单标签 host` 的拦截；如需允许这些 host，请显式 `--allow-localhost` 或直接 `--trust`。
 
 ## 子命令（subcommands）
 
@@ -618,6 +624,10 @@ cargo run -p mcp-kit --features cli --bin mcpctl -- --help
 ```bash
 cargo run -p mcp-kit --features cli --bin mcpctl -- list-servers
 ```
+
+说明：
+
+- 为了避免意外打印 secrets，`list-servers` 对 `env/http_headers/env_http_headers` 只输出 key 列表（`env_keys/http_header_keys/env_http_header_keys`），不输出具体值。
 
 ### list-tools / list-resources / list-prompts
 
@@ -889,6 +899,10 @@ CLI 对应：
 - `allow_private_ips = false`：拒绝 loopback/link-local/private 等非公网 IP 字面量
 - `dns_check = false`：默认不做 DNS 解析检查（可选开启；见下文）
 - `allowed_hosts = []`：默认不做 host allowlist；一旦配置 allowlist，则只允许 allowlist 命中的 host/子域名
+
+补充说明：
+
+- allowlist（`allowed_hosts` / `--allow-host`）不会覆盖 `allow_localhost=false` 下的 `localhost/localdomain/单标签 host` 拒绝逻辑；如需允许这些 host，请显式开启 `allow_localhost` / `--allow-localhost` 或直接使用 `Trusted`。
 
 另外，Untrusted 下还会拒绝：
 
@@ -1490,6 +1504,19 @@ if let Some(mut requests) = client.take_requests() {
 
 `mcp_kit::Manager` 会在 install connection 时自动接管这部分（并提供可注入 handler），一般上层不需要直接操作 `mcp-jsonrpc` 的 channel。
 
+## 等待 child 退出：`Client::wait`
+
+对 stdio spawn 的 client，你可能希望在关闭连接后等待子进程退出：
+
+```rust
+let status = client.wait().await?;
+if let Some(status) = status {
+    eprintln!("child exited: {status}");
+}
+```
+
+注意：对不包含 child 的连接（`connect_io` / `connect_unix` / `connect_streamable_http*`），`wait()` 会返回 `Ok(None)`。
+
 ## Streamable HTTP 的安全/行为
 
 `StreamableHttpOptions`：
@@ -1524,6 +1551,7 @@ streamable_http 的具体请求形态（SSE + POST、`mcp-session-id`、回包�
 - `Transport`：`Stdio | Unix | StreamableHttp`
 - `ServerConfig`：按 transport 聚合后的 server 配置
   - `ServerConfig::streamable_http_split(sse_url, http_url)`：便捷构造 split URL 的 `transport=streamable_http`
+  - `inherit_env`：仅 `transport=stdio` 生效；是否继承宿主环境变量（默认 `true`）
 - `StdoutLogConfig`：stdio server stdout 旋转日志配置
 - `Root`：MCP roots 能力（`client.roots`）
 
@@ -1534,6 +1562,7 @@ streamable_http 的具体请求形态（SSE + POST、`mcp-session-id`、回包�
   - `connect` / `get_or_connect`
   - `request` / `notify` / `request_typed` / `notify_typed`
   - `list_tools` / `call_tool` / `read_resource` / `get_prompt` 等常用 MCP 方法
+  - 注意：`is_connected/connected_server_names` 与 `*_connected` 系列方法需要 `&mut self`（会做连接存活性检查，并在 I/O/协议错误时自动清理坏连接）
   - `connect_io` / `connect_jsonrpc`：接入自定义 transport
   - `with_server_request_handler` / `with_server_notification_handler`：处理 server→client
 - `Session`：单连接 MCP 会话（已 initialize）
@@ -1557,6 +1586,7 @@ streamable_http 的具体请求形态（SSE + POST、`mcp-session-id`、回包�
 
 - `Client`：JSON-RPC 连接（stdio/unix/streamable_http/io）
   - `request(method, params)` / `notify(method, params)`
+  - `wait()`：等待 child 退出；对无 child 的连接返回 `Ok(None)`
   - `take_requests()` / `take_notifications()`：消费 server→client 消息
 - `ClientHandle`：可 clone 的写端句柄（用于 respond server→client requests）
 - `IncomingRequest` / `Notification`
