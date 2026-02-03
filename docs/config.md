@@ -47,6 +47,7 @@ CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
 >
 > - 有些工具会在同一个文件中同时包含其它顶层字段（例如 `plugin.json` 里的 `"version": "1.0.0"`）。只要存在 `mcpServers`，`Config::load` 就会按该 wrapper 解析。
 > - `mcpServers` 既支持 inline object，也支持 string（指向 `./.mcp.json` 等文件路径，按 config 文件所在目录解析）。
+> - 当启用 Trusted mode（CLI `--trust` / `TrustMode::Trusted`）时，`transport=stdio` 的 `argv/env` 以及 `transport=streamable_http` 的 `url/sse_url/http_url/http_headers` 支持 `${VAR}` 占位符（从当前进程环境变量读取）。`${CLAUDE_PLUGIN_ROOT}` / `${MCP_ROOT}` 会替换为 `cwd/--root`。
 
 ### Claude Code `.mcp.json` 直接 server map
 

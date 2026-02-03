@@ -42,6 +42,45 @@ fn apply_stdio_baseline_env(cmd: &mut Command) {
     }
 }
 
+fn is_env_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn expand_placeholders_trusted(template: &str, cwd: &Path) -> anyhow::Result<String> {
+    if !template.contains("${") {
+        return Ok(template.to_string());
+    }
+
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let end = after.find('}').ok_or_else(|| {
+            anyhow::anyhow!("unterminated placeholder: {template} (missing `}}`)")
+        })?;
+        let name = &after[..end];
+        if !is_env_var_name(name) {
+            anyhow::bail!("invalid placeholder name: {name} (template={template})");
+        }
+        let value = match name {
+            "CLAUDE_PLUGIN_ROOT" | "MCP_ROOT" => cwd.display().to_string(),
+            _ => std::env::var(name).with_context(|| format!("read env var: {name}"))?,
+        };
+        out.push_str(&value);
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
 pub enum ServerRequestOutcome {
     Ok(Value),
     Error {
@@ -234,8 +273,18 @@ impl Manager {
                     anyhow::bail!("mcp server argv must not be empty");
                 }
 
-                let mut cmd = Command::new(&server_cfg.argv[0]);
-                cmd.args(server_cfg.argv.iter().skip(1));
+                let expanded_argv = server_cfg
+                    .argv
+                    .iter()
+                    .map(|arg| {
+                        let expanded = expand_placeholders_trusted(arg, cwd)
+                            .with_context(|| format!("expand argv placeholder: {arg}"))?;
+                        Ok::<_, anyhow::Error>(std::ffi::OsString::from(expanded))
+                    })
+                    .collect::<anyhow::Result<Vec<std::ffi::OsString>>>()?;
+
+                let mut cmd = Command::new(&expanded_argv[0]);
+                cmd.args(expanded_argv.iter().skip(1));
                 cmd.current_dir(cwd);
                 cmd.stdin(Stdio::piped());
                 cmd.stdout(Stdio::piped());
@@ -244,7 +293,11 @@ impl Manager {
                     cmd.env_clear();
                     apply_stdio_baseline_env(&mut cmd);
                 }
-                cmd.envs(server_cfg.env.iter());
+                for (key, value) in server_cfg.env.iter() {
+                    let value = expand_placeholders_trusted(value, cwd)
+                        .with_context(|| format!("expand env placeholder: {key}"))?;
+                    cmd.env(key, value);
+                }
                 cmd.kill_on_drop(true);
 
                 let stdout_log = server_cfg
@@ -285,7 +338,7 @@ impl Manager {
                 (client, None)
             }
             Transport::StreamableHttp => {
-                let (sse_url, post_url) = match (
+                let (sse_url_raw, post_url_raw) = match (
                     server_cfg.url.as_deref(),
                     server_cfg.sse_url.as_deref(),
                     server_cfg.http_url.as_deref(),
@@ -299,11 +352,24 @@ impl Manager {
                     }
                 };
 
+                let sse_url = if self.trust_mode == TrustMode::Trusted {
+                    expand_placeholders_trusted(sse_url_raw, cwd)
+                        .with_context(|| format!("expand url placeholder: {sse_url_raw}"))?
+                } else {
+                    sse_url_raw.to_string()
+                };
+                let post_url = if self.trust_mode == TrustMode::Trusted {
+                    expand_placeholders_trusted(post_url_raw, cwd)
+                        .with_context(|| format!("expand url placeholder: {post_url_raw}"))?
+                } else {
+                    post_url_raw.to_string()
+                };
+
                 validate_streamable_http_config(
                     self.trust_mode,
                     &self.untrusted_streamable_http_policy,
                     server_name,
-                    sse_url,
+                    &sse_url,
                     server_cfg,
                 )?;
                 if post_url != sse_url {
@@ -311,7 +377,7 @@ impl Manager {
                         self.trust_mode,
                         &self.untrusted_streamable_http_policy,
                         server_name,
-                        post_url,
+                        &post_url,
                         server_cfg,
                     )?;
                 }
@@ -319,14 +385,14 @@ impl Manager {
                     validate_streamable_http_url_untrusted_dns(
                         &self.untrusted_streamable_http_policy,
                         server_name,
-                        sse_url,
+                        &sse_url,
                     )
                     .await?;
                     if post_url != sse_url {
                         validate_streamable_http_url_untrusted_dns(
                             &self.untrusted_streamable_http_policy,
                             server_name,
-                            post_url,
+                            &post_url,
                         )
                         .await?;
                     }
@@ -335,8 +401,17 @@ impl Manager {
                 let mut headers: std::collections::HashMap<String, String> = server_cfg
                     .http_headers
                     .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect();
+                    .map(|(k, v)| {
+                        let v = if self.trust_mode == TrustMode::Trusted {
+                            expand_placeholders_trusted(v, cwd).with_context(|| {
+                                format!("expand http_header placeholder: {server_name} header={k}")
+                            })?
+                        } else {
+                            v.to_string()
+                        };
+                        Ok((k.to_string(), v))
+                    })
+                    .collect::<anyhow::Result<_>>()?;
                 headers.insert(
                     "MCP-Protocol-Version".to_string(),
                     self.protocol_version.clone(),
@@ -368,8 +443,8 @@ impl Manager {
                 }
 
                 let client = mcp_jsonrpc::Client::connect_streamable_http_split_with_options(
-                    sse_url,
-                    post_url,
+                    &sse_url,
+                    &post_url,
                     mcp_jsonrpc::StreamableHttpOptions {
                         headers,
                         request_timeout: Some(self.request_timeout),
@@ -1463,6 +1538,31 @@ mod tests {
                 "roots": [{ "uri": "file:///tmp", "name": "tmp" }]
             })
         );
+    }
+
+    #[test]
+    fn expand_placeholders_supports_claude_plugin_root() {
+        let cwd = Path::new("/tmp/plugin");
+        let expanded =
+            expand_placeholders_trusted("${CLAUDE_PLUGIN_ROOT}/servers/mcp", cwd).unwrap();
+        assert_eq!(expanded, "/tmp/plugin/servers/mcp");
+    }
+
+    #[test]
+    fn expand_placeholders_supports_env_vars() {
+        let Ok(path) = std::env::var("PATH") else {
+            return;
+        };
+        let cwd = Path::new("/tmp/plugin");
+        let expanded = expand_placeholders_trusted("prefix-${PATH}-suffix", cwd).unwrap();
+        assert_eq!(expanded, format!("prefix-{path}-suffix"));
+    }
+
+    #[test]
+    fn expand_placeholders_rejects_invalid_name() {
+        let cwd = Path::new("/tmp/plugin");
+        let err = expand_placeholders_trusted("${BAD-NAME}", cwd).unwrap_err();
+        assert!(err.to_string().contains("invalid placeholder name"));
     }
 
     #[tokio::test]
