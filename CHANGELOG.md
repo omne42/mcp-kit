@@ -27,7 +27,8 @@
 - `Manager::{take_session, get_or_connect_session, connect_*_session}`：支持把握手完成的会话交给上层库持有。
 - `mcp-kit`：`Config::load` 支持 Cursor/Claude Code 常见的 `.mcp.json` / `mcpServers` 兼容格式（best-effort）。
 - `mcp-jsonrpc`：`streamable_http` 兼容握手前 `GET SSE` 返回 `405`，并在 `202 Accepted`（或首次获得 `mcp-session-id`）后自动重试建立 inbound SSE。
-- Examples: add runnable `client_with_policy`, `in_memory_duplex`, and `streamable_http_split` under `crates/mcp-kit/examples/`.
+- Examples: add runnable `client_with_policy`, `in_memory_duplex`, `session_handoff`, and `streamable_http_split` under `crates/mcp-kit/examples/`.
+- Docs: add a quick example index at `example/README.md`.
 - Docs: expand runnable examples section and clarify Untrusted/Trusted usage in `docs/examples.md`.
 
 ### Changed

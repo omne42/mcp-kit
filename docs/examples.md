@@ -15,6 +15,9 @@
 - `in_memory_duplex`（无需外部 server；`Manager::connect_io` + duplex；演示 server→client request）：
   - 源码：`crates/mcp-kit/examples/in_memory_duplex.rs`
   - 运行：`cargo run -p mcp-kit --example in_memory_duplex`
+- `session_handoff`（无需外部 server；`Manager::connect_io_session` + `Session`；演示把单连接交给其它模块持有）：
+  - 源码：`crates/mcp-kit/examples/session_handoff.rs`
+  - 运行：`cargo run -p mcp-kit --example session_handoff`
 - `streamable_http_split`（需要真实 server；演示拆分 `sse_url/http_url`）：
   - 源码：`crates/mcp-kit/examples/streamable_http_split.rs`
   - 运行：`cargo run -p mcp-kit --example streamable_http_split -- <sse_url> <http_url>`
