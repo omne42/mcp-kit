@@ -24,6 +24,10 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 
 - `TrustMode::Untrusted` 下会拒绝 spawn（见 [`安全模型`](security.md)）
 
+可运行示例：
+
+- `cargo run -p mcp-kit --example stdio_self_spawn`（无需外部 server；演示 stdio spawn + initialize + tools/list/tools/call）
+
 ## transport=unix（连接已存在的 unix socket）
 
 适用：server 已经以守护进程或其他方式运行，并暴露 unix domain socket。
@@ -39,6 +43,10 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 安全：
 
 - `TrustMode::Untrusted` 下会拒绝连接（见 [`安全模型`](security.md)）
+
+可运行示例（仅 unix）：
+
+- `cargo run -p mcp-kit --example unix_loopback`（无需外部 server；用 `UnixListener` 起本地 socket，再用 `transport=unix` 连接）
 
 ## transport=streamable_http（远程 HTTP SSE + POST）
 
@@ -68,6 +76,13 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 - 拒绝敏感 header（Authorization/Cookie/Proxy-Authorization）
 
 详见 [`安全模型`](security.md)。
+
+可运行示例：
+
+- `cargo run -p mcp-kit --example minimal_client -- <server>`
+- `cargo run -p mcp-kit --example client_with_policy -- [flags] <server>`
+- `cargo run -p mcp-kit --example streamable_http_split -- <sse_url> <http_url>`
+- `cargo run -p mcp-kit --example streamable_http_custom_options -- [flags] <sse_url> [http_url]`
 
 ## 自定义 transport
 

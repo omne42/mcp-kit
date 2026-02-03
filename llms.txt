@@ -753,6 +753,35 @@ let tools = session.list_tools().await?;
 - 未识别的 server→client request：返回 JSON-RPC `-32601 Method not found`
 - 若启用 roots：内建响应 `roots/list`
 
+如果你的 MCP server 会“反向调用”一些 client 侧能力（server→client request），通常需要两件事：
+
+1. 在 initialize 里声明你支持的 client capabilities（`Manager::with_capabilities(...)`）
+2. 实现对应的 request handler（`with_server_request_handler(...)`）
+
+例如（声明 capability + 处理对应的 server→client request；类似一些实现会用到的 `codex/sandbox-state/update`）：
+
+```rust
+use std::sync::Arc;
+
+use mcp_kit::{ServerRequestContext, ServerRequestOutcome};
+use serde_json::json;
+
+manager = manager.with_capabilities(json!({
+    "experimental": {
+        "codex/sandbox-state": { "version": "1.0.0" }
+    }
+}));
+
+manager = manager.with_server_request_handler(Arc::new(|ctx: ServerRequestContext| {
+    Box::pin(async move {
+        match ctx.method.as_str() {
+            "codex/sandbox-state/update" => ServerRequestOutcome::Ok(serde_json::json!({})),
+            _ => ServerRequestOutcome::MethodNotFound,
+        }
+    }) as _
+}));
+```
+
 你可以注入 handler：
 
 ```rust
@@ -968,6 +997,10 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 
 - `TrustMode::Untrusted` 下会拒绝 spawn（见 [`安全模型`](security.md)）
 
+可运行示例：
+
+- `cargo run -p mcp-kit --example stdio_self_spawn`（无需外部 server；演示 stdio spawn + initialize + tools/list/tools/call）
+
 ## transport=unix（连接已存在的 unix socket）
 
 适用：server 已经以守护进程或其他方式运行，并暴露 unix domain socket。
@@ -983,6 +1016,10 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 安全：
 
 - `TrustMode::Untrusted` 下会拒绝连接（见 [`安全模型`](security.md)）
+
+可运行示例（仅 unix）：
+
+- `cargo run -p mcp-kit --example unix_loopback`（无需外部 server；用 `UnixListener` 起本地 socket，再用 `transport=unix` 连接）
 
 ## transport=streamable_http（远程 HTTP SSE + POST）
 
@@ -1012,6 +1049,13 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 - 拒绝敏感 header（Authorization/Cookie/Proxy-Authorization）
 
 详见 [`安全模型`](security.md)。
+
+可运行示例：
+
+- `cargo run -p mcp-kit --example minimal_client -- <server>`
+- `cargo run -p mcp-kit --example client_with_policy -- [flags] <server>`
+- `cargo run -p mcp-kit --example streamable_http_split -- <sse_url> <http_url>`
+- `cargo run -p mcp-kit --example streamable_http_custom_options -- [flags] <sse_url> [http_url]`
 
 ## 自定义 transport
 
@@ -1357,6 +1401,8 @@ let mut client = Client::connect_streamable_http_with_options(
 manager.connect_jsonrpc("remote", client).await?;
 ```
 
+> 安全提示：当你自己构建 `mcp_jsonrpc::Client` 并用 `connect_jsonrpc` 接入时，`Manager` 不会再对 streamable_http 的 URL/headers 做 Untrusted 出站校验。请仅在你**完全信任** URL/headers 的场景使用；否则建议继续走 `Manager::from_config` / `Manager::connect` + `UntrustedStreamableHttpPolicy`。详见 [`安全模型`](security.md)。
+
 > 这条路径同样适用于 `connect_io_with_options`（例如测试时使用 `tokio::io::duplex`）。
 
 可运行版本见：`crates/mcp-kit/examples/streamable_http_custom_options.rs`。
@@ -1473,6 +1519,7 @@ streamable_http 的具体请求形态（SSE + POST、`mcp-session-id`、回包�
 - `Config::load(root, override_path)`：读取并校验 `mcp.json`（v1），并解析为 `Config`
 - `Transport`：`Stdio | Unix | StreamableHttp`
 - `ServerConfig`：按 transport 聚合后的 server 配置
+  - `ServerConfig::streamable_http_split(sse_url, http_url)`：便捷构造 split URL 的 `transport=streamable_http`
 - `StdoutLogConfig`：stdio server stdout 旋转日志配置
 - `Root`：MCP roots 能力（`client.roots`）
 
@@ -1652,6 +1699,14 @@ MCP/JSON-RPC 允许 server 主动发消息给 client：
 - `client_with_policy`（支持 `--trust` + Untrusted 出站策略 flags；无 clap，手写 args）：
   - 源码：`crates/mcp-kit/examples/client_with_policy.rs`
   - 运行：`cargo run -p mcp-kit --example client_with_policy -- [flags] <server>`
+- `stdio_self_spawn`（无需外部 server；演示 `transport=stdio` 的 spawn + initialize + tools/list/tools/call）：
+  - 源码：`crates/mcp-kit/examples/stdio_self_spawn.rs`
+  - 运行：`cargo run -p mcp-kit --example stdio_self_spawn`
+  - 注意：该示例会用 `TrustMode::Trusted` 允许 spawn；`--server` 仅用于内部子进程模式
+- `unix_loopback`（仅 unix；无需外部 server；演示 `transport=unix` + 本地 socket）：
+  - 源码：`crates/mcp-kit/examples/unix_loopback.rs`
+  - 运行：`cargo run -p mcp-kit --example unix_loopback`
+  - 注意：`transport=unix` 需要 `TrustMode::Trusted`
 - `in_memory_duplex`（无需外部 server；`Manager::connect_io` + duplex；演示 server→client request）：
   - 源码：`crates/mcp-kit/examples/in_memory_duplex.rs`
   - 运行：`cargo run -p mcp-kit --example in_memory_duplex`

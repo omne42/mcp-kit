@@ -19,6 +19,12 @@ cargo run -p mcp-kit --example minimal_client -- <server>
 # Like minimal_client, but exposes --trust and Untrusted egress policy flags
 cargo run -p mcp-kit --example client_with_policy -- [flags] <server>
 
+# No external server: spawn itself as an MCP server over stdio (Trusted)
+cargo run -p mcp-kit --example stdio_self_spawn
+
+# No external server (unix only): unix socket loopback server + transport=unix (Trusted)
+cargo run -p mcp-kit --example unix_loopback
+
 # No external server: in-memory duplex IO + server→client request handling
 cargo run -p mcp-kit --example in_memory_duplex
 

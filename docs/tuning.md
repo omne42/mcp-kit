@@ -103,6 +103,8 @@ let mut client = Client::connect_streamable_http_with_options(
 manager.connect_jsonrpc("remote", client).await?;
 ```
 
+> 安全提示：当你自己构建 `mcp_jsonrpc::Client` 并用 `connect_jsonrpc` 接入时，`Manager` 不会再对 streamable_http 的 URL/headers 做 Untrusted 出站校验。请仅在你**完全信任** URL/headers 的场景使用；否则建议继续走 `Manager::from_config` / `Manager::connect` + `UntrustedStreamableHttpPolicy`。详见 [`安全模型`](security.md)。
+
 > 这条路径同样适用于 `connect_io_with_options`（例如测试时使用 `tokio::io::duplex`）。
 
 可运行版本见：`crates/mcp-kit/examples/streamable_http_custom_options.rs`。

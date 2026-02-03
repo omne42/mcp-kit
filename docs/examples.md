@@ -12,6 +12,14 @@
 - `client_with_policy`（支持 `--trust` + Untrusted 出站策略 flags；无 clap，手写 args）：
   - 源码：`crates/mcp-kit/examples/client_with_policy.rs`
   - 运行：`cargo run -p mcp-kit --example client_with_policy -- [flags] <server>`
+- `stdio_self_spawn`（无需外部 server；演示 `transport=stdio` 的 spawn + initialize + tools/list/tools/call）：
+  - 源码：`crates/mcp-kit/examples/stdio_self_spawn.rs`
+  - 运行：`cargo run -p mcp-kit --example stdio_self_spawn`
+  - 注意：该示例会用 `TrustMode::Trusted` 允许 spawn；`--server` 仅用于内部子进程模式
+- `unix_loopback`（仅 unix；无需外部 server；演示 `transport=unix` + 本地 socket）：
+  - 源码：`crates/mcp-kit/examples/unix_loopback.rs`
+  - 运行：`cargo run -p mcp-kit --example unix_loopback`
+  - 注意：`transport=unix` 需要 `TrustMode::Trusted`
 - `in_memory_duplex`（无需外部 server；`Manager::connect_io` + duplex；演示 server→client request）：
   - 源码：`crates/mcp-kit/examples/in_memory_duplex.rs`
   - 运行：`cargo run -p mcp-kit --example in_memory_duplex`

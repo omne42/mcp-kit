@@ -30,6 +30,7 @@
 - `mcp-jsonrpc`：`streamable_http` 兼容握手前 `GET SSE` 返回 `405`，并在 `202 Accepted`（或首次获得 `mcp-session-id`）后自动重试建立 inbound SSE。
 - Examples: add runnable `client_with_policy`, `in_memory_duplex`, `session_handoff`, and `streamable_http_split` under `crates/mcp-kit/examples/`.
 - Examples: add runnable `streamable_http_custom_options` to demonstrate custom `StreamableHttpOptions` + `Manager::connect_jsonrpc`.
+- Examples: add runnable `stdio_self_spawn` and `unix_loopback` to demonstrate self-contained stdio/unix transports.
 - Docs: add a quick example index at `example/README.md`.
 - Docs: expand runnable examples section and clarify Untrusted/Trusted usage in `docs/examples.md`.
 
@@ -62,10 +63,14 @@
 - Docs: clarify `StreamableHttpOptions.request_timeout` semantics in `docs/jsonrpc.md`.
 - Docs: document split `sse_url/http_url`, `--dns-check`, and updated `[DONE]` semantics for streamable_http.
 - Docs: expand GitBook-style documentation under `docs/` and add `CONTRIBUTING.md`.
+- Docs: link each transport to runnable examples (`docs/transports.md`).
 - Docs: add `docs/book.toml` (mdbook) and `llms.txt` / `docs/llms.txt` (single-file doc bundle), plus a pre-commit freshness check.
 - Docs: refresh `docs/README.md` with a 1-minute copy/paste quickstart (now uses typed `tools/list` request to match runnable examples).
 - Docs: add a minimal `Cargo.toml` dependency snippet to the 1-minute quickstart so the Rust example compiles.
 - Docs: prefer the repo-root `llms.txt` in `docs/llms.md` usage instructions.
+- Docs: add a safety note for `connect_jsonrpc`/custom `StreamableHttpOptions` to avoid bypassing Untrusted policy by accident.
+- Docs: document `ServerConfig::streamable_http_split(...)` in the API reference.
+- Docs: expand the library guide with a capabilities + server→client request handler snippet.
 - Docs: make `docs/SUMMARY.md` mdbook-compatible and add section landing pages (`docs/guides.md`, `docs/reference.md`, `docs/more.md`).
 - Docs: clarify `stdout_log.max_parts` semantics for `mcp.json` vs Rust API.
 - githooks: if `mdbook` is installed, pre-commit now runs `mdbook build docs` when docs are staged, to catch rendering issues early.
