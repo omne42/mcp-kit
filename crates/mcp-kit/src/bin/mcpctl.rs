@@ -60,6 +60,9 @@ struct Cli {
     /// Allowlist hostnames for streamable_http in untrusted mode (repeatable).
     ///
     /// When set, only these hosts (or their subdomains) are allowed unless `--trust` is used.
+    ///
+    /// Note: this does not override the localhost/localdomain/single-label host restriction;
+    /// use `--allow-localhost` or `--trust` for that.
     #[arg(long)]
     allow_host: Vec<String>,
 
