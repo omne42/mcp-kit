@@ -93,7 +93,7 @@ CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
 
 `servers` 的 key（server name）只允许字符：`[a-zA-Z0-9_-]`，且不能为空。
 
-## servers.<name> 通用字段
+## `servers.<name>` 通用字段
 
 所有 transport 共有字段：
 

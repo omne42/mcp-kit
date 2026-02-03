@@ -10,7 +10,7 @@
 
 解决：把 `mcp.json` 顶层 `version` 改为 `1`。
 
-### invalid mcp server name: <name>
+### invalid mcp server name: `<name>`
 
 原因：server 名称只允许 `[a-zA-Z0-9_-]`。
 
@@ -95,7 +95,7 @@
 
 ## 超时与协议问题
 
-### mcp request timed out: <method>
+### mcp request timed out: `<method>`
 
 原因：网络问题、server 卡住、或 timeout 太短。
 

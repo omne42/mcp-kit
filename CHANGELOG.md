@@ -62,6 +62,10 @@
 - Docs: expand GitBook-style documentation under `docs/` and add `CONTRIBUTING.md`.
 - Docs: add `docs/book.toml` (mdbook) and `llms.txt` / `docs/llms.txt` (single-file doc bundle), plus a pre-commit freshness check.
 - Docs: refresh `docs/README.md` with a 1-minute copy/paste quickstart.
+- Docs: add a minimal `Cargo.toml` dependency snippet to the 1-minute quickstart so the Rust example compiles.
+- Docs: prefer the repo-root `llms.txt` in `docs/llms.md` usage instructions.
+- Docs: make `docs/SUMMARY.md` mdbook-compatible and add section landing pages (`docs/guides.md`, `docs/reference.md`, `docs/more.md`).
+- githooks: if `mdbook` is installed, pre-commit now runs `mdbook build docs` to catch rendering issues early.
 - `mcp-kit`：`mcp.json v1` 中 `http_headers` 现在也接受别名字段 `headers`（便于复用 Cursor 等配置片段）。
 
 ### Fixed

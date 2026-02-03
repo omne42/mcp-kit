@@ -61,6 +61,15 @@ if [[ -x "$repo_root/scripts/gen-llms-txt.sh" ]]; then
   (cd "$repo_root" && ./scripts/gen-llms-txt.sh --check) >/dev/null
 fi
 
+if [[ -f "$repo_root/docs/book.toml" ]]; then
+  if command -v mdbook >/dev/null 2>&1; then
+    echo "pre-commit: building docs (mdbook)" >&2
+    (cd "$repo_root" && mdbook build docs) >/dev/null
+  else
+    echo "pre-commit: mdbook not found; skipping docs build." >&2
+  fi
+fi
+
 workspace_root=""
 if [[ -f "$repo_root/Cargo.toml" ]]; then
   workspace_root="$repo_root"

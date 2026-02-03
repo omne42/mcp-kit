@@ -26,6 +26,19 @@ cargo run -p mcp-kit --features cli --bin mcpctl -- list-tools remote
 
 3）作为库调用（最小）：
 
+`Cargo.toml`（最小依赖）：
+
+```toml
+[dependencies]
+anyhow = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# 依赖本仓库（把 path 改成你本地 clone 的实际路径；也可以改用 git 方式）
+mcp-kit = { path = "../mcp-kit/crates/mcp-kit" }
+# mcp-kit = { git = "https://github.com/<owner>/mcp-kit", rev = "<sha>" }
+```
+
 ```rust
 use std::time::Duration;
 

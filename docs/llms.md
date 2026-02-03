@@ -11,7 +11,7 @@
 
 ## 如何使用
 
-1. 打开 `docs/llms.txt`，全选复制。
+1. 打开仓库根目录的 `llms.txt`，全选复制。（`docs/llms.txt` 是同内容副本）
 2. 在你的 LLM 工具里粘贴，并告诉它：
    - 你正在使用 `mcp-kit`（Rust workspace）
    - 你希望它参考文档给出具体到文件/命令的建议

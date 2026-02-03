@@ -2,7 +2,6 @@
 title = "mcp-kit"
 description = "mcp-kit documentation (MCP client/runner toolkit)"
 language = "zh"
-multilingual = false
 src = "."
 
 [build]
