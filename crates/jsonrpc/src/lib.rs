@@ -359,6 +359,19 @@ pub struct Client {
     transport_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitOnTimeout {
+    /// Return an error if the child does not exit within the timeout.
+    ///
+    /// The child process is left running. Use `Client::take_child()` if you want to manage it
+    /// manually.
+    ReturnError,
+    /// Attempt to kill the child if it does not exit within the timeout.
+    ///
+    /// After sending the kill signal, this waits up to `kill_timeout` for the child to exit.
+    Kill { kill_timeout: Duration },
+}
+
 impl Client {
     pub fn stats(&self) -> ClientStats {
         self.handle.stats()
@@ -748,6 +761,9 @@ impl Client {
     ///
     /// Clients created without a child process (e.g. via `connect_io`, `connect_unix`, or
     /// `connect_streamable_http*`) return `Ok(None)`.
+    ///
+    /// Note: this method can hang indefinitely if the child process does not exit.
+    /// Prefer `Client::wait_with_timeout` if you need an upper bound.
     pub async fn wait(&mut self) -> Result<Option<std::process::ExitStatus>, Error> {
         self.task.abort();
         for task in self.transport_tasks.drain(..) {
@@ -758,6 +774,66 @@ impl Client {
         match &mut self.child {
             Some(child) => Ok(Some(child.wait().await?)),
             None => Ok(None),
+        }
+    }
+
+    /// Closes the client and waits for the underlying child process to exit, up to `timeout`.
+    ///
+    /// If this client has no child process (e.g. created via `connect_io`, `connect_unix`, or
+    /// `connect_streamable_http*`), this returns `Ok(None)` without waiting.
+    ///
+    /// On timeout:
+    /// - `WaitOnTimeout::ReturnError` returns an `Error::Protocol` timeout error and leaves the
+    ///   child running.
+    /// - `WaitOnTimeout::Kill { kill_timeout }` sends a kill signal, then waits up to
+    ///   `kill_timeout` for the child to exit.
+    pub async fn wait_with_timeout(
+        &mut self,
+        timeout: Duration,
+        on_timeout: WaitOnTimeout,
+    ) -> Result<Option<std::process::ExitStatus>, Error> {
+        self.task.abort();
+        for task in self.transport_tasks.drain(..) {
+            task.abort();
+        }
+        self.handle.close_with_reason("client closed").await;
+
+        let Some(child) = &mut self.child else {
+            return Ok(None);
+        };
+
+        match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(status) => Ok(Some(status?)),
+            Err(_) => match on_timeout {
+                WaitOnTimeout::ReturnError => {
+                    Err(Error::Protocol(format!("wait timed out after {timeout:?}")))
+                }
+                WaitOnTimeout::Kill { kill_timeout } => {
+                    let child_id = child.id();
+                    if let Err(err) = child.start_kill() {
+                        match child.try_wait() {
+                            Ok(Some(status)) => return Ok(Some(status)),
+                            Ok(None) => {
+                                return Err(Error::Protocol(format!(
+                                    "wait timed out after {timeout:?}; failed to kill child (id={child_id:?}): {err}"
+                                )));
+                            }
+                            Err(try_wait_err) => {
+                                return Err(Error::Protocol(format!(
+                                    "wait timed out after {timeout:?}; failed to kill child (id={child_id:?}): {err}; try_wait failed: {try_wait_err}"
+                                )));
+                            }
+                        }
+                    }
+
+                    match tokio::time::timeout(kill_timeout, child.wait()).await {
+                        Ok(status) => Ok(Some(status?)),
+                        Err(_) => Err(Error::Protocol(format!(
+                            "wait timed out after {timeout:?}; killed child (id={child_id:?}) but it did not exit within {kill_timeout:?}"
+                        ))),
+                    }
+                }
+            },
         }
     }
 }
@@ -1622,8 +1698,11 @@ fn handle_response(pending: &PendingRequests, value: Value) {
 async fn ensure_stdout_log_path_has_no_symlink(path: &Path) -> Result<(), std::io::Error> {
     use std::path::Component;
 
+    let skip_last_component_symlink_check = cfg!(unix);
+    let mut components = path.components().peekable();
     let mut current = PathBuf::new();
-    for component in path.components() {
+    while let Some(component) = components.next() {
+        let is_last = components.peek().is_none();
         match component {
             Component::Prefix(prefix) => current.push(prefix.as_os_str()),
             Component::RootDir => current.push(component.as_os_str()),
@@ -1633,6 +1712,11 @@ async fn ensure_stdout_log_path_has_no_symlink(path: &Path) -> Result<(), std::i
             }
             Component::Normal(part) => {
                 current.push(part);
+                if is_last && skip_last_component_symlink_check {
+                    // Do not pre-check the final path component. On unix we open with `O_NOFOLLOW`
+                    // to prevent TOCTOU symlink replacement.
+                    continue;
+                }
                 match tokio::fs::symlink_metadata(&current).await {
                     Ok(metadata) => {
                         if metadata.file_type().is_symlink() {
@@ -1656,11 +1740,15 @@ async fn ensure_stdout_log_path_has_no_symlink(path: &Path) -> Result<(), std::i
 
 async fn open_stdout_log_append(path: &Path) -> Result<tokio::fs::File, std::io::Error> {
     ensure_stdout_log_path_has_no_symlink(path).await?;
-    tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .await
+
+    let mut options = tokio::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+
+    options.open(path).await
 }
 
 struct LogState {
@@ -1887,7 +1975,8 @@ mod stdout_log_tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn stdout_log_rejects_symlink_target() {
-        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+        let dir = tempfile::tempdir_in(base).unwrap();
         let target = dir.path().join("target.log");
         tokio::fs::write(&target, b"ok\n").await.unwrap();
 
@@ -1903,11 +1992,7 @@ mod stdout_log_tests {
         .err()
         .expect("should reject symlink stdout_log path");
 
-        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
-        assert!(
-            err.to_string()
-                .contains("stdout_log path contains symlink component")
-        );
+        assert_eq!(err.raw_os_error(), Some(libc::ELOOP));
     }
 
     #[cfg(unix)]

@@ -206,10 +206,55 @@ fn is_valid_server_name(name: &str) -> bool {
         .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
 }
 
+#[cfg(unix)]
+fn describe_file_type(meta: &std::fs::Metadata) -> &'static str {
+    use std::os::unix::fs::FileTypeExt;
+
+    let file_type = meta.file_type();
+    if file_type.is_file() {
+        "regular file"
+    } else if file_type.is_dir() {
+        "directory"
+    } else if file_type.is_symlink() {
+        "symlink"
+    } else if file_type.is_block_device() {
+        "block device"
+    } else if file_type.is_char_device() {
+        "character device"
+    } else if file_type.is_fifo() {
+        "fifo"
+    } else if file_type.is_socket() {
+        "socket"
+    } else {
+        "special file"
+    }
+}
+
+#[cfg(not(unix))]
+fn describe_file_type(meta: &std::fs::Metadata) -> &'static str {
+    let file_type = meta.file_type();
+    if file_type.is_file() {
+        "regular file"
+    } else if file_type.is_dir() {
+        "directory"
+    } else if file_type.is_symlink() {
+        "symlink"
+    } else {
+        "special file"
+    }
+}
+
 async fn read_to_string_limited(path: &Path) -> anyhow::Result<String> {
-    let meta = tokio::fs::metadata(path)
+    let meta = tokio::fs::symlink_metadata(path)
         .await
         .with_context(|| format!("stat {}", path.display()))?;
+    if !meta.file_type().is_file() {
+        let kind = describe_file_type(&meta);
+        anyhow::bail!(
+            "mcp config must be a regular file (got {kind}): {}",
+            path.display()
+        );
+    }
     if meta.len() > MAX_CONFIG_BYTES {
         anyhow::bail!(
             "mcp config too large: {} bytes (max {MAX_CONFIG_BYTES}): {}",
@@ -217,17 +262,42 @@ async fn read_to_string_limited(path: &Path) -> anyhow::Result<String> {
             path.display()
         );
     }
-    tokio::fs::read_to_string(path)
+    use tokio::io::AsyncReadExt;
+
+    let mut buf = Vec::new();
+    tokio::fs::File::open(path)
         .await
+        .with_context(|| format!("read {}", path.display()))?
+        .take(MAX_CONFIG_BYTES + 1)
+        .read_to_end(&mut buf)
+        .await
+        .with_context(|| format!("read {}", path.display()))?;
+    if buf.len() as u64 > MAX_CONFIG_BYTES {
+        anyhow::bail!(
+            "mcp config too large: {} bytes (max {MAX_CONFIG_BYTES}): {}",
+            buf.len(),
+            path.display()
+        );
+    }
+
+    String::from_utf8(buf)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
         .with_context(|| format!("read {}", path.display()))
 }
 
 async fn try_read_to_string_limited(path: &Path) -> anyhow::Result<Option<String>> {
-    let meta = match tokio::fs::metadata(path).await {
+    let meta = match tokio::fs::symlink_metadata(path).await {
         Ok(meta) => meta,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err).with_context(|| format!("stat {}", path.display())),
     };
+    if !meta.file_type().is_file() {
+        let kind = describe_file_type(&meta);
+        anyhow::bail!(
+            "mcp config must be a regular file (got {kind}): {}",
+            path.display()
+        );
+    }
     if meta.len() > MAX_CONFIG_BYTES {
         anyhow::bail!(
             "mcp config too large: {} bytes (max {MAX_CONFIG_BYTES}): {}",
@@ -235,43 +305,28 @@ async fn try_read_to_string_limited(path: &Path) -> anyhow::Result<Option<String
             path.display()
         );
     }
-    let contents = tokio::fs::read_to_string(path)
+
+    use tokio::io::AsyncReadExt;
+
+    let mut buf = Vec::new();
+    tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("read {}", path.display()))?
+        .take(MAX_CONFIG_BYTES + 1)
+        .read_to_end(&mut buf)
         .await
         .with_context(|| format!("read {}", path.display()))?;
-    Ok(Some(contents))
-}
-
-async fn ensure_relative_path_has_no_symlink_components(
-    base_dir: &Path,
-    rel_path: &Path,
-) -> anyhow::Result<()> {
-    let mut current = base_dir.to_path_buf();
-    for component in rel_path.components() {
-        match component {
-            Component::CurDir => continue,
-            Component::Normal(part) => current.push(part),
-            Component::ParentDir => {
-                anyhow::bail!(
-                    "unsupported mcpServers format: path must be relative and must not contain `..` segments"
-                )
-            }
-            Component::RootDir | Component::Prefix(_) => {
-                anyhow::bail!(
-                    "unsupported mcpServers format: path must be relative and must not contain `..` segments"
-                )
-            }
-        }
-        let meta = tokio::fs::symlink_metadata(&current)
-            .await
-            .with_context(|| format!("stat {}", current.display()))?;
-        if meta.file_type().is_symlink() {
-            anyhow::bail!(
-                "unsupported mcpServers format: path must not contain symlink component: {}",
-                current.display()
-            );
-        }
+    if buf.len() as u64 > MAX_CONFIG_BYTES {
+        anyhow::bail!(
+            "mcp config too large: {} bytes (max {MAX_CONFIG_BYTES}): {}",
+            buf.len(),
+            path.display()
+        );
     }
-    Ok(())
+    let contents = String::from_utf8(buf)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+        .with_context(|| format!("read {}", path.display()))?;
+    Ok(Some(contents))
 }
 
 async fn canonicalize_in_root(thread_root: &Path, path: &Path) -> anyhow::Result<PathBuf> {
@@ -378,10 +433,6 @@ impl Config {
                                         .as_ref()
                                         .and_then(|p| p.parent())
                                         .unwrap_or(thread_root);
-                                    ensure_relative_path_has_no_symlink_components(
-                                        base_dir, &mcp_path,
-                                    )
-                                    .await?;
                                     let next_path = base_dir.join(&mcp_path);
                                     let canonical_next_path =
                                         canonicalize_in_root(thread_root, &next_path)
@@ -1147,7 +1198,7 @@ mod tests {
 
         let err = Config::load(dir.path(), None).await.unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("symlink"), "err={msg}");
+        assert!(msg.contains("escapes root"), "err={msg}");
     }
 
     #[cfg(unix)]
@@ -1171,6 +1222,70 @@ mod tests {
         )
         .await
         .unwrap();
+
+        let err = Config::load(dir.path(), None).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("escapes root"), "err={msg}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_allows_mcpservers_indirection_via_symlink_dir_within_root() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let real_dir = dir.path().join("real_dir");
+        tokio::fs::create_dir_all(&real_dir).await.unwrap();
+        tokio::fs::write(
+            real_dir.join("servers.json"),
+            r#"{ "mcpServers": { "a": { "command": "echo", "args": ["hi"] } } }"#,
+        )
+        .await
+        .unwrap();
+
+        let link_dir = dir.path().join("linkdir");
+        std::os::unix::fs::symlink(&real_dir, &link_dir).unwrap();
+
+        tokio::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{ "mcpServers": "linkdir/servers.json" }"#,
+        )
+        .await
+        .unwrap();
+
+        let cfg = Config::load(dir.path(), None).await.unwrap();
+        assert!(cfg.servers.contains_key("a"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_denies_config_via_symlink_file() {
+        let dir = tempfile::tempdir().unwrap();
+
+        tokio::fs::write(
+            dir.path().join("real.json"),
+            r#"{ "version": 1, "servers": { "a": { "transport": "stdio", "argv": ["mcp-a"] } } }"#,
+        )
+        .await
+        .unwrap();
+
+        let link = dir.path().join("mcp.json");
+        std::os::unix::fs::symlink(dir.path().join("real.json"), &link).unwrap();
+
+        let err = Config::load(dir.path(), None).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("symlink"), "err={msg}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_denies_config_via_symlink_dir() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let real_dir = dir.path().join("real_dir");
+        tokio::fs::create_dir(&real_dir).await.unwrap();
+
+        let link = dir.path().join("mcp.json");
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
 
         let err = Config::load(dir.path(), None).await.unwrap_err();
         let msg = format!("{err:#}");

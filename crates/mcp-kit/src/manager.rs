@@ -20,7 +20,6 @@ use crate::{
 pub type ServerName = String;
 
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
-const DNS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 const STDIO_BASELINE_ENV_VARS: [&str; 8] = [
     "PATH",
     "HOME",
@@ -63,12 +62,12 @@ fn expand_placeholders_trusted(template: &str, cwd: &Path) -> anyhow::Result<Str
     while let Some(start) = rest.find("${") {
         out.push_str(&rest[..start]);
         let after = &rest[start + 2..];
-        let end = after.find('}').ok_or_else(|| {
-            anyhow::anyhow!("unterminated placeholder: {template} (missing `}}`)")
-        })?;
+        let end = after
+            .find('}')
+            .ok_or_else(|| anyhow::anyhow!("unterminated placeholder (missing `}}`)"))?;
         let name = &after[..end];
         if !is_env_var_name(name) {
-            anyhow::bail!("invalid placeholder name: {name} (template={template})");
+            anyhow::bail!("invalid placeholder name: {name}");
         }
         let value = match name {
             "CLAUDE_PLUGIN_ROOT" | "MCP_ROOT" => cwd.display().to_string(),
@@ -283,9 +282,13 @@ impl Manager {
                 let expanded_argv = server_cfg
                     .argv
                     .iter()
-                    .map(|arg| {
-                        let expanded = expand_placeholders_trusted(arg, cwd)
-                            .with_context(|| format!("expand argv placeholder: {arg}"))?;
+                    .enumerate()
+                    .map(|(idx, arg)| {
+                        let expanded = expand_placeholders_trusted(arg, cwd).with_context(|| {
+                            format!(
+                                "expand argv placeholder (server={server_name} argv[{idx}] redacted)"
+                            )
+                        })?;
                         Ok::<_, anyhow::Error>(std::ffi::OsString::from(expanded))
                     })
                     .collect::<anyhow::Result<Vec<std::ffi::OsString>>>()?;
@@ -330,13 +333,8 @@ impl Manager {
                 )
                 .await
                 .with_context(|| {
-                    let argv0 = server_cfg
-                        .argv
-                        .first()
-                        .map(|v| v.as_str())
-                        .unwrap_or("<empty>");
                     format!(
-                        "spawn mcp server argv0={argv0} argc={} (argv redacted)",
+                        "spawn mcp server (server={server_name}) argv redacted (argc={})",
                         server_cfg.argv.len()
                     )
                 })?;
@@ -375,15 +373,29 @@ impl Manager {
                     }
                 };
 
+                let (sse_url_field, post_url_field) = if server_cfg.url.is_some() {
+                    ("url", "url")
+                } else {
+                    ("sse_url", "http_url")
+                };
+
                 let sse_url = if self.trust_mode == TrustMode::Trusted {
                     expand_placeholders_trusted(sse_url_raw, cwd)
-                        .with_context(|| format!("expand url placeholder: {sse_url_raw}"))?
+                        .with_context(|| {
+                            format!(
+                                "expand url placeholder (server={server_name} field={sse_url_field}) (url redacted)"
+                            )
+                        })?
                 } else {
                     sse_url_raw.to_string()
                 };
                 let post_url = if self.trust_mode == TrustMode::Trusted {
                     expand_placeholders_trusted(post_url_raw, cwd)
-                        .with_context(|| format!("expand url placeholder: {post_url_raw}"))?
+                        .with_context(|| {
+                            format!(
+                                "expand url placeholder (server={server_name} field={post_url_field}) (url redacted)"
+                            )
+                        })?
                 } else {
                     post_url_raw.to_string()
                 };
@@ -392,6 +404,7 @@ impl Manager {
                     self.trust_mode,
                     &self.untrusted_streamable_http_policy,
                     server_name,
+                    sse_url_field,
                     &sse_url,
                     server_cfg,
                 )?;
@@ -400,6 +413,7 @@ impl Manager {
                         self.trust_mode,
                         &self.untrusted_streamable_http_policy,
                         server_name,
+                        post_url_field,
                         &post_url,
                         server_cfg,
                     )?;
@@ -408,6 +422,7 @@ impl Manager {
                     validate_streamable_http_url_untrusted_dns(
                         &self.untrusted_streamable_http_policy,
                         server_name,
+                        sse_url_field,
                         &sse_url,
                     )
                     .await?;
@@ -415,6 +430,7 @@ impl Manager {
                         validate_streamable_http_url_untrusted_dns(
                             &self.untrusted_streamable_http_policy,
                             server_name,
+                            post_url_field,
                             &post_url,
                         )
                         .await?;
@@ -478,10 +494,12 @@ impl Manager {
                 .await
                 .with_context(|| {
                     if sse_url == post_url {
-                        format!("connect streamable http mcp server url={sse_url}")
+                        format!(
+                            "connect streamable http mcp server (server={server_name} field={sse_url_field}) (url redacted)"
+                        )
                     } else {
                         format!(
-                            "connect streamable http mcp server sse_url={sse_url} http_url={post_url}"
+                            "connect streamable http mcp server (server={server_name} fields={sse_url_field},{post_url_field}) (urls redacted)"
                         )
                     }
                 })?;
@@ -1270,6 +1288,7 @@ fn validate_streamable_http_config(
     trust_mode: TrustMode,
     policy: &UntrustedStreamableHttpPolicy,
     server_name: &str,
+    url_field: &str,
     url: &str,
     server_cfg: &ServerConfig,
 ) -> anyhow::Result<()> {
@@ -1277,7 +1296,7 @@ fn validate_streamable_http_config(
         return Ok(());
     }
 
-    validate_streamable_http_url_untrusted(policy, server_name, url)?;
+    validate_streamable_http_url_untrusted(policy, server_name, url_field, url)?;
 
     for header in server_cfg.http_headers.keys() {
         if is_untrusted_sensitive_http_header(header) {
@@ -1293,14 +1312,18 @@ fn validate_streamable_http_config(
 fn validate_streamable_http_url_untrusted(
     policy: &UntrustedStreamableHttpPolicy,
     server_name: &str,
+    url_field: &str,
     url: &str,
 ) -> anyhow::Result<()> {
-    let parsed =
-        reqwest::Url::parse(url).with_context(|| format!("invalid streamable http url: {url}"))?;
+    let parsed = reqwest::Url::parse(url).with_context(|| {
+        format!(
+            "invalid streamable http url (server={server_name} field={url_field}) (url redacted)"
+        )
+    })?;
 
     if !parsed.username().is_empty() || parsed.password().is_some() {
         anyhow::bail!(
-            "refusing to use url credentials in untrusted mode: {server_name} url={url} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
+            "refusing to use url credentials in untrusted mode: {server_name} field={url_field} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
         );
     }
 
@@ -1309,14 +1332,14 @@ fn validate_streamable_http_url_untrusted(
         "http" if !policy.require_https => {}
         _ => {
             anyhow::bail!(
-                "refusing to connect non-https streamable http url in untrusted mode: {server_name} url={url} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
+                "refusing to connect non-https streamable http url in untrusted mode: {server_name} field={url_field} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
             );
         }
     }
 
     let host = parsed
         .host_str()
-        .ok_or_else(|| anyhow::anyhow!("streamable http url must include a host: {url}"))?;
+        .ok_or_else(|| anyhow::anyhow!("streamable http url must include a host (server={server_name} field={url_field}) (url redacted)"))?;
     let host = host.trim_end_matches('.');
     let host_for_ip = host.trim_start_matches('[').trim_end_matches(']');
     if !policy.allow_localhost {
@@ -1364,18 +1387,22 @@ fn validate_streamable_http_url_untrusted(
 async fn validate_streamable_http_url_untrusted_dns(
     policy: &UntrustedStreamableHttpPolicy,
     server_name: &str,
+    url_field: &str,
     url: &str,
 ) -> anyhow::Result<()> {
     if !policy.dns_check || policy.allow_private_ips {
         return Ok(());
     }
 
-    let parsed =
-        reqwest::Url::parse(url).with_context(|| format!("invalid streamable http url: {url}"))?;
+    let parsed = reqwest::Url::parse(url).with_context(|| {
+        format!(
+            "invalid streamable http url (server={server_name} field={url_field}) (url redacted)"
+        )
+    })?;
 
     let host = parsed
         .host_str()
-        .ok_or_else(|| anyhow::anyhow!("streamable http url must include a host: {url}"))?;
+        .ok_or_else(|| anyhow::anyhow!("streamable http url must include a host (server={server_name} field={url_field}) (url redacted)"))?;
     let host = host.trim_end_matches('.');
     let host_for_ip = host.trim_start_matches('[').trim_end_matches(']');
     if host_for_ip.parse::<IpAddr>().is_ok() {
@@ -1383,22 +1410,30 @@ async fn validate_streamable_http_url_untrusted_dns(
     }
 
     let port = parsed.port_or_known_default().ok_or_else(|| {
-        anyhow::anyhow!("streamable http url must include a port or known scheme: {url}")
+        anyhow::anyhow!(
+            "streamable http url must include a port or known scheme (server={server_name} field={url_field}) (url redacted)"
+        )
     })?;
 
     let addrs = match tokio::time::timeout(
-        DNS_LOOKUP_TIMEOUT,
+        policy.dns_timeout,
         tokio::net::lookup_host((host_for_ip, port)),
     )
     .await
     {
         Ok(Ok(addrs)) => addrs,
         Ok(Err(err)) => {
+            if policy.dns_fail_open {
+                return Ok(());
+            }
             anyhow::bail!(
                 "refusing to connect hostname with failed dns lookup in untrusted mode: {server_name} host={host} err={err}"
             );
         }
         Err(_) => {
+            if policy.dns_fail_open {
+                return Ok(());
+            }
             anyhow::bail!(
                 "refusing to connect hostname with timed out dns lookup in untrusted mode: {server_name} host={host}"
             );
@@ -2263,7 +2298,8 @@ mod tests {
             ..Default::default()
         };
 
-        validate_streamable_http_url_untrusted(&policy, "srv", "http://example.com/mcp").unwrap();
+        validate_streamable_http_url_untrusted(&policy, "srv", "url", "http://example.com/mcp")
+            .unwrap();
     }
 
     #[test]
@@ -2273,7 +2309,8 @@ mod tests {
             ..Default::default()
         };
 
-        validate_streamable_http_url_untrusted(&policy, "srv", "https://192.168.0.10/mcp").unwrap();
+        validate_streamable_http_url_untrusted(&policy, "srv", "url", "https://192.168.0.10/mcp")
+            .unwrap();
     }
 
     #[test]
@@ -2283,12 +2320,19 @@ mod tests {
             ..Default::default()
         };
 
-        validate_streamable_http_url_untrusted(&policy, "srv", "https://example.com/mcp").unwrap();
-        validate_streamable_http_url_untrusted(&policy, "srv", "https://api.example.com/mcp")
+        validate_streamable_http_url_untrusted(&policy, "srv", "url", "https://example.com/mcp")
             .unwrap();
+        validate_streamable_http_url_untrusted(
+            &policy,
+            "srv",
+            "url",
+            "https://api.example.com/mcp",
+        )
+        .unwrap();
 
-        let err = validate_streamable_http_url_untrusted(&policy, "srv", "https://evil.com/mcp")
-            .unwrap_err();
+        let err =
+            validate_streamable_http_url_untrusted(&policy, "srv", "url", "https://evil.com/mcp")
+                .unwrap_err();
         assert!(err.to_string().contains("allowlist"));
     }
 
@@ -2300,11 +2344,16 @@ mod tests {
             ..Default::default()
         };
 
-        validate_streamable_http_url_untrusted(&policy, "srv", "https://localhost/mcp").unwrap();
-        let err =
-            validate_streamable_http_url_untrusted_dns(&policy, "srv", "https://localhost/mcp")
-                .await
-                .unwrap_err();
+        validate_streamable_http_url_untrusted(&policy, "srv", "url", "https://localhost/mcp")
+            .unwrap();
+        let err = validate_streamable_http_url_untrusted_dns(
+            &policy,
+            "srv",
+            "url",
+            "https://localhost/mcp",
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("resolves to non-global ip"));
     }
 
@@ -2317,8 +2366,9 @@ mod tests {
             ..Default::default()
         };
 
-        validate_streamable_http_url_untrusted(&policy, "srv", "https://localhost/mcp").unwrap();
-        validate_streamable_http_url_untrusted_dns(&policy, "srv", "https://localhost/mcp")
+        validate_streamable_http_url_untrusted(&policy, "srv", "url", "https://localhost/mcp")
+            .unwrap();
+        validate_streamable_http_url_untrusted_dns(&policy, "srv", "url", "https://localhost/mcp")
             .await
             .unwrap();
     }
@@ -2333,16 +2383,142 @@ mod tests {
         validate_streamable_http_url_untrusted(
             &policy,
             "srv",
+            "url",
             "https://does-not-exist.invalid/mcp",
         )
         .unwrap();
         let err = validate_streamable_http_url_untrusted_dns(
             &policy,
             "srv",
+            "url",
             "https://does-not-exist.invalid/mcp",
         )
         .await
         .unwrap_err();
         assert!(err.to_string().contains("dns"), "err={err}");
+    }
+
+    #[tokio::test]
+    async fn untrusted_policy_dns_check_can_fail_open_on_lookup_error() {
+        let policy = UntrustedStreamableHttpPolicy {
+            dns_check: true,
+            dns_fail_open: true,
+            ..Default::default()
+        };
+
+        validate_streamable_http_url_untrusted(
+            &policy,
+            "srv",
+            "url",
+            "https://does-not-exist.invalid/mcp",
+        )
+        .unwrap();
+        validate_streamable_http_url_untrusted_dns(
+            &policy,
+            "srv",
+            "url",
+            "https://does-not-exist.invalid/mcp",
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn argv_placeholder_errors_do_not_leak_plain_argv() {
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted);
+
+        let server_cfg = ServerConfig {
+            transport: Transport::Stdio,
+            argv: vec![
+                "mcp-server-bin".to_string(),
+                "--auth=Bearer SECRET_TOKEN-${BAD-NAME}".to_string(),
+            ],
+            inherit_env: true,
+            unix_path: None,
+            url: None,
+            sse_url: None,
+            http_url: None,
+            bearer_token_env_var: None,
+            http_headers: BTreeMap::new(),
+            env_http_headers: BTreeMap::new(),
+            env: BTreeMap::new(),
+            stdout_log: None,
+        };
+
+        let err = manager
+            .connect("srv", &server_cfg, Path::new("."))
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("expand argv placeholder"),
+            "expected redacted argv context; err={err:#}"
+        );
+        assert!(
+            !msg.contains("SECRET_TOKEN"),
+            "argv secret leaked in error chain; err={err:#}"
+        );
+    }
+
+    #[test]
+    fn url_validation_errors_do_not_leak_plain_url() {
+        let policy = UntrustedStreamableHttpPolicy::default();
+
+        let err = validate_streamable_http_url_untrusted(
+            &policy,
+            "srv",
+            "url",
+            "https://user:pass@example.com/mcp?token=SECRET_TOKEN",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("url credentials"),
+            "expected url credential error; err={err:#}"
+        );
+        assert!(
+            !msg.contains("SECRET_TOKEN"),
+            "url secret leaked in error chain; err={err:#}"
+        );
+        assert!(
+            !msg.contains("user:pass"),
+            "url userinfo leaked in error chain; err={err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn url_placeholder_errors_do_not_leak_plain_url() {
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted);
+
+        let server_cfg = ServerConfig {
+            transport: Transport::StreamableHttp,
+            argv: Vec::new(),
+            inherit_env: true,
+            unix_path: None,
+            url: Some("https://example.com/mcp?token=SECRET_TOKEN_${BAD-NAME}".to_string()),
+            sse_url: None,
+            http_url: None,
+            bearer_token_env_var: None,
+            http_headers: BTreeMap::new(),
+            env_http_headers: BTreeMap::new(),
+            env: BTreeMap::new(),
+            stdout_log: None,
+        };
+
+        let err = manager
+            .connect("srv", &server_cfg, Path::new("."))
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("expand url placeholder"),
+            "expected redacted url context; err={err:#}"
+        );
+        assert!(
+            !msg.contains("SECRET_TOKEN"),
+            "url secret leaked in error chain; err={err:#}"
+        );
     }
 }

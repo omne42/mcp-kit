@@ -34,7 +34,9 @@ cargo run -p mcp-kit --features cli --bin mcpctl -- --help
 - `--allow-http`：Untrusted 下允许连接 `http://`（默认只允许 https）
 - `--allow-localhost`：Untrusted 下允许连接 `localhost/*.localhost/*.local/*.localdomain`，以及**单标签 host**（不含 `.` 的 host，如 `https://example/...`；常见于本地/企业网搜索域解析）
 - `--allow-private-ip`：Untrusted 下允许连接非公网 IP 字面量
-- `--dns-check`：Untrusted 下对 hostnames 做 DNS 校验（解析到非公网 IP 会拒绝；除非同时允许 `--allow-private-ip`；DNS 失败/超时会拒绝）
+- `--dns-check`：Untrusted 下对 hostnames 做 DNS 校验（解析到非公网 IP 会拒绝；除非同时允许 `--allow-private-ip`）
+- `--dns-timeout-ms <ms>`：DNS lookup 超时（仅在 `--dns-check` 开启时生效；默认 2000）
+- `--dns-fail-open`：DNS lookup 失败/超时时不拦截（fail-open；仅在 `--dns-check` 开启时生效；默认 fail-closed）
 - `--allow-host <host>`：Untrusted 下设置 host allowlist（可重复）
 
 > `--allow-*` / `--dns-check` 只影响 `transport=streamable_http`，不会放开 stdio/unix（它们需要 `--trust`）。

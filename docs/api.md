@@ -39,7 +39,7 @@
 ### 安全
 
 - `TrustMode::{Untrusted, Trusted}`
-- `UntrustedStreamableHttpPolicy`：Untrusted 下的远程出站策略（https/host/ip/allowlist/dns_check）
+- `UntrustedStreamableHttpPolicy`：Untrusted 下的远程出站策略（https/host/ip/allowlist/dns_check/timeout/fail-open）
 
 ## mcp-jsonrpc
 
@@ -48,8 +48,10 @@
 - `Client`：JSON-RPC 连接（stdio/unix/streamable_http/io）
   - `request(method, params)` / `notify(method, params)`
   - `wait()`：等待 child 退出；对无 child 的连接返回 `Ok(None)`
+  - `wait_with_timeout(timeout, on_timeout)`：等待 child 退出（带超时）
   - `take_requests()` / `take_notifications()`：消费 server→client 消息
 - `ClientHandle`：可 clone 的写端句柄（用于 respond server→client requests）
+- `WaitOnTimeout`：`Client::wait_with_timeout` 的超时策略
 - `IncomingRequest` / `Notification`
 - `SpawnOptions` / `StdoutLog` / `Limits` / `StreamableHttpOptions`
 - `Error` / `Id`

@@ -67,6 +67,32 @@ if let Some(status) = status {
 
 注意：对不包含 child 的连接（`connect_io` / `connect_unix` / `connect_streamable_http*`），`wait()` 会返回 `Ok(None)`。
 
+另外：如果 child 迟迟不退出，`wait()` 可能会无限等待。需要上界时请用 `wait_with_timeout`（见下节）。
+
+## 等待 child 退出（带超时）：`Client::wait_with_timeout`
+
+```rust
+use std::time::Duration;
+
+let status = client
+    .wait_with_timeout(
+        Duration::from_secs(5),
+        mcp_jsonrpc::WaitOnTimeout::Kill {
+            kill_timeout: Duration::from_secs(1),
+        },
+    )
+    .await?;
+
+if let Some(status) = status {
+    eprintln!("child exited: {status}");
+}
+```
+
+超时策略：
+
+- `WaitOnTimeout::ReturnError`：返回超时错误，并保留 child 继续运行（可用 `Client::take_child()` 接管）
+- `WaitOnTimeout::Kill { kill_timeout }`：尝试 kill child，并再等待最多 `kill_timeout`
+
 ## Streamable HTTP 的安全/行为
 
 `StreamableHttpOptions`：

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TrustMode {
     /// Default: treat local config as untrusted and refuse "unsafe" actions
@@ -20,10 +22,14 @@ pub struct UntrustedStreamableHttpPolicy {
     /// When true, perform a DNS resolution check and reject hostnames that resolve to non-global
     /// IPs (unless `allow_private_ips` is also enabled).
     ///
-    /// DNS resolution failures/timeouts are treated as errors (fail-closed).
-    ///
     /// Default: false (no DNS lookups).
     pub dns_check: bool,
+    /// DNS lookup timeout (default: 2s). Only used when `dns_check` is enabled.
+    pub dns_timeout: Duration,
+    /// When true, DNS lookup failures/timeouts are ignored (fail-open).
+    ///
+    /// Default: false (fail-closed).
+    pub dns_fail_open: bool,
     /// Optional host allowlist. When non-empty, only these hosts (or their subdomains)
     /// are allowed in untrusted mode.
     pub allowed_hosts: Vec<String>,
@@ -36,6 +42,8 @@ impl Default for UntrustedStreamableHttpPolicy {
             allow_localhost: false,
             allow_private_ips: false,
             dns_check: false,
+            dns_timeout: Duration::from_secs(2),
+            dns_fail_open: false,
             allowed_hosts: Vec::new(),
         }
     }

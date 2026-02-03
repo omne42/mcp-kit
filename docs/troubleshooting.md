@@ -24,6 +24,18 @@
 
 解决：删除拼写错误/未支持的字段；或升级代码以支持新字段。
 
+### mcp config too large
+
+原因：出于 DoS 防护，`mcp-kit` 会对配置文件读取做大小上限（当前为 4MiB），超过会拒绝加载。
+
+解决：缩小配置文件（移除大块无关内容）；如果使用 `mcpServers: "path"` 等间接引用，确保被引用的目标文件也在大小上限内。
+
+### mcp config must be a regular file
+
+原因：出于安全考虑，配置文件（例如 `mcp.json` / `.mcp.json`）必须是普通文件；如果它是 symlink/目录/特殊文件，会被拒绝加载。
+
+解决：把配置改为普通文件（不要用 symlink 指向其它位置）；确保路径指向真实文件且可读。
+
 ## 连接阶段（TrustMode）
 
 ### refusing to spawn mcp server in untrusted mode
@@ -83,11 +95,13 @@
 
 ### refusing to connect hostname with failed/timed out dns lookup in untrusted mode
 
-原因：启用了 `dns_check`（或 CLI `--dns-check`），但 DNS 解析失败或超时（fail-closed）。
+原因：启用了 `dns_check`（或 CLI `--dns-check`），但 DNS 解析失败或超时；默认策略是 fail-closed（直接拒绝连接）。
 
 解决（任选其一）：
 
 - 关闭 `dns_check`（或不传 `--dns-check`）
+- CLI：调大 DNS timeout（`--dns-timeout-ms 5000`）
+- CLI：如确实需要，可用 `--dns-fail-open` 忽略 DNS 失败/超时（风险更高）
 - 修复本机 DNS（例如 VPN / 企业网 split-horizon / 网络策略导致的解析失败）
 - 或使用 `--trust`（Trusted mode）
 

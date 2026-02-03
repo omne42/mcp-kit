@@ -23,6 +23,24 @@ async fn wait_returns_ok_none_when_client_has_no_child() {
 }
 
 #[tokio::test]
+async fn wait_with_timeout_returns_ok_none_when_client_has_no_child() {
+    let (client_stream, _server_stream) = tokio::io::duplex(64);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+
+    let mut client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .expect("client connect");
+    let status = client
+        .wait_with_timeout(
+            Duration::from_millis(1),
+            mcp_jsonrpc::WaitOnTimeout::ReturnError,
+        )
+        .await
+        .expect("wait ok");
+    assert!(status.is_none());
+}
+
+#[tokio::test]
 async fn request_roundtrip_over_duplex() {
     let (client_stream, server_stream) = tokio::io::duplex(1024);
     let (client_read, client_write) = tokio::io::split(client_stream);
@@ -508,8 +526,63 @@ async fn wait_closes_child_stdin_so_child_can_exit() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn wait_with_timeout_can_return_timeout_error() {
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c").arg("exec sleep 10");
+
+    let mut client = mcp_jsonrpc::Client::spawn_command(cmd)
+        .await
+        .expect("spawn client");
+
+    let err = client
+        .wait_with_timeout(
+            Duration::from_millis(10),
+            mcp_jsonrpc::WaitOnTimeout::ReturnError,
+        )
+        .await
+        .expect_err("expected wait timeout error");
+    assert!(matches!(err, mcp_jsonrpc::Error::Protocol(msg) if msg.contains("timed out")));
+
+    let mut child = client.take_child().expect("child");
+    child.start_kill().expect("kill");
+    tokio::time::timeout(Duration::from_secs(1), child.wait())
+        .await
+        .expect("child wait completed")
+        .expect("child wait ok");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn wait_with_timeout_can_kill_child_on_timeout() {
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c").arg("exec sleep 10");
+
+    let mut client = mcp_jsonrpc::Client::spawn_command(cmd)
+        .await
+        .expect("spawn client");
+
+    let status = client
+        .wait_with_timeout(
+            Duration::from_millis(10),
+            mcp_jsonrpc::WaitOnTimeout::Kill {
+                kill_timeout: Duration::from_secs(1),
+            },
+        )
+        .await
+        .expect("wait ok")
+        .expect("exit status");
+
+    assert!(
+        !status.success(),
+        "expected killed child to exit unsuccessfully: {status}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn connect_io_rejects_stdout_log_symlink_path() {
-    let dir = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir_in(base).unwrap();
     let target = dir.path().join("target.log");
     tokio::fs::write(&target, b"ok\n").await.unwrap();
 
@@ -535,9 +608,5 @@ async fn connect_io_rejects_stdout_log_symlink_path() {
     let mcp_jsonrpc::Error::Io(err) = err else {
         panic!("expected io error, got: {err:?}");
     };
-    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
-    assert!(
-        err.to_string()
-            .contains("stdout_log path contains symlink component")
-    );
+    assert_eq!(err.raw_os_error(), Some(libc::ELOOP));
 }

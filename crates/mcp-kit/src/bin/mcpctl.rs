@@ -67,9 +67,22 @@ struct Cli {
     /// When enabled, hostnames that resolve to non-global IPs are rejected unless
     /// `--allow-private-ip` is also set.
     ///
-    /// DNS lookup failures/timeouts are treated as errors (fail-closed).
+    /// DNS lookup failures/timeouts are treated as errors (fail-closed) unless
+    /// `--dns-fail-open` is set.
     #[arg(long, default_value_t = false)]
     dns_check: bool,
+
+    /// DNS lookup timeout in milliseconds (only used with `--dns-check`).
+    ///
+    /// Default: 2000.
+    #[arg(long, requires = "dns_check")]
+    dns_timeout_ms: Option<u64>,
+
+    /// When set, ignore DNS lookup failures/timeouts (fail-open; only used with `--dns-check`).
+    ///
+    /// Default: fail-closed.
+    #[arg(long, requires = "dns_check", default_value_t = false)]
+    dns_fail_open: bool,
 
     /// Allowlist hostnames for streamable_http in untrusted mode (repeatable).
     ///
@@ -139,6 +152,8 @@ async fn main() -> anyhow::Result<()> {
             || cli.allow_localhost
             || cli.allow_private_ip
             || cli.dns_check
+            || cli.dns_timeout_ms.is_some()
+            || cli.dns_fail_open
             || !cli.allow_host.is_empty())
     {
         let mut policy = mcp_kit::UntrustedStreamableHttpPolicy::default();
@@ -153,6 +168,12 @@ async fn main() -> anyhow::Result<()> {
         }
         if cli.dns_check {
             policy.dns_check = true;
+            if let Some(timeout_ms) = cli.dns_timeout_ms {
+                policy.dns_timeout = Duration::from_millis(timeout_ms);
+            }
+            if cli.dns_fail_open {
+                policy.dns_fail_open = true;
+            }
         }
         if !cli.allow_host.is_empty() {
             policy.allowed_hosts = cli.allow_host.clone();

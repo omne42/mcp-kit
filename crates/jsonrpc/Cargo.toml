@@ -15,5 +15,8 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "io-util", "process", "fs", "time", "net"] }
 tokio-util.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true

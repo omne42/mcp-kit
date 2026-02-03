@@ -618,7 +618,9 @@ cargo run -p mcp-kit --features cli --bin mcpctl -- --help
 - `--allow-http`：Untrusted 下允许连接 `http://`（默认只允许 https）
 - `--allow-localhost`：Untrusted 下允许连接 `localhost/*.localhost/*.local/*.localdomain`，以及**单标签 host**（不含 `.` 的 host，如 `https://example/...`；常见于本地/企业网搜索域解析）
 - `--allow-private-ip`：Untrusted 下允许连接非公网 IP 字面量
-- `--dns-check`：Untrusted 下对 hostnames 做 DNS 校验（解析到非公网 IP 会拒绝；除非同时允许 `--allow-private-ip`；DNS 失败/超时会拒绝）
+- `--dns-check`：Untrusted 下对 hostnames 做 DNS 校验（解析到非公网 IP 会拒绝；除非同时允许 `--allow-private-ip`）
+- `--dns-timeout-ms <ms>`：DNS lookup 超时（仅在 `--dns-check` 开启时生效；默认 2000）
+- `--dns-fail-open`：DNS lookup 失败/超时时不拦截（fail-open；仅在 `--dns-check` 开启时生效；默认 fail-closed）
 - `--allow-host <host>`：Untrusted 下设置 host allowlist（可重复）
 
 > `--allow-*` / `--dns-check` 只影响 `transport=streamable_http`，不会放开 stdio/unix（它们需要 `--trust`）。
@@ -909,6 +911,8 @@ CLI 对应：
 - `allow_localhost = false`：拒绝 `localhost` / `*.localhost` / `*.local` / `*.localdomain`，以及**单标签 host**（不含 `.` 的 host，如 `https://example/...`；常见于本地/企业网搜索域解析）
 - `allow_private_ips = false`：拒绝 loopback/link-local/private 等非公网 IP 字面量
 - `dns_check = false`：默认不做 DNS 解析检查（可选开启；见下文）
+- `dns_timeout = 2s`：DNS lookup 超时（仅在 `dns_check=true` 时生效）
+- `dns_fail_open = false`：DNS lookup 失败/超时时默认拒绝连接（fail-closed；可选 fail-open）
 - `allowed_hosts = []`：默认不做 host allowlist；一旦配置 allowlist，则只允许 allowlist 命中的 host/子域名
 
 补充说明：
@@ -942,7 +946,7 @@ CLI 对应：
 
 通过 `UntrustedStreamableHttpPolicy` 收紧/放开“远程连接”规则（只影响 `streamable_http`）：
 
-- CLI：`--allow-http` / `--allow-localhost` / `--allow-private-ip` / `--allow-host <host>`
+- CLI：`--allow-http` / `--allow-localhost` / `--allow-private-ip` / `--allow-host <host>` / `--dns-check`
 - 代码：`Manager::with_untrusted_streamable_http_policy(...)`
 
 建议用法：
@@ -975,8 +979,8 @@ Untrusted 下对 `127.0.0.1`、`10.0.0.0/8` 等 **IP 字面量** 会做拒绝/�
 
 如果你希望降低“域名解析到私网”的 SSRF 风险，可以开启 `dns_check`（或 CLI `--dns-check`）。开启后：
 
-- hostnames 会做一次 DNS 解析；若解析到非公网 IP，会被拒绝（除非同时允许 `allow_private_ips` 或使用 `Trusted`）
-- DNS 解析失败/超时会直接拒绝连接（fail-closed）
+- hostnames 会做一次 DNS 解析（带超时；默认 2s，CLI 可用 `--dns-timeout-ms` 调整）；若解析到非公网 IP，会被拒绝（除非同时允许 `allow_private_ips` 或使用 `Trusted`）
+- DNS 解析失败/超时默认会直接拒绝连接（fail-closed）；如确实需要（例如企业网/VPN 的 DNS 不稳定），可以显式开启 `dns_fail_open` / `--dns-fail-open` 让 DNS 失败时不拦截（风险更高）
 - 仍然不能完全防住 DNS rebinding；更强的威胁模型需要更底层的网络出站控制
 
 建议：
@@ -1533,6 +1537,32 @@ if let Some(status) = status {
 
 注意：对不包含 child 的连接（`connect_io` / `connect_unix` / `connect_streamable_http*`），`wait()` 会返回 `Ok(None)`。
 
+另外：如果 child 迟迟不退出，`wait()` 可能会无限等待。需要上界时请用 `wait_with_timeout`（见下节）。
+
+## 等待 child 退出（带超时）：`Client::wait_with_timeout`
+
+```rust
+use std::time::Duration;
+
+let status = client
+    .wait_with_timeout(
+        Duration::from_secs(5),
+        mcp_jsonrpc::WaitOnTimeout::Kill {
+            kill_timeout: Duration::from_secs(1),
+        },
+    )
+    .await?;
+
+if let Some(status) = status {
+    eprintln!("child exited: {status}");
+}
+```
+
+超时策略：
+
+- `WaitOnTimeout::ReturnError`：返回超时错误，并保留 child 继续运行（可用 `Client::take_child()` 接管）
+- `WaitOnTimeout::Kill { kill_timeout }`：尝试 kill child，并再等待最多 `kill_timeout`
+
 ## Streamable HTTP 的安全/行为
 
 `StreamableHttpOptions`：
@@ -1594,7 +1624,7 @@ streamable_http 的具体请求形态（SSE + POST、`mcp-session-id`、回包�
 ### 安全
 
 - `TrustMode::{Untrusted, Trusted}`
-- `UntrustedStreamableHttpPolicy`：Untrusted 下的远程出站策略（https/host/ip/allowlist/dns_check）
+- `UntrustedStreamableHttpPolicy`：Untrusted 下的远程出站策略（https/host/ip/allowlist/dns_check/timeout/fail-open）
 
 ## mcp-jsonrpc
 
@@ -1603,8 +1633,10 @@ streamable_http 的具体请求形态（SSE + POST、`mcp-session-id`、回包�
 - `Client`：JSON-RPC 连接（stdio/unix/streamable_http/io）
   - `request(method, params)` / `notify(method, params)`
   - `wait()`：等待 child 退出；对无 child 的连接返回 `Ok(None)`
+  - `wait_with_timeout(timeout, on_timeout)`：等待 child 退出（带超时）
   - `take_requests()` / `take_notifications()`：消费 server→client 消息
 - `ClientHandle`：可 clone 的写端句柄（用于 respond server→client requests）
+- `WaitOnTimeout`：`Client::wait_with_timeout` 的超时策略
 - `IncomingRequest` / `Notification`
 - `SpawnOptions` / `StdoutLog` / `Limits` / `StreamableHttpOptions`
 - `Error` / `Id`
@@ -1943,6 +1975,18 @@ v1 不做。上层可以通过 drop/重建 `Manager` 或 `Session` 实现重连�
 
 解决：删除拼写错误/未支持的字段；或升级代码以支持新字段。
 
+### mcp config too large
+
+原因：出于 DoS 防护，`mcp-kit` 会对配置文件读取做大小上限（当前为 4MiB），超过会拒绝加载。
+
+解决：缩小配置文件（移除大块无关内容）；如果使用 `mcpServers: "path"` 等间接引用，确保被引用的目标文件也在大小上限内。
+
+### mcp config must be a regular file
+
+原因：出于安全考虑，配置文件（例如 `mcp.json` / `.mcp.json`）必须是普通文件；如果它是 symlink/目录/特殊文件，会被拒绝加载。
+
+解决：把配置改为普通文件（不要用 symlink 指向其它位置）；确保路径指向真实文件且可读。
+
 ## 连接阶段（TrustMode）
 
 ### refusing to spawn mcp server in untrusted mode
@@ -2002,11 +2046,13 @@ v1 不做。上层可以通过 drop/重建 `Manager` 或 `Session` 实现重连�
 
 ### refusing to connect hostname with failed/timed out dns lookup in untrusted mode
 
-原因：启用了 `dns_check`（或 CLI `--dns-check`），但 DNS 解析失败或超时（fail-closed）。
+原因：启用了 `dns_check`（或 CLI `--dns-check`），但 DNS 解析失败或超时；默认策略是 fail-closed（直接拒绝连接）。
 
 解决（任选其一）：
 
 - 关闭 `dns_check`（或不传 `--dns-check`）
+- CLI：调大 DNS timeout（`--dns-timeout-ms 5000`）
+- CLI：如确实需要，可用 `--dns-fail-open` 忽略 DNS 失败/超时（风险更高）
 - 修复本机 DNS（例如 VPN / 企业网 split-horizon / 网络策略导致的解析失败）
 - 或使用 `--trust`（Trusted mode）
 
