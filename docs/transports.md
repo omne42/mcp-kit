@@ -71,7 +71,7 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 安全（Untrusted 默认策略）：
 
 - 要求 `https://`
-- 拒绝 localhost / *.localhost / *.local
+- 拒绝 localhost / *.localhost / *.local / *.localdomain / 单标签 host
 - 拒绝非公网 IP 字面量
 - 拒绝敏感 header（Authorization/Cookie/Proxy-Authorization）
 

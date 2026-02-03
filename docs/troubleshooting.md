@@ -53,9 +53,9 @@
 - CLI：加 `--allow-http`
 - 代码：`UntrustedStreamableHttpPolicy { require_https: false, .. }`
 
-### refusing to connect localhost/local domain in untrusted mode
+### refusing to connect localhost/local/single-label domain in untrusted mode
 
-原因：默认拒绝 `localhost / *.localhost / *.local`。
+原因：默认拒绝 `localhost / *.localhost / *.local / *.localdomain`，以及**单标签 host**（不含 `.` 的 host）。
 
 解决：
 

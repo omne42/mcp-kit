@@ -78,6 +78,7 @@
 - Docs: document `ServerConfig::streamable_http_split(...)` in the API reference.
 - Docs: expand the library guide with a capabilities + server→client request handler snippet.
 - Docs: clarify migration notes for `Manager` `&mut self` APIs, `Client::wait` `Option<ExitStatus>`, Untrusted host restrictions, stdio `inherit_env` baseline env allowlist, and `mcpctl list-servers` secret-safe output.
+- Docs/Examples: align `--allow-localhost` wording across troubleshooting/transports and `client_with_policy` help output.
 - Docs: make `docs/SUMMARY.md` mdbook-compatible and add section landing pages (`docs/guides.md`, `docs/reference.md`, `docs/more.md`).
 - Docs: clarify `stdout_log.max_parts` semantics for `mcp.json` vs Rust API.
 - githooks: if `mdbook` is installed, pre-commit now runs `mdbook build docs` when docs are staged, to catch rendering issues early.

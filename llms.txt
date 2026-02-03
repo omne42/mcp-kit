@@ -1064,7 +1064,7 @@ stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
 安全（Untrusted 默认策略）：
 
 - 要求 `https://`
-- 拒绝 localhost / *.localhost / *.local
+- 拒绝 localhost / *.localhost / *.local / *.localdomain / 单标签 host
 - 拒绝非公网 IP 字面量
 - 拒绝敏感 header（Authorization/Cookie/Proxy-Authorization）
 
@@ -1958,9 +1958,9 @@ v1 不做。上层可以通过 drop/重建 `Manager` 或 `Session` 实现重连�
 - CLI：加 `--allow-http`
 - 代码：`UntrustedStreamableHttpPolicy { require_https: false, .. }`
 
-### refusing to connect localhost/local domain in untrusted mode
+### refusing to connect localhost/local/single-label domain in untrusted mode
 
-原因：默认拒绝 `localhost / *.localhost / *.local`。
+原因：默认拒绝 `localhost / *.localhost / *.local / *.localdomain`，以及**单标签 host**（不含 `.` 的 host）。
 
 解决：
 

@@ -70,7 +70,9 @@ fn print_help() {
         "  --trust              Fully trust local mcp.json (allows stdio/unix, auth headers, env secrets)"
     );
     eprintln!("  --allow-http         Allow http:// in Untrusted mode");
-    eprintln!("  --allow-localhost    Allow localhost/*.localhost/*.local in Untrusted mode");
+    eprintln!(
+        "  --allow-localhost    Allow localhost/*.localhost/*.local/*.localdomain and single-label hosts in Untrusted mode"
+    );
     eprintln!("  --allow-private-ip   Allow private/loopback IP literals in Untrusted mode");
     eprintln!("  --dns-check          Best-effort DNS check for hostnames in Untrusted mode");
     eprintln!("  --allow-host <host>  Host allowlist (repeatable), e.g. --allow-host example.com");
