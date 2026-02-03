@@ -14,7 +14,7 @@
 - GitBook 目录：`docs/SUMMARY.md`
 - 推荐阅读顺序：`docs/quickstart.md` → `docs/config.md` → `docs/library.md` → `docs/security.md`
 - 本地预览（可选）：`cargo install mdbook && mdbook serve docs --open`
-- 给 LLM 用的单文件文档：`docs/llms.txt`（生成脚本：`./scripts/gen-llms-txt.sh`）
+- 给 LLM 用的单文件文档：`llms.txt` / `docs/llms.txt`（生成脚本：`./scripts/gen-llms-txt.sh`）
 
 ## 快速开始
 

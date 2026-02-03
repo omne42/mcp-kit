@@ -4,7 +4,10 @@
 
 为此本仓库提供：
 
-- `docs/llms.txt`：把 `docs/` 下的 Markdown 文档按 `docs/SUMMARY.md` 的顺序拼接成一个文件，便于直接复制粘贴
+- `llms.txt`：位于仓库根目录（部分工具会优先寻找该路径）
+- `docs/llms.txt`：同内容的副本，便于在 `docs/` 下就近发现
+
+二者都会把 `docs/` 下的 Markdown 文档按 `docs/SUMMARY.md` 的顺序拼接成一个文件，便于直接复制粘贴。
 
 ## 如何使用
 
@@ -21,4 +24,4 @@
 ./scripts/gen-llms-txt.sh
 ```
 
-然后把更新后的 `docs/llms.txt` 一并提交。
+然后把更新后的 `llms.txt` 与 `docs/llms.txt` 一并提交。

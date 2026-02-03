@@ -27,12 +27,7 @@ async fn main() -> Result<()> {
         Duration::from_secs(30),
     );
     let tools = manager
-        .request_typed::<mcp::ListToolsRequest>(
-            &config,
-            &server_name,
-            Some(mcp::ListToolsRequestParams::default()),
-            &root,
-        )
+        .request_typed::<mcp::ListToolsRequest>(&config, &server_name, None, &root)
         .await?;
 
     println!("{}", serde_json::to_string_pretty(&tools)?);

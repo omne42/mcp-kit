@@ -4,9 +4,12 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use mcp_kit::{MCP_PROTOCOL_VERSION, Manager, Root, ServerRequestContext, ServerRequestOutcome};
 
-fn file_uri(path: &std::path::Path) -> Result<String> {
-    let url = reqwest::Url::from_file_path(path).map_err(|()| {
-        anyhow::anyhow!("failed to convert path to file:// URI: {}", path.display())
+fn directory_uri(path: &std::path::Path) -> Result<String> {
+    let url = reqwest::Url::from_directory_path(path).map_err(|()| {
+        anyhow::anyhow!(
+            "failed to convert directory path to file:// URI: {}",
+            path.display()
+        )
     })?;
     Ok(url.to_string())
 }
@@ -79,7 +82,7 @@ async fn main() -> Result<()> {
         Duration::from_secs(5),
     )
     .with_roots(vec![Root {
-        uri: file_uri(&cwd)?,
+        uri: directory_uri(&cwd)?,
         name: Some("cwd".to_string()),
     }])
     .with_server_request_handler(handler);

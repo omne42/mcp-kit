@@ -60,7 +60,8 @@
 - Docs: clarify `StreamableHttpOptions.request_timeout` semantics in `docs/jsonrpc.md`.
 - Docs: document split `sse_url/http_url`, `--dns-check`, and updated `[DONE]` semantics for streamable_http.
 - Docs: expand GitBook-style documentation under `docs/` and add `CONTRIBUTING.md`.
-- Docs: add `docs/book.toml` (mdbook) and `docs/llms.txt` (single-file doc bundle).
+- Docs: add `docs/book.toml` (mdbook) and `llms.txt` / `docs/llms.txt` (single-file doc bundle), plus a pre-commit freshness check.
+- Docs: refresh `docs/README.md` with a 1-minute copy/paste quickstart.
 - `mcp-kit`：`mcp.json v1` 中 `http_headers` 现在也接受别名字段 `headers`（便于复用 Cursor 等配置片段）。
 
 ### Fixed
@@ -70,6 +71,7 @@
 - `mcp-jsonrpc`：`streamable_http` 的 HTTP 200 + 空 JSON body（非 202）现在会桥接为 `-32000` error，避免 request 悬挂。
 - `mcp-kit`：对无 child 的连接（unix/streamable_http）会检查 JSON-RPC client closed 状态并清理缓存，避免复用失活连接。
 - `mcp-kit`：Cursor/Claude style 外部配置中 `type=http|sse` 与推断 transport 冲突时会 fail-closed 报错。
-- Examples: `in_memory_duplex` 现在用 `Url::from_file_path` 生成正确的 `file://` URI（支持空格/非 ASCII 的 percent-encoding）。
+- Examples: `in_memory_duplex` 现在用 `Url::from_directory_path` 生成正确的目录 `file://` URI（支持空格/非 ASCII 的 percent-encoding）。
+- Examples: `minimal_client` / `client_with_policy` 默认省略 `tools/list` 的空 `params`（与 `Manager::list_tools`/`Session::list_tools` 语义一致）。
 - Docs: `minimal_client` 补充 Untrusted 默认出站限制提示，并指向 `docs/security.md` 与 `client_with_policy` 的 `--allow-*` 用法。
 - Tests: stabilize flaky `streamable_http_allows_initial_sse_405_and_retries_after_202`.

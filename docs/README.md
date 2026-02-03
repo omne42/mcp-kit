@@ -2,6 +2,50 @@
 
 `mcp-kit` 是一个 **Rust workspace**：提供可复用的 MCP client/runner 组件，用于按配置连接 MCP servers（stdio / unix / streamable_http），并以 **Safe-by-default** 的方式提供 TrustMode 与远程出站策略。
 
+## 1 分钟上手（复制粘贴）
+
+1）在仓库根目录创建 `./.mcp.json`（把 URL 替换成你的 MCP server）：
+
+```json
+{
+  "version": 1,
+  "servers": {
+    "remote": {
+      "transport": "streamable_http",
+      "url": "https://example.com/mcp"
+    }
+  }
+}
+```
+
+2）用 CLI 先验证连接（默认 `Untrusted`：仅允许 `https://` 且拒绝 `localhost/私网` 目标）：
+
+```bash
+cargo run -p mcp-kit --features cli --bin mcpctl -- list-tools remote
+```
+
+3）作为库调用（最小）：
+
+```rust
+use std::time::Duration;
+
+use mcp_kit::{Config, Manager};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let root = std::env::current_dir()?;
+    let config = Config::load(&root, None).await?;
+
+    let mut manager = Manager::from_config(&config, "my-client", "0.1.0", Duration::from_secs(30));
+    let tools = manager.list_tools(&config, "remote", &root).await?;
+
+    println!("{}", serde_json::to_string_pretty(&tools)?);
+    Ok(())
+}
+```
+
+更完整的流程与本地 `--trust/--allow-*` 用法见 [`快速开始`](quickstart.md) 与 [`安全模型`](security.md)。
+
 ## 为什么用 mcp-kit？
 
 - **Remote-first**：原生支持远程 `transport=streamable_http`（HTTP SSE + POST）。
@@ -39,7 +83,8 @@ mdbook serve docs --open
 
 如果你希望把文档一次性喂给 LLM（Cursor/Claude/ChatGPT），用：
 
-- `docs/llms.txt`（生成后的单文件）
+- `llms.txt`（仓库根目录，生成后的单文件）
+- `docs/llms.txt`（同内容副本）
 - `./scripts/gen-llms-txt.sh`（生成脚本）
 
 详情见 [`llms.txt（给 LLM 用）`](llms.md)。

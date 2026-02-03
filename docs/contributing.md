@@ -38,6 +38,11 @@ mdbook serve docs --open
 ./scripts/gen-llms-txt.sh
 ```
 
+它会同时更新：
+
+- `llms.txt`（仓库根目录）
+- `docs/llms.txt`
+
 ## 提交内容的基本要求
 
 - 变更 `mcp.json` schema：请同时更新 `docs/config.md` 与相关测试。

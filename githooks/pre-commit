@@ -56,6 +56,11 @@ EOF
   fi
 fi
 
+if [[ -x "$repo_root/scripts/gen-llms-txt.sh" ]]; then
+  echo "pre-commit: checking llms.txt bundle" >&2
+  (cd "$repo_root" && ./scripts/gen-llms-txt.sh --check) >/dev/null
+fi
+
 workspace_root=""
 if [[ -f "$repo_root/Cargo.toml" ]]; then
   workspace_root="$repo_root"
@@ -73,4 +78,3 @@ echo "pre-commit: running Rust gates in $workspace_root" >&2
   cargo fmt --all -- --check
   cargo check --workspace --all-targets
 )
-
