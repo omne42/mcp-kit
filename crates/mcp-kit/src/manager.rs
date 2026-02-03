@@ -119,6 +119,7 @@ pub struct Manager {
     roots: Option<Arc<Vec<Root>>>,
     trust_mode: TrustMode,
     untrusted_streamable_http_policy: UntrustedStreamableHttpPolicy,
+    allow_stdout_log_outside_root: bool,
     request_timeout: Duration,
     server_request_handler: ServerRequestHandler,
     server_notification_handler: ServerNotificationHandler,
@@ -179,6 +180,7 @@ impl Manager {
             roots: None,
             trust_mode: TrustMode::Untrusted,
             untrusted_streamable_http_policy: UntrustedStreamableHttpPolicy::default(),
+            allow_stdout_log_outside_root: false,
             request_timeout: timeout,
             server_request_handler,
             server_notification_handler,
@@ -195,6 +197,11 @@ impl Manager {
         policy: UntrustedStreamableHttpPolicy,
     ) -> Self {
         self.untrusted_streamable_http_policy = policy;
+        self
+    }
+
+    pub fn with_allow_stdout_log_outside_root(mut self, allow: bool) -> Self {
+        self.allow_stdout_log_outside_root = allow;
         self
     }
 
@@ -300,14 +307,20 @@ impl Manager {
                 }
                 cmd.kill_on_drop(true);
 
-                let stdout_log = server_cfg
-                    .stdout_log
-                    .as_ref()
-                    .map(|log| mcp_jsonrpc::StdoutLog {
+                let stdout_log = server_cfg.stdout_log.as_ref().map(|log| {
+                    if !self.allow_stdout_log_outside_root && !log.path.starts_with(cwd) {
+                        anyhow::bail!(
+                            "mcp server {server_name}: stdout_log.path must be within root (set Manager::with_allow_stdout_log_outside_root(true) to override): {}",
+                            log.path.display()
+                        );
+                    }
+                    Ok::<_, anyhow::Error>(mcp_jsonrpc::StdoutLog {
                         path: log.path.clone(),
                         max_bytes_per_part: log.max_bytes_per_part,
                         max_parts: log.max_parts,
-                    });
+                    })
+                });
+                let stdout_log = stdout_log.transpose()?;
                 let mut client = mcp_jsonrpc::Client::spawn_command_with_options(
                     cmd,
                     mcp_jsonrpc::SpawnOptions {
@@ -316,7 +329,17 @@ impl Manager {
                     },
                 )
                 .await
-                .with_context(|| format!("spawn mcp server {:?}", server_cfg.argv))?;
+                .with_context(|| {
+                    let argv0 = server_cfg
+                        .argv
+                        .first()
+                        .map(|v| v.as_str())
+                        .unwrap_or("<empty>");
+                    format!(
+                        "spawn mcp server argv0={argv0} argc={} (argv redacted)",
+                        server_cfg.argv.len()
+                    )
+                })?;
                 let child = client.take_child();
                 (client, child)
             }
@@ -1370,7 +1393,16 @@ async fn validate_streamable_http_url_untrusted_dns(
     .await
     {
         Ok(Ok(addrs)) => addrs,
-        Ok(Err(_)) | Err(_) => return Ok(()),
+        Ok(Err(err)) => {
+            anyhow::bail!(
+                "refusing to connect hostname with failed dns lookup in untrusted mode: {server_name} host={host} err={err}"
+            );
+        }
+        Err(_) => {
+            anyhow::bail!(
+                "refusing to connect hostname with timed out dns lookup in untrusted mode: {server_name} host={host}"
+            );
+        }
     };
 
     for addr in addrs {
@@ -2289,5 +2321,28 @@ mod tests {
         validate_streamable_http_url_untrusted_dns(&policy, "srv", "https://localhost/mcp")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn untrusted_policy_dns_check_fails_closed_on_lookup_error() {
+        let policy = UntrustedStreamableHttpPolicy {
+            dns_check: true,
+            ..Default::default()
+        };
+
+        validate_streamable_http_url_untrusted(
+            &policy,
+            "srv",
+            "https://does-not-exist.invalid/mcp",
+        )
+        .unwrap();
+        let err = validate_streamable_http_url_untrusted_dns(
+            &policy,
+            "srv",
+            "https://does-not-exist.invalid/mcp",
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("dns"), "err={err}");
     }
 }

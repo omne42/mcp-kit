@@ -31,6 +31,18 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     trust: bool,
 
+    /// Allow stdout_log.path to point outside --root.
+    ///
+    /// WARNING: This can cause writes outside the workspace. Only use this with trusted configs.
+    #[arg(long, default_value_t = false)]
+    allow_stdout_log_outside_root: bool,
+
+    /// Show configured stdio argv in `list-servers` output.
+    ///
+    /// WARNING: This may leak secrets if you put tokens/keys in argv.
+    #[arg(long, default_value_t = false)]
+    show_argv: bool,
+
     /// Allow connecting to `http://` streamable_http URLs in untrusted mode.
     ///
     /// WARNING: This weakens the default SSRF/safety protections.
@@ -50,10 +62,12 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     allow_private_ip: bool,
 
-    /// Enable best-effort DNS checks for streamable_http hostnames in untrusted mode.
+    /// Enable DNS checks for streamable_http hostnames in untrusted mode.
     ///
     /// When enabled, hostnames that resolve to non-global IPs are rejected unless
     /// `--allow-private-ip` is also set.
+    ///
+    /// DNS lookup failures/timeouts are treated as errors (fail-closed).
     #[arg(long, default_value_t = false)]
     dns_check: bool,
 
@@ -116,6 +130,10 @@ async fn main() -> anyhow::Result<()> {
     let mut manager =
         mcp_kit::Manager::from_config(&config, "mcpctl", env!("CARGO_PKG_VERSION"), timeout);
 
+    if cli.allow_stdout_log_outside_root {
+        manager = manager.with_allow_stdout_log_outside_root(true);
+    }
+
     if !cli.trust
         && (cli.allow_http
             || cli.allow_localhost
@@ -152,10 +170,11 @@ async fn main() -> anyhow::Result<()> {
                 .servers
                 .iter()
                 .map(|(name, cfg)| {
-                    serde_json::json!({
+                    let mut server = serde_json::json!({
                         "name": name,
                         "transport": cfg.transport,
-                        "argv": &cfg.argv,
+                        "argv_program": cfg.argv.first(),
+                        "argv_argc": cfg.argv.len(),
                         "inherit_env": cfg.inherit_env,
                         "unix_path": cfg.unix_path.as_ref().map(|p| p.display().to_string()),
                         "url": cfg.url.as_deref(),
@@ -170,7 +189,11 @@ async fn main() -> anyhow::Result<()> {
                             "max_bytes_per_part": log.max_bytes_per_part,
                             "max_parts": log.max_parts,
                         })),
-                    })
+                    });
+                    if cli.show_argv {
+                        server["argv"] = serde_json::json!(&cfg.argv);
+                    }
+                    server
                 })
                 .collect::<Vec<_>>();
 

@@ -46,7 +46,7 @@ CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
 > 备注：
 >
 > - 有些工具会在同一个文件中同时包含其它顶层字段（例如 `plugin.json` 里的 `"version": "1.0.0"`）。只要存在 `mcpServers`，`Config::load` 就会按该 wrapper 解析。
-> - `mcpServers` 既支持 inline object，也支持 string（指向 `./.mcp.json` 等文件路径，按 config 文件所在目录解析）。
+> - `mcpServers` 既支持 inline object，也支持 string（指向 `./.mcp.json` 等文件路径，按 config 文件所在目录解析）。安全起见，该路径必须为相对路径、不得包含 `..`，且解析后必须位于 `--root` 之下（同时拒绝 symlink 组件）。
 > - 当启用 Trusted mode（CLI `--trust` / `TrustMode::Trusted`）时，`transport=stdio` 的 `argv/env` 以及 `transport=streamable_http` 的 `url/sse_url/http_url/http_headers` 支持 `${VAR}` 占位符（从当前进程环境变量读取）。`${CLAUDE_PLUGIN_ROOT}` / `${MCP_ROOT}` 会替换为 `cwd/--root`。
 
 ### Claude Code `.mcp.json` 直接 server map
@@ -134,6 +134,8 @@ CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
 - `stdout_log`（可选）：stdout 旋转落盘（便于排查协议输出）
   - `path`（必填）：可为相对路径（相对 `--root` 解析）
     - 额外约束：`path` 不允许包含 `..` 段（防止路径穿越）
+    - 额外约束：默认要求 `path` 位于 `--root` 之下（需要写到 root 外时，CLI：`--allow-stdout-log-outside-root`；代码：`Manager::with_allow_stdout_log_outside_root(true)`）
+    - 额外约束：出于安全考虑，`path` 不允许包含任何 symlink 路径组件（含父目录/目标文件）
   - `max_bytes_per_part`（可选，默认 1MiB，最小 1）
   - `max_parts`（可选，默认 32，最小 1；`0` 表示不做保留上限：无限保留）
 

@@ -241,6 +241,56 @@ async fn try_read_to_string_limited(path: &Path) -> anyhow::Result<Option<String
     Ok(Some(contents))
 }
 
+async fn ensure_relative_path_has_no_symlink_components(
+    base_dir: &Path,
+    rel_path: &Path,
+) -> anyhow::Result<()> {
+    let mut current = base_dir.to_path_buf();
+    for component in rel_path.components() {
+        match component {
+            Component::CurDir => continue,
+            Component::Normal(part) => current.push(part),
+            Component::ParentDir => {
+                anyhow::bail!(
+                    "unsupported mcpServers format: path must be relative and must not contain `..` segments"
+                )
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!(
+                    "unsupported mcpServers format: path must be relative and must not contain `..` segments"
+                )
+            }
+        }
+        let meta = tokio::fs::symlink_metadata(&current)
+            .await
+            .with_context(|| format!("stat {}", current.display()))?;
+        if meta.file_type().is_symlink() {
+            anyhow::bail!(
+                "unsupported mcpServers format: path must not contain symlink component: {}",
+                current.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn canonicalize_in_root(thread_root: &Path, path: &Path) -> anyhow::Result<PathBuf> {
+    let canonical_root = tokio::fs::canonicalize(thread_root)
+        .await
+        .with_context(|| format!("canonicalize {}", thread_root.display()))?;
+    let canonical_path = tokio::fs::canonicalize(path)
+        .await
+        .with_context(|| format!("canonicalize {}", path.display()))?;
+    if !canonical_path.starts_with(&canonical_root) {
+        anyhow::bail!(
+            "path escapes root: {} (root={})",
+            canonical_path.display(),
+            canonical_root.display()
+        );
+    }
+    Ok(canonical_path)
+}
+
 impl Config {
     pub async fn load(thread_root: &Path, override_path: Option<PathBuf>) -> anyhow::Result<Self> {
         let (path, contents) = match override_path {
@@ -328,8 +378,16 @@ impl Config {
                                         .as_ref()
                                         .and_then(|p| p.parent())
                                         .unwrap_or(thread_root);
-                                    let next_path = base_dir.join(mcp_path);
-                                    contents = read_to_string_limited(&next_path).await?;
+                                    ensure_relative_path_has_no_symlink_components(
+                                        base_dir, &mcp_path,
+                                    )
+                                    .await?;
+                                    let next_path = base_dir.join(&mcp_path);
+                                    let canonical_next_path =
+                                        canonicalize_in_root(thread_root, &next_path)
+                                            .await
+                                            .context("resolve mcpServers path")?;
+                                    contents = read_to_string_limited(&canonical_next_path).await?;
                                     path = Some(next_path);
                                     continue;
                                 }
@@ -1064,6 +1122,60 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_denies_mcpservers_indirection_via_symlink_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            outside.path().join("servers.json"),
+            r#"{ "mcpServers": { "a": { "command": "echo", "args": ["hi"] } } }"#,
+        )
+        .await
+        .unwrap();
+
+        let link = dir.path().join("servers.json");
+        std::os::unix::fs::symlink(outside.path().join("servers.json"), &link).unwrap();
+
+        tokio::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{ "mcpServers": "servers.json" }"#,
+        )
+        .await
+        .unwrap();
+
+        let err = Config::load(dir.path(), None).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("symlink"), "err={msg}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_denies_mcpservers_indirection_via_symlink_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            outside.path().join("servers.json"),
+            r#"{ "mcpServers": { "a": { "command": "echo", "args": ["hi"] } } }"#,
+        )
+        .await
+        .unwrap();
+
+        let link_dir = dir.path().join("linkdir");
+        std::os::unix::fs::symlink(outside.path(), &link_dir).unwrap();
+
+        tokio::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{ "mcpServers": "linkdir/servers.json" }"#,
+        )
+        .await
+        .unwrap();
+
+        let err = Config::load(dir.path(), None).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("symlink"), "err={msg}");
+    }
 
     #[tokio::test]
     async fn load_defaults_to_empty_when_missing() {

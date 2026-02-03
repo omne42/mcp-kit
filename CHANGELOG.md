@@ -34,6 +34,8 @@
 - Docs: add a quick example index at `example/README.md`.
 - Docs: expand runnable examples section and clarify Untrusted/Trusted usage in `docs/examples.md`.
 - `mcp-kit`：`transport=stdio` 新增 `servers.<name>.inherit_env`（默认 `true`），用于控制是否继承宿主环境变量；当为 `false` 时会清空子进程 env 并仅透传少量基础变量，再注入 `servers.<name>.env` 以降低 secrets 泄露风险。
+- `mcpctl`：新增 `--show-argv`（`list-servers` 显式输出 argv）与 `--allow-stdout-log-outside-root`（允许 stdout_log 写到 `--root` 外）。
+- `mcp-kit`：新增 `Manager::with_allow_stdout_log_outside_root(bool)`，用于显式放开 stdout_log 写入范围。
 
 ### Changed
 - `Config::load` 默认路径发现：`./.mcp.json` / `./mcp.json`。
@@ -83,6 +85,8 @@
 - Docs: clarify `stdout_log.max_parts` semantics for `mcp.json` vs Rust API.
 - githooks: if `mdbook` is installed, pre-commit now runs `mdbook build docs` when docs are staged, to catch rendering issues early.
 - `mcp-kit`：`mcp.json v1` 中 `http_headers` 现在也接受别名字段 `headers`（便于复用 Cursor 等配置片段）。
+- `mcpctl list-servers` 默认不输出 stdio `argv` 明文（避免把 token/key 打到终端/CI）；可用 `--show-argv` 显式开启。
+- `dns_check`（`--dns-check`）的 DNS 解析失败/超时由 fail-open 改为 fail-closed（失败直接拒绝连接），并同步更新文档说明。
 
 ### Fixed
 - `mcp-jsonrpc`：当 server→client request 的 `jsonrpc` 版本非法但 `id` 合法时，`-32600 Invalid Request` 现在会回显原始 `id`（而不是 `null`），保持 JSON-RPC 2.0 相关性语义。
@@ -94,6 +98,10 @@
 - `mcp-kit`：当文件包含 `mcpServers` wrapper（例如 Claude plugin.json）时，`Config::load` 现在会优先按 wrapper 解析，而不是误判为 `mcp.json v1`。
 - `mcp-kit`：`mcpServers` 现在支持 string（指向 `./.mcp.json` 等文件路径），用于兼容 Claude plugin.json 的 `mcpServers` path 写法。
 - `mcp-kit`：Trusted mode 下会展开 `${VAR}` 占位符（stdio `argv/env`、streamable_http `url/http_headers`），并支持 `${CLAUDE_PLUGIN_ROOT}` / `${MCP_ROOT}`。
+- `mcp-jsonrpc`：`Client::wait()` 现在会关闭写端/child stdin，避免“等待 stdin EOF 才退出”的 stdio server 造成 hang；reader EOF/IO error 也会触发关闭写端。
+- `mcp-jsonrpc`：stdout_log 打开时会拒绝包含 symlink 组件的路径，避免意外写入到不安全位置。
+- `mcp-kit`：`mcpServers: \"path\"` 间接引用读取新增 root 边界与 symlink 拒绝，避免通过 symlink 逃逸读取 `--root` 外文件。
+- scripts: 加固 `scripts/gen-llms-txt.sh` 路径解析，拒绝路径穿越/符号链接导致的本机文件打包泄露风险。
 - Examples: `in_memory_duplex` 现在用 `Url::from_directory_path` 生成正确的目录 `file://` URI（支持空格/非 ASCII 的 percent-encoding）。
 - Examples: `minimal_client` / `client_with_policy` 默认省略 `tools/list` 的空 `params`（与 `Manager::list_tools`/`Session::list_tools` 语义一致）。
 - Examples: `streamable_http_split` 默认省略 `tools/list` 的空 `params`，提升对严格 server 的兼容性。

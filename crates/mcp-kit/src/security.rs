@@ -17,8 +17,10 @@ pub struct UntrustedStreamableHttpPolicy {
     pub allow_localhost: bool,
     /// When false (default), reject loopback/link-local/private IP literals.
     pub allow_private_ips: bool,
-    /// When true, perform a best-effort DNS resolution check and reject hostnames that resolve
-    /// to non-global IPs (unless `allow_private_ips` is also enabled).
+    /// When true, perform a DNS resolution check and reject hostnames that resolve to non-global
+    /// IPs (unless `allow_private_ips` is also enabled).
+    ///
+    /// DNS resolution failures/timeouts are treated as errors (fail-closed).
     ///
     /// Default: false (no DNS lookups).
     pub dns_check: bool,

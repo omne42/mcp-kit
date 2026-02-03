@@ -47,6 +47,8 @@
 
 - 仅 `transport=stdio` 支持
 - `path` 可为相对路径（相对 `--root` 解析）
+- 默认要求 `stdout_log.path` 位于 `--root` 之下；如需写到 `--root` 外，需显式开启（CLI：`--allow-stdout-log-outside-root`；代码：`Manager::with_allow_stdout_log_outside_root(true)`）
+- 出于安全考虑，`stdout_log.path` 不允许包含任何 symlink 路径组件（含父目录/目标文件）
 - `max_bytes_per_part` 最小为 `1`
 - `max_parts=0` 在 `mcp-kit` 配置里表示“不限制保留数量”（无限保留）
 
@@ -106,3 +108,5 @@ stdout_log 是 best-effort：
 
 - 确保 `path` 目录可创建/可写
 - 避免把 log 路径指向不可写位置
+
+如果 stdout_log 初始化失败（例如目录创建/文件打开失败，或路径包含 symlink 组件），client 会直接返回错误并拒绝启用 stdout_log。

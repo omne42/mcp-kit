@@ -103,16 +103,17 @@ Untrusted 下对 `127.0.0.1`、`10.0.0.0/8` 等 **IP 字面量** 会做拒绝/�
 - 使用 `allowed_hosts`（或 CLI `--allow-host`）做 host allowlist
 - 避免在 Untrusted 下开启 `--allow-localhost/--allow-private-ip/--allow-http`
 
-如果你希望做“域名解析到私网”的 best-effort 拦截，可以开启 `dns_check`（或 CLI `--dns-check`）。开启后：
+如果你希望降低“域名解析到私网”的 SSRF 风险，可以开启 `dns_check`（或 CLI `--dns-check`）。开启后：
 
 - hostnames 会做一次 DNS 解析；若解析到非公网 IP，会被拒绝（除非同时允许 `allow_private_ips` 或使用 `Trusted`）
+- DNS 解析失败/超时会直接拒绝连接（fail-closed）
 - 仍然不能完全防住 DNS rebinding；更强的威胁模型需要更底层的网络出站控制
 
 建议：
 
 - 当你需要在 Untrusted 下允许某些 hostname（例如使用 `allowed_hosts`/`--allow-host` 放开出站）且希望额外降低“域名解析到私网”的 SSRF 风险时，可以考虑开启 `dns_check`。
 - `dns_check` 只在 `allow_private_ips=false` 时有效；如果你同时开启了 `allow_private_ips`/`--allow-private-ip`，则解析到私网不再会被拒绝。
-- 这是 best-effort：会增加一次 DNS 解析（带超时），并可能在 VPN/企业网 split-horizon DNS 环境中产生误判；同时也无法彻底防住 rebinding。
+- `dns_check` 会增加一次 DNS 解析（带超时），并可能在 VPN/企业网 split-horizon DNS 环境中产生误判；同时也无法彻底防住 rebinding。
 
 ### Redirects 默认禁用
 

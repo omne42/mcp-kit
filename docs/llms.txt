@@ -407,7 +407,7 @@ CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
 > 备注：
 >
 > - 有些工具会在同一个文件中同时包含其它顶层字段（例如 `plugin.json` 里的 `"version": "1.0.0"`）。只要存在 `mcpServers`，`Config::load` 就会按该 wrapper 解析。
-> - `mcpServers` 既支持 inline object，也支持 string（指向 `./.mcp.json` 等文件路径，按 config 文件所在目录解析）。
+> - `mcpServers` 既支持 inline object，也支持 string（指向 `./.mcp.json` 等文件路径，按 config 文件所在目录解析）。安全起见，该路径必须为相对路径、不得包含 `..`，且解析后必须位于 `--root` 之下（同时拒绝 symlink 组件）。
 > - 当启用 Trusted mode（CLI `--trust` / `TrustMode::Trusted`）时，`transport=stdio` 的 `argv/env` 以及 `transport=streamable_http` 的 `url/sse_url/http_url/http_headers` 支持 `${VAR}` 占位符（从当前进程环境变量读取）。`${CLAUDE_PLUGIN_ROOT}` / `${MCP_ROOT}` 会替换为 `cwd/--root`。
 
 ### Claude Code `.mcp.json` 直接 server map
@@ -495,6 +495,8 @@ CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
 - `stdout_log`（可选）：stdout 旋转落盘（便于排查协议输出）
   - `path`（必填）：可为相对路径（相对 `--root` 解析）
     - 额外约束：`path` 不允许包含 `..` 段（防止路径穿越）
+    - 额外约束：默认要求 `path` 位于 `--root` 之下（需要写到 root 外时，CLI：`--allow-stdout-log-outside-root`；代码：`Manager::with_allow_stdout_log_outside_root(true)`）
+    - 额外约束：出于安全考虑，`path` 不允许包含任何 symlink 路径组件（含父目录/目标文件）
   - `max_bytes_per_part`（可选，默认 1MiB，最小 1）
   - `max_parts`（可选，默认 32，最小 1；`0` 表示不做保留上限：无限保留）
 
@@ -611,10 +613,12 @@ cargo run -p mcp-kit --features cli --bin mcpctl -- --help
 安全相关：
 
 - `--trust`：完全信任 `mcp.json`（允许 stdio/unix、允许读取 env secrets、允许发送认证 header）
+- `--allow-stdout-log-outside-root`：允许 `stdout_log.path` 写到 `--root` 之外（默认拒绝；仅建议在可信配置下使用）
+- `--show-argv`：`list-servers` 时输出 stdio `argv` 明文（默认不输出；避免把 token/key 打进终端/CI）
 - `--allow-http`：Untrusted 下允许连接 `http://`（默认只允许 https）
 - `--allow-localhost`：Untrusted 下允许连接 `localhost/*.localhost/*.local/*.localdomain`，以及**单标签 host**（不含 `.` 的 host，如 `https://example/...`；常见于本地/企业网搜索域解析）
 - `--allow-private-ip`：Untrusted 下允许连接非公网 IP 字面量
-- `--dns-check`：Untrusted 下对 hostnames 做 best-effort DNS 校验（解析到非公网 IP 会拒绝；除非同时允许 `--allow-private-ip`）
+- `--dns-check`：Untrusted 下对 hostnames 做 DNS 校验（解析到非公网 IP 会拒绝；除非同时允许 `--allow-private-ip`；DNS 失败/超时会拒绝）
 - `--allow-host <host>`：Untrusted 下设置 host allowlist（可重复）
 
 > `--allow-*` / `--dns-check` 只影响 `transport=streamable_http`，不会放开 stdio/unix（它们需要 `--trust`）。
@@ -633,7 +637,8 @@ cargo run -p mcp-kit --features cli --bin mcpctl -- list-servers
 
 说明：
 
-- 为了避免意外打印 secrets，`list-servers` 对 `env/http_headers/env_http_headers` 只输出 key 列表（`env_keys/http_header_keys/env_http_header_keys`），不输出具体值。
+- 为了避免意外打印 secrets，`list-servers` 默认不输出 stdio `argv` 明文；如需查看，显式加 `--show-argv`。
+- 同样地，`list-servers` 对 `env/http_headers/env_http_headers` 只输出 key 列表（`env_keys/http_header_keys/env_http_header_keys`），不输出具体值。
 
 ### list-tools / list-resources / list-prompts
 
@@ -968,16 +973,17 @@ Untrusted 下对 `127.0.0.1`、`10.0.0.0/8` 等 **IP 字面量** 会做拒绝/�
 - 使用 `allowed_hosts`（或 CLI `--allow-host`）做 host allowlist
 - 避免在 Untrusted 下开启 `--allow-localhost/--allow-private-ip/--allow-http`
 
-如果你希望做“域名解析到私网”的 best-effort 拦截，可以开启 `dns_check`（或 CLI `--dns-check`）。开启后：
+如果你希望降低“域名解析到私网”的 SSRF 风险，可以开启 `dns_check`（或 CLI `--dns-check`）。开启后：
 
 - hostnames 会做一次 DNS 解析；若解析到非公网 IP，会被拒绝（除非同时允许 `allow_private_ips` 或使用 `Trusted`）
+- DNS 解析失败/超时会直接拒绝连接（fail-closed）
 - 仍然不能完全防住 DNS rebinding；更强的威胁模型需要更底层的网络出站控制
 
 建议：
 
 - 当你需要在 Untrusted 下允许某些 hostname（例如使用 `allowed_hosts`/`--allow-host` 放开出站）且希望额外降低“域名解析到私网”的 SSRF 风险时，可以考虑开启 `dns_check`。
 - `dns_check` 只在 `allow_private_ips=false` 时有效；如果你同时开启了 `allow_private_ips`/`--allow-private-ip`，则解析到私网不再会被拒绝。
-- 这是 best-effort：会增加一次 DNS 解析（带超时），并可能在 VPN/企业网 split-horizon DNS 环境中产生误判；同时也无法彻底防住 rebinding。
+- `dns_check` 会增加一次 DNS 解析（带超时），并可能在 VPN/企业网 split-horizon DNS 环境中产生误判；同时也无法彻底防住 rebinding。
 
 ### Redirects 默认禁用
 
@@ -1256,6 +1262,8 @@ data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}
 
 - 仅 `transport=stdio` 支持
 - `path` 可为相对路径（相对 `--root` 解析）
+- 默认要求 `stdout_log.path` 位于 `--root` 之下；如需写到 `--root` 外，需显式开启（CLI：`--allow-stdout-log-outside-root`；代码：`Manager::with_allow_stdout_log_outside_root(true)`）
+- 出于安全考虑，`stdout_log.path` 不允许包含任何 symlink 路径组件（含父目录/目标文件）
 - `max_bytes_per_part` 最小为 `1`
 - `max_parts=0` 在 `mcp-kit` 配置里表示“不限制保留数量”（无限保留）
 
@@ -1315,6 +1323,8 @@ stdout_log 是 best-effort：
 
 - 确保 `path` 目录可创建/可写
 - 避免把 log 路径指向不可写位置
+
+如果 stdout_log 初始化失败（例如目录创建/文件打开失败，或路径包含 symlink 组件），client 会直接返回错误并拒绝启用 stdout_log。
 
 ---
 
@@ -1988,6 +1998,16 @@ v1 不做。上层可以通过 drop/重建 `Manager` 或 `Session` 实现重连�
 
 - 关闭 `dns_check`（或不传 `--dns-check`）
 - CLI：加 `--allow-private-ip`（允许私网/loopback）
+- 或使用 `--trust`（Trusted mode）
+
+### refusing to connect hostname with failed/timed out dns lookup in untrusted mode
+
+原因：启用了 `dns_check`（或 CLI `--dns-check`），但 DNS 解析失败或超时（fail-closed）。
+
+解决（任选其一）：
+
+- 关闭 `dns_check`（或不传 `--dns-check`）
+- 修复本机 DNS（例如 VPN / 企业网 split-horizon / 网络策略导致的解析失败）
 - 或使用 `--trust`（Trusted mode）
 
 ### refusing to send sensitive http header in untrusted mode

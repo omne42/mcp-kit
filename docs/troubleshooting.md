@@ -81,6 +81,16 @@
 - CLI：加 `--allow-private-ip`（允许私网/loopback）
 - 或使用 `--trust`（Trusted mode）
 
+### refusing to connect hostname with failed/timed out dns lookup in untrusted mode
+
+原因：启用了 `dns_check`（或 CLI `--dns-check`），但 DNS 解析失败或超时（fail-closed）。
+
+解决（任选其一）：
+
+- 关闭 `dns_check`（或不传 `--dns-check`）
+- 修复本机 DNS（例如 VPN / 企业网 split-horizon / 网络策略导致的解析失败）
+- 或使用 `--trust`（Trusted mode）
+
 ### refusing to send sensitive http header in untrusted mode
 
 原因：默认拒绝 `Authorization` / `Proxy-Authorization` / `Cookie`。

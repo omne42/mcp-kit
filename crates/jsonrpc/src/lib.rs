@@ -189,29 +189,28 @@ impl ClientHandle {
         Err(Error::Protocol(reason))
     }
 
-    fn mark_closed(&self, reason: impl Into<String>) {
-        let reason = reason.into();
-        if self.closed.swap(true, Ordering::Relaxed) {
-            return;
-        }
-        if let Ok(mut guard) = self.close_reason.lock() {
-            *guard = Some(reason);
-        }
-    }
-
     pub(crate) async fn close_with_reason(&self, reason: impl Into<String>) {
         let reason = reason.into();
-        if self.closed.swap(true, Ordering::Relaxed) {
-            return;
-        }
+        self.close_with_error(reason.clone(), Error::Protocol(reason))
+            .await;
+    }
+
+    pub(crate) async fn close_with_error(&self, reason: impl Into<String>, err: Error) {
+        let reason = reason.into();
+
+        self.closed.store(true, Ordering::Relaxed);
         if let Ok(mut guard) = self.close_reason.lock() {
-            *guard = Some(reason.clone());
+            if guard.is_none() {
+                *guard = Some(reason);
+            }
         }
 
-        let err = Error::Protocol(reason);
         drain_pending(&self.pending, &err);
         let mut write = self.write.lock().await;
         let _ = write.shutdown().await;
+        // Many `AsyncWrite` impls (e.g. `tokio::process::ChildStdin`) only fully close on drop.
+        // Replacing the writer guarantees the underlying write end is closed.
+        let _ = std::mem::replace(&mut *write, Box::new(tokio::io::sink()));
     }
 
     pub async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), Error> {
@@ -664,8 +663,10 @@ impl Client {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        let notify_cap = options.limits.notifications_capacity.max(1);
-        let request_cap = options.limits.requests_capacity.max(1);
+        let SpawnOptions { stdout_log, limits } = options;
+
+        let notify_cap = limits.notifications_capacity.max(1);
+        let request_cap = limits.requests_capacity.max(1);
         let (notify_tx, notify_rx) = mpsc::channel::<Notification>(notify_cap);
         let (request_tx, request_rx) = mpsc::channel::<IncomingRequest>(request_cap);
         let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
@@ -679,6 +680,11 @@ impl Client {
             closed: Arc::new(AtomicBool::new(false)),
             close_reason: Arc::new(Mutex::new(None)),
         };
+
+        let stdout_log = match stdout_log {
+            Some(opts) => Some(LogState::new(opts).await?),
+            None => None,
+        };
         let task = spawn_reader_task(
             read,
             ReaderTaskContext {
@@ -687,8 +693,8 @@ impl Client {
                 notify_tx,
                 request_tx,
                 responder: handle.clone(),
-                stdout_log: options.stdout_log,
-                limits: options.limits,
+                stdout_log,
+                limits,
             },
         );
 
@@ -743,18 +749,11 @@ impl Client {
     /// Clients created without a child process (e.g. via `connect_io`, `connect_unix`, or
     /// `connect_streamable_http*`) return `Ok(None)`.
     pub async fn wait(&mut self) -> Result<Option<std::process::ExitStatus>, Error> {
-        self.handle.closed.store(true, Ordering::Relaxed);
-        if let Ok(mut guard) = self.handle.close_reason.lock() {
-            if guard.is_none() {
-                *guard = Some("client closed".to_string());
-            }
-        }
         self.task.abort();
         for task in self.transport_tasks.drain(..) {
             task.abort();
         }
-        let err = Error::Protocol("client closed".to_string());
-        drain_pending(&self.handle.pending, &err);
+        self.handle.close_with_reason("client closed").await;
 
         match &mut self.child {
             Some(child) => Ok(Some(child.wait().await?)),
@@ -847,7 +846,7 @@ struct ReaderTaskContext {
     notify_tx: mpsc::Sender<Notification>,
     request_tx: mpsc::Sender<IncomingRequest>,
     responder: ClientHandle,
-    stdout_log: Option<StdoutLog>,
+    stdout_log: Option<LogState>,
     limits: Limits,
 }
 
@@ -866,10 +865,7 @@ where
             limits,
         } = ctx;
 
-        let mut log_state = match stdout_log {
-            Some(opts) => LogState::new(opts).await.ok(),
-            None => None,
-        };
+        let mut log_state = stdout_log;
 
         let max_message_bytes = limits.max_message_bytes.max(1);
         let mut reader = tokio::io::BufReader::new(reader);
@@ -904,15 +900,14 @@ where
                     .await;
                 }
                 Ok(None) => {
-                    responder.mark_closed("server closed connection");
-                    let err = Error::Protocol("server closed connection".to_string());
-                    drain_pending(&pending, &err);
+                    responder
+                        .close_with_reason("server closed connection")
+                        .await;
                     return;
                 }
                 Err(err) => {
-                    responder.mark_closed(format!("io error: {err}"));
-                    let err = Error::Io(err);
-                    drain_pending(&pending, &err);
+                    let reason = format!("io error: {err}");
+                    responder.close_with_error(reason, Error::Io(err)).await;
                     return;
                 }
             }
@@ -1624,6 +1619,50 @@ fn handle_response(pending: &PendingRequests, value: Value) {
     }
 }
 
+async fn ensure_stdout_log_path_has_no_symlink(path: &Path) -> Result<(), std::io::Error> {
+    use std::path::Component;
+
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            Component::RootDir => current.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                current.pop();
+            }
+            Component::Normal(part) => {
+                current.push(part);
+                match tokio::fs::symlink_metadata(&current).await {
+                    Ok(metadata) => {
+                        if metadata.file_type().is_symlink() {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::PermissionDenied,
+                                format!(
+                                    "stdout_log path contains symlink component: {}",
+                                    current.display()
+                                ),
+                            ));
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn open_stdout_log_append(path: &Path) -> Result<tokio::fs::File, std::io::Error> {
+    ensure_stdout_log_path_has_no_symlink(path).await?;
+    tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await
+}
+
 struct LogState {
     base_path: PathBuf,
     max_bytes_per_part: u64,
@@ -1638,15 +1677,13 @@ impl LogState {
         let base_path = opts.path;
         let max_bytes_per_part = opts.max_bytes_per_part.max(1);
         let max_parts = opts.max_parts.filter(|v| *v > 0);
+
+        ensure_stdout_log_path_has_no_symlink(&base_path).await?;
         if let Some(parent) = base_path.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
+            tokio::fs::create_dir_all(parent).await?;
         }
 
-        let file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&base_path)
-            .await?;
+        let file = open_stdout_log_append(&base_path).await?;
         let current_len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
         let next_part = next_rotating_log_part(&base_path).await.unwrap_or(1);
         if let Some(max_parts) = max_parts {
@@ -1679,11 +1716,7 @@ impl LogState {
                 if let Some(max_parts) = self.max_parts {
                     let _ = prune_rotating_log_parts(&self.base_path, max_parts).await;
                 }
-                self.file = tokio::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&self.base_path)
-                    .await?;
+                self.file = open_stdout_log_append(&self.base_path).await?;
                 self.current_len = 0;
                 continue;
             }
@@ -1848,6 +1881,58 @@ mod stdout_log_tests {
         assert_eq!(
             parts.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
             vec![4, 5]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdout_log_rejects_symlink_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.log");
+        tokio::fs::write(&target, b"ok\n").await.unwrap();
+
+        let link = dir.path().join("link.log");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = LogState::new(StdoutLog {
+            path: link,
+            max_bytes_per_part: 1024,
+            max_parts: None,
+        })
+        .await
+        .err()
+        .expect("should reject symlink stdout_log path");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            err.to_string()
+                .contains("stdout_log path contains symlink component")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdout_log_rejects_symlink_parent_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_dir = dir.path().join("real");
+        tokio::fs::create_dir_all(&real_dir).await.unwrap();
+
+        let link_dir = dir.path().join("link");
+        std::os::unix::fs::symlink(&real_dir, &link_dir).unwrap();
+
+        let err = LogState::new(StdoutLog {
+            path: link_dir.join("server.stdout.log"),
+            max_bytes_per_part: 1024,
+            max_parts: None,
+        })
+        .await
+        .err()
+        .expect("should reject symlink stdout_log parent dir");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            err.to_string()
+                .contains("stdout_log path contains symlink component")
         );
     }
 }

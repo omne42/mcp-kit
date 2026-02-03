@@ -3,6 +3,7 @@ use std::time::Duration;
 use mcp_jsonrpc::Id;
 use serde_json::Value;
 use tokio::io::AsyncBufReadExt;
+use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
 fn parse_line(line: &str) -> Value {
@@ -461,4 +462,82 @@ async fn request_fails_when_server_sends_invalid_response_structure() {
         .await
         .expect("server task completed")
         .expect("server task ok");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reader_eof_shuts_down_client_write_end() {
+    let (client_stream, server_stream) = tokio::net::UnixStream::pair().unwrap();
+    let (client_read, client_write) = client_stream.into_split();
+    let (mut server_read, server_write) = server_stream.into_split();
+
+    let _client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .expect("client connect");
+
+    // Closing the server->client direction should cause the client's reader task to hit EOF and
+    // shutdown the client->server write end.
+    drop(server_write);
+
+    let mut buf = [0u8; 1];
+    let n = tokio::time::timeout(Duration::from_secs(1), server_read.read(&mut buf))
+        .await
+        .expect("server read completed")
+        .expect("server read ok");
+    assert_eq!(n, 0, "expected EOF on server_read");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn wait_closes_child_stdin_so_child_can_exit() {
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c").arg("cat > /dev/null");
+
+    let mut client = mcp_jsonrpc::Client::spawn_command(cmd)
+        .await
+        .expect("spawn client");
+
+    let status = tokio::time::timeout(Duration::from_secs(1), client.wait())
+        .await
+        .expect("wait completed")
+        .expect("wait ok")
+        .expect("exit status");
+
+    assert!(status.success(), "child exited unsuccessfully: {status}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn connect_io_rejects_stdout_log_symlink_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target.log");
+    tokio::fs::write(&target, b"ok\n").await.unwrap();
+
+    let link = dir.path().join("link.log");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let (client_stream, _server_stream) = tokio::io::duplex(64);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+
+    let options = mcp_jsonrpc::SpawnOptions {
+        stdout_log: Some(mcp_jsonrpc::StdoutLog {
+            path: link,
+            max_bytes_per_part: 1024,
+            max_parts: None,
+        }),
+        ..Default::default()
+    };
+
+    let err = mcp_jsonrpc::Client::connect_io_with_options(client_read, client_write, options)
+        .await
+        .err()
+        .expect("should reject stdout_log symlink");
+    let mcp_jsonrpc::Error::Io(err) = err else {
+        panic!("expected io error, got: {err:?}");
+    };
+    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(
+        err.to_string()
+            .contains("stdout_log path contains symlink component")
+    );
 }
