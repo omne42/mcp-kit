@@ -4,8 +4,19 @@
 
 ## 可运行示例
 
-- 源码：`crates/mcp-kit/examples/minimal_client.rs`
-- 运行：`cargo run -p mcp-kit --example minimal_client -- <server>`
+- `minimal_client`（最简；**默认只适用于 `transport=streamable_http`** / Untrusted）：
+  - 源码：`crates/mcp-kit/examples/minimal_client.rs`
+  - 运行：`cargo run -p mcp-kit --example minimal_client -- <server>`
+  - 如果你要连 `transport=stdio|unix`，请用 `client_with_policy --trust` 或 `mcpctl --trust`
+- `client_with_policy`（支持 `--trust` + Untrusted 出站策略 flags；无 clap，手写 args）：
+  - 源码：`crates/mcp-kit/examples/client_with_policy.rs`
+  - 运行：`cargo run -p mcp-kit --example client_with_policy -- [flags] <server>`
+- `in_memory_duplex`（无需外部 server；`Manager::connect_io` + duplex；演示 server→client request）：
+  - 源码：`crates/mcp-kit/examples/in_memory_duplex.rs`
+  - 运行：`cargo run -p mcp-kit --example in_memory_duplex`
+- `streamable_http_split`（需要真实 server；演示拆分 `sse_url/http_url`）：
+  - 源码：`crates/mcp-kit/examples/streamable_http_split.rs`
+  - 运行：`cargo run -p mcp-kit --example streamable_http_split -- <sse_url> <http_url>`
 
 ## 1）最小远程配置（streamable_http）
 
@@ -88,8 +99,10 @@ let handler = Arc::new(|ctx: ServerRequestContext| {
             "example/ping" => ServerRequestOutcome::Ok(serde_json::json!({"ok": true})),
             _ => ServerRequestOutcome::MethodNotFound,
         }
-    })
+    }) as _
 });
 
 manager = manager.with_server_request_handler(handler);
 ```
+
+可运行版本见：`crates/mcp-kit/examples/in_memory_duplex.rs`。

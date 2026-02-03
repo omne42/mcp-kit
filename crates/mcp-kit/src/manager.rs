@@ -418,8 +418,14 @@ impl Manager {
     fn connection_exited(&mut self, server_name: &str) -> Option<bool> {
         let conn = self.conns.get_mut(server_name)?;
         Some(match &mut conn.child {
-            Some(child) => child.try_wait().ok().flatten().is_some(),
-            None => false,
+            Some(child) => {
+                if child.try_wait().ok().flatten().is_some() {
+                    true
+                } else {
+                    conn.client.handle().is_closed()
+                }
+            }
+            None => conn.client.handle().is_closed(),
         })
     }
 
@@ -1569,6 +1575,109 @@ mod tests {
         assert!(err.to_string().contains("protocolVersion mismatch"));
 
         server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connect_io_reconnects_when_existing_connection_is_closed() {
+        let (client_stream, server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let server_task = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            assert_eq!(init_value["jsonrpc"], "2.0");
+            assert_eq!(init_value["method"], "initialize");
+            let id = init_value["id"].clone();
+
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "hello": "world" },
+            });
+            let mut response_line = serde_json::to_string(&response).unwrap();
+            response_line.push('\n');
+            server_write
+                .write_all(response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let note_line = lines.next_line().await.unwrap().unwrap();
+            let note_value: Value = serde_json::from_str(&note_line).unwrap();
+            assert_eq!(note_value["jsonrpc"], "2.0");
+            assert_eq!(note_value["method"], "notifications/initialized");
+        });
+
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
+        manager
+            .connect_io("srv", client_read, client_write)
+            .await
+            .unwrap();
+
+        server_task.await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if manager
+                    .conns
+                    .get("srv")
+                    .expect("srv conn exists")
+                    .client
+                    .handle()
+                    .is_closed()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("client marked closed");
+
+        let (client_stream, server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let server_task = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            assert_eq!(init_value["jsonrpc"], "2.0");
+            assert_eq!(init_value["method"], "initialize");
+            let id = init_value["id"].clone();
+
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "hello": "world" },
+            });
+            let mut response_line = serde_json::to_string(&response).unwrap();
+            response_line.push('\n');
+            server_write
+                .write_all(response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let note_line = lines.next_line().await.unwrap().unwrap();
+            let note_value: Value = serde_json::from_str(&note_line).unwrap();
+            assert_eq!(note_value["jsonrpc"], "2.0");
+            assert_eq!(note_value["method"], "notifications/initialized");
+        });
+
+        manager
+            .connect_io("srv", client_read, client_write)
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), server_task)
+            .await
+            .expect("server task completed")
+            .expect("server task ok");
     }
 
     #[tokio::test]

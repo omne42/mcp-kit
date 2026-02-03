@@ -602,7 +602,13 @@ impl Config {
                 .map(|v| v.trim().to_ascii_lowercase());
             if let Some(server_type) = server_type.as_deref() {
                 match server_type {
-                    "http" | "sse" | "streamable_http" => {}
+                    "http" | "sse" | "streamable_http" => {
+                        if transport != Transport::StreamableHttp {
+                            anyhow::bail!(
+                                "mcp server {name}: type={server_type} conflicts with transport={transport:?}"
+                            );
+                        }
+                    }
                     _ => {
                         anyhow::bail!("mcp server {name}: unsupported type: {server_type}");
                     }
@@ -1295,6 +1301,29 @@ mod tests {
             server.http_headers.get("X-Test").map(String::as_str),
             Some("1")
         );
+    }
+
+    #[tokio::test]
+    async fn load_denies_cursor_mcp_servers_type_transport_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{
+  "$schema": "https://cursor.com/mcp.schema.json",
+  "mcpServers": {
+    "bad": {
+      "type": "http",
+      "command": "npx",
+      "args": ["-y", "echo", "hi"]
+    }
+  }
+}"#,
+        )
+        .await
+        .unwrap();
+
+        let err = Config::load(dir.path(), None).await.unwrap_err();
+        assert!(err.to_string().contains("conflicts"));
     }
 
     #[tokio::test]

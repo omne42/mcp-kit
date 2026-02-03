@@ -346,6 +346,69 @@ async fn responds_invalid_request_when_jsonrpc_is_not_2_0() {
 }
 
 #[tokio::test]
+async fn server_request_with_invalid_method_type_does_not_consume_pending_request() {
+    let (client_stream, server_stream) = tokio::io::duplex(4096);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let mut server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+        let line = lines
+            .next_line()
+            .await
+            .expect("read ok")
+            .expect("request line");
+        let msg = parse_line(&line);
+        let id = msg["id"].clone();
+
+        let invalid = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id.clone(),
+            "method": {},
+        });
+        let mut out = serde_json::to_string(&invalid).unwrap();
+        out.push('\n');
+        server_write.write_all(out.as_bytes()).await.unwrap();
+        server_write.flush().await.unwrap();
+
+        let line = lines
+            .next_line()
+            .await
+            .expect("read ok")
+            .expect("invalid request response line");
+        let msg = parse_line(&line);
+        assert_eq!(msg["jsonrpc"], "2.0");
+        assert_eq!(msg["id"], id);
+        assert_eq!(msg["error"]["code"], serde_json::json!(-32600));
+        assert_eq!(msg["error"]["message"], "invalid request method");
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "ok": true },
+        });
+        let mut out = serde_json::to_string(&response).unwrap();
+        out.push('\n');
+        server_write.write_all(out.as_bytes()).await.unwrap();
+        server_write.flush().await.unwrap();
+    });
+
+    let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .expect("client connect");
+    let result = client
+        .request("demo/request", serde_json::json!({}))
+        .await
+        .expect("request ok");
+    assert_eq!(result, serde_json::json!({ "ok": true }));
+
+    tokio::time::timeout(Duration::from_secs(1), &mut server_task)
+        .await
+        .expect("server task completed")
+        .expect("server task ok");
+}
+
+#[tokio::test]
 async fn request_fails_when_server_sends_invalid_response_structure() {
     let (client_stream, server_stream) = tokio::io::duplex(1024);
     let (client_read, client_write) = tokio::io::split(client_stream);

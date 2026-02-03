@@ -165,6 +165,17 @@ impl ClientHandle {
         self.stats.snapshot()
     }
 
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Relaxed)
+    }
+
+    pub fn close_reason(&self) -> Option<String> {
+        self.close_reason
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
     fn check_closed(&self) -> Result<(), Error> {
         if !self.closed.load(Ordering::Relaxed) {
             return Ok(());
@@ -176,6 +187,16 @@ impl ClientHandle {
             .and_then(|guard| guard.clone())
             .unwrap_or_else(|| "client closed".to_string());
         Err(Error::Protocol(reason))
+    }
+
+    fn mark_closed(&self, reason: impl Into<String>) {
+        let reason = reason.into();
+        if self.closed.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        if let Ok(mut guard) = self.close_reason.lock() {
+            *guard = Some(reason);
+        }
     }
 
     pub(crate) async fn close_with_reason(&self, reason: impl Into<String>) {
@@ -879,11 +900,13 @@ where
                     .await;
                 }
                 Ok(None) => {
+                    responder.mark_closed("server closed connection");
                     let err = Error::Protocol("server closed connection".to_string());
                     drain_pending(&pending, &err);
                     return;
                 }
                 Err(err) => {
+                    responder.mark_closed(format!("io error: {err}"));
                     let err = Error::Io(err);
                     drain_pending(&pending, &err);
                     return;
@@ -922,7 +945,8 @@ async fn handle_incoming_value(
             Value::Object(map) => {
                 let jsonrpc = map.get("jsonrpc").and_then(|v| v.as_str());
 
-                let method = map.get("method").and_then(|v| v.as_str());
+                let method_value = map.get("method");
+                let method = method_value.and_then(|v| v.as_str());
                 if let Some(method) = method {
                     if jsonrpc != Some("2.0") {
                         if let Some(id_value) = map.get("id") {
@@ -997,6 +1021,20 @@ async fn handle_incoming_value(
                                 .dropped_notifications_closed
                                 .fetch_add(1, Ordering::Relaxed);
                         }
+                    }
+                    continue;
+                }
+                if method_value.is_some() {
+                    if let Some(id_value) = map.get("id") {
+                        let id_value = parse_id(id_value).map_or(Value::Null, |_| id_value.clone());
+                        let _ = responder
+                            .respond_error_raw_id(
+                                id_value,
+                                INVALID_REQUEST,
+                                "invalid request method",
+                                None,
+                            )
+                            .await;
                     }
                     continue;
                 }
@@ -1290,6 +1328,20 @@ impl HttpPostBridge {
                             continue;
                         }
                         let _ = write_json_line(&writer, &body).await;
+                    }
+                    Ok(body) if body.is_empty() => {
+                        if status != reqwest::StatusCode::ACCEPTED {
+                            if let Some(id) = id {
+                                let _ = write_error_response(
+                                    &writer,
+                                    id,
+                                    HTTP_TRANSPORT_ERROR,
+                                    "http response is empty".to_string(),
+                                    None,
+                                )
+                                .await;
+                            }
+                        }
                     }
                     _ => {}
                 }

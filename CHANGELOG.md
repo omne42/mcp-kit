@@ -27,6 +27,8 @@
 - `Manager::{take_session, get_or_connect_session, connect_*_session}`：支持把握手完成的会话交给上层库持有。
 - `mcp-kit`：`Config::load` 支持 Cursor/Claude Code 常见的 `.mcp.json` / `mcpServers` 兼容格式（best-effort）。
 - `mcp-jsonrpc`：`streamable_http` 兼容握手前 `GET SSE` 返回 `405`，并在 `202 Accepted`（或首次获得 `mcp-session-id`）后自动重试建立 inbound SSE。
+- Examples: add runnable `client_with_policy`, `in_memory_duplex`, and `streamable_http_split` under `crates/mcp-kit/examples/`.
+- Docs: expand runnable examples section and clarify Untrusted/Trusted usage in `docs/examples.md`.
 
 ### Changed
 - `Config::load` 默认路径发现：`./.mcp.json` / `./mcp.json`。
@@ -62,3 +64,7 @@
 ### Fixed
 - `mcp-jsonrpc`：当 server→client request 的 `jsonrpc` 版本非法但 `id` 合法时，`-32600 Invalid Request` 现在会回显原始 `id`（而不是 `null`），保持 JSON-RPC 2.0 相关性语义。
 - `mcp-jsonrpc`：补齐 `streamable_http` 的回归覆盖（`mcp-session-id` 复用/更新、POST 返回 SSE + `[DONE]`、非 JSON `Content-Type` 的错误桥接）。
+- `mcp-jsonrpc`：当入站消息包含 `method` 但类型非法时，会返回 `-32600 Invalid Request`（若有 `id`）并避免误当作 response 消费 pending。
+- `mcp-jsonrpc`：`streamable_http` 的 HTTP 200 + 空 JSON body（非 202）现在会桥接为 `-32000` error，避免 request 悬挂。
+- `mcp-kit`：对无 child 的连接（unix/streamable_http）会检查 JSON-RPC client closed 状态并清理缓存，避免复用失活连接。
+- `mcp-kit`：Cursor/Claude style 外部配置中 `type=http|sse` 与推断 transport 冲突时会 fail-closed 报错。

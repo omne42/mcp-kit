@@ -521,6 +521,75 @@ async fn streamable_http_bridges_unexpected_content_type_to_jsonrpc_error() {
     server.abort();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streamable_http_bridges_empty_json_body_to_jsonrpc_error() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => return,
+            };
+            tokio::spawn(async move {
+                let Some((req, _body)) = read_http_request(&mut socket).await else {
+                    return;
+                };
+
+                match (req.method.as_str(), req.path.as_str()) {
+                    ("GET", "/mcp") => {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                    }
+                    ("POST", "/mcp") => {
+                        let _ = write_http_response(
+                            &mut socket,
+                            "200 OK",
+                            &[
+                                ("Content-Type", "application/json".to_string()),
+                                ("Connection", "close".to_string()),
+                            ],
+                            b"",
+                        )
+                        .await;
+                    }
+                    _ => {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                    }
+                }
+            });
+        }
+    });
+
+    let url = format!("http://{}/mcp", addr);
+    let client = mcp_jsonrpc::Client::connect_streamable_http(&url)
+        .await
+        .expect("connect streamable http");
+
+    let err = client
+        .request("ping", serde_json::json!({}))
+        .await
+        .expect_err("request should fail");
+    match err {
+        mcp_jsonrpc::Error::Rpc { code, message, .. } => {
+            assert_eq!(code, -32000);
+            assert_eq!(message, "http response is empty");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    drop(client);
+    server.abort();
+}
+
 #[derive(Debug)]
 struct ParsedRequest {
     method: String,

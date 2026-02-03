@@ -104,6 +104,12 @@ Untrusted 下对 `127.0.0.1`、`10.0.0.0/8` 等 **IP 字面量** 会做拒绝/�
 - hostnames 会做一次 DNS 解析；若解析到非公网 IP，会被拒绝（除非同时允许 `allow_private_ips` 或使用 `Trusted`）
 - 仍然不能完全防住 DNS rebinding；更强的威胁模型需要更底层的网络出站控制
 
+建议：
+
+- 当你需要在 Untrusted 下允许某些 hostname（例如使用 `allowed_hosts`/`--allow-host` 放开出站）且希望额外降低“域名解析到私网”的 SSRF 风险时，可以考虑开启 `dns_check`。
+- `dns_check` 只在 `allow_private_ips=false` 时有效；如果你同时开启了 `allow_private_ips`/`--allow-private-ip`，则解析到私网不再会被拒绝。
+- 这是 best-effort：会增加一次 DNS 解析（带超时），并可能在 VPN/企业网 split-horizon DNS 环境中产生误判；同时也无法彻底防住 rebinding。
+
 ### Redirects 默认禁用
 
 `mcp-jsonrpc` 的 streamable_http 默认不跟随 HTTP redirects（`follow_redirects=false`），这是额外的一层 SSRF 风险降低。即使在 `Trusted` 下，该默认仍然生效（除非你在自己的 `mcp_jsonrpc::Client` 中显式开启）。
