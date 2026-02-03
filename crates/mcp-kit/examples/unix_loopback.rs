@@ -47,6 +47,7 @@ mod unix {
         let server_cfg = ServerConfig {
             transport: Transport::Unix,
             argv: Vec::new(),
+            inherit_env: true,
             unix_path: Some(socket_path),
             url: None,
             sse_url: None,

@@ -15,6 +15,8 @@
 
 CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
 
+> 保护性限制：为避免异常/恶意配置导致内存放大，`mcp.json`（以及 `.mcp.json`）文件大小上限为 **4MiB**；超过会 fail-closed 报错。
+
 ## 兼容格式（best-effort）
 
 除了本文档描述的 `mcp.json v1`，`mcp-kit` 还支持两种常见格式，便于直接复用 Cursor / Claude Code 等工具的配置。
@@ -119,9 +121,11 @@ CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
 字段：
 
 - `argv`（必填）：非空数组；每项必须非空字符串
+- `inherit_env`（可选，默认 `true`）：是否继承当前进程环境变量。若为 `false`，会清空子进程环境，只透传少量基础变量（如 `PATH`/`HOME`/`TEMP` 等）并再注入 `env`，以降低宿主 secrets 泄露风险。
 - `env`（可选）：KV 字典，注入到 child process
 - `stdout_log`（可选）：stdout 旋转落盘（便于排查协议输出）
   - `path`（必填）：可为相对路径（相对 `--root` 解析）
+    - 额外约束：`path` 不允许包含 `..` 段（防止路径穿越）
   - `max_bytes_per_part`（可选，默认 1MiB，最小 1）
   - `max_parts`（可选，默认 32，最小 1；`0` 表示不做保留上限：无限保留）
 

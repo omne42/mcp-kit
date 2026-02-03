@@ -36,7 +36,7 @@ CLI 对应：
 默认 `UntrustedStreamableHttpPolicy`：
 
 - `require_https = true`：只允许 `https://`
-- `allow_localhost = false`：拒绝 `localhost` / `*.localhost` / `*.local`
+- `allow_localhost = false`：拒绝 `localhost` / `*.localhost` / `*.local` / `*.localdomain`，以及**单标签 host**（不含 `.` 的 host，如 `https://example/...`；常见于本地/企业网搜索域解析）
 - `allow_private_ips = false`：拒绝 loopback/link-local/private 等非公网 IP 字面量
 - `dns_check = false`：默认不做 DNS 解析检查（可选开启；见下文）
 - `allowed_hosts = []`：默认不做 host allowlist；一旦配置 allowlist，则只允许 allowlist 命中的 host/子域名

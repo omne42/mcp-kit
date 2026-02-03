@@ -33,6 +33,7 @@
 - Examples: add runnable `stdio_self_spawn` and `unix_loopback` to demonstrate self-contained stdio/unix transports.
 - Docs: add a quick example index at `example/README.md`.
 - Docs: expand runnable examples section and clarify Untrusted/Trusted usage in `docs/examples.md`.
+- `mcp-kit`：`transport=stdio` 新增 `servers.<name>.inherit_env`（默认 `true`），用于控制是否继承宿主环境变量；当为 `false` 时会清空子进程 env 并仅透传少量基础变量，再注入 `servers.<name>.env` 以降低 secrets 泄露风险。
 
 ### Changed
 - `Config::load` 默认路径发现：`./.mcp.json` / `./mcp.json`。
@@ -50,6 +51,11 @@
 - `mcp-jsonrpc`（BREAKING）：server→client 的 `Notification/IncomingRequest` 现在用 `Option<serde_json::Value>` 表达 `params`（保留 “省略 vs null” 语义）。
 - `mcp-kit`：`transport=unix|streamable_http` 现在只要配置里出现 `argv` 字段（即使为空数组）也会被拒绝。
 - `mcp-kit`：当 transport 发生 I/O/协议层错误时会自动清理连接缓存（下次请求会重新连接）。
+- `mcp-kit`（BREAKING）：`Manager` 的 `is_connected/connected_server_names` 现在会做连接存活性检查并在必要时清理失活连接；因此签名改为 `&mut self`。`*_connected` 系列方法也改为 `&mut self`，以便在 I/O/协议错误时自动 `disconnect`。
+- `mcp-kit`：Untrusted 下的 `streamable_http` 额外拒绝 `*.localdomain` 与单标签 host（不含 `.`），降低本地/企业网搜索域解析导致的 SSRF 风险。
+- `mcp-kit`：`stdout_log.path` 现在拒绝包含 `..` 段（fail-closed），避免路径穿越。
+- `mcp-kit`：`mcp.json/.mcp.json` 文件大小增加 4MiB 上限（fail-closed），避免异常配置导致内存放大。
+- `mcp-jsonrpc`（BREAKING）：`Client::wait` 现在返回 `Result<Option<ExitStatus>, Error>`；对无 child 的 client（`connect_io/unix/streamable_http`）返回 `Ok(None)`。
 - `mcp-kit`（BREAKING）：`ServerConfig` 新增 `sse_url/http_url` 字段以支持 streamable_http 分离 URL。
 - `mcp-kit`（BREAKING）：`UntrustedStreamableHttpPolicy` 新增 `dns_check` 字段（默认关闭），用于可选启用 hostname DNS 校验。
 - `mcp_kit::mcp`（BREAKING）：无参请求/通知的 `Params` 改为 `()`；部分 list 请求的 `Params` 由 `Option<...>` 改为必填结构体；`Result` type alias 弃用，改用 `JsonValue`（或 `serde_json::Value`）。
@@ -88,3 +94,4 @@
 - Examples: `streamable_http_split` 默认省略 `tools/list` 的空 `params`，提升对严格 server 的兼容性。
 - Docs: `minimal_client` 补充 Untrusted 默认出站限制提示，并指向 `docs/security.md` 与 `client_with_policy` 的 `--allow-*` 用法。
 - Tests: stabilize flaky `streamable_http_allows_initial_sse_405_and_retries_after_202`.
+- `mcp-kit`：`minimal_client` 在选择非 `streamable_http` server 时会给出清晰提示并指向 `--trust`/`client_with_policy`，减少本地 stdio/unix 的误用困惑。

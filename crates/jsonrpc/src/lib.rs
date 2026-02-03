@@ -738,7 +738,11 @@ impl Client {
         self.handle.request_optional(method, params).await
     }
 
-    pub async fn wait(&mut self) -> Result<std::process::ExitStatus, Error> {
+    /// Closes the client and (if present) waits for the underlying child process to exit.
+    ///
+    /// Clients created without a child process (e.g. via `connect_io`, `connect_unix`, or
+    /// `connect_streamable_http*`) return `Ok(None)`.
+    pub async fn wait(&mut self) -> Result<Option<std::process::ExitStatus>, Error> {
         self.handle.closed.store(true, Ordering::Relaxed);
         if let Ok(mut guard) = self.handle.close_reason.lock() {
             if guard.is_none() {
@@ -753,8 +757,8 @@ impl Client {
         drain_pending(&self.handle.pending, &err);
 
         match &mut self.child {
-            Some(child) => Ok(child.wait().await?),
-            None => Err(Error::Protocol("client has no child process".to_string())),
+            Some(child) => Ok(Some(child.wait().await?)),
+            None => Ok(None),
         }
     }
 }

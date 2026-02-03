@@ -152,6 +152,7 @@ async fn main() -> anyhow::Result<()> {
                         "name": name,
                         "transport": cfg.transport,
                         "argv": &cfg.argv,
+                        "inherit_env": cfg.inherit_env,
                         "unix_path": cfg.unix_path.as_ref().map(|p| p.display().to_string()),
                         "url": cfg.url.as_deref(),
                         "sse_url": cfg.sse_url.as_deref(),

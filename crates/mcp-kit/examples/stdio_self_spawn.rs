@@ -38,6 +38,7 @@ async fn client_main() -> Result<()> {
     let server_cfg = ServerConfig {
         transport: Transport::Stdio,
         argv,
+        inherit_env: true,
         unix_path: None,
         url: None,
         sse_url: None,

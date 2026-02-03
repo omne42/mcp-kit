@@ -10,6 +10,18 @@ fn parse_line(line: &str) -> Value {
 }
 
 #[tokio::test]
+async fn wait_returns_ok_none_when_client_has_no_child() {
+    let (client_stream, _server_stream) = tokio::io::duplex(64);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+
+    let mut client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .expect("client connect");
+    let status = client.wait().await.expect("wait ok");
+    assert!(status.is_none());
+}
+
+#[tokio::test]
 async fn request_roundtrip_over_duplex() {
     let (client_stream, server_stream) = tokio::io::duplex(1024);
     let (client_read, client_write) = tokio::io::split(client_stream);

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use mcp_kit::{Config, Manager, mcp};
+use mcp_kit::{Config, Manager, Transport, mcp};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -19,6 +19,27 @@ async fn main() -> Result<()> {
             return Ok(());
         }
     };
+
+    let Some(server_cfg) = config.servers.get(&server_name) else {
+        eprintln!("unknown server: {server_name}");
+        eprintln!("available servers:");
+        for name in config.servers.keys() {
+            eprintln!("  {name}");
+        }
+        return Ok(());
+    };
+
+    if server_cfg.transport != Transport::StreamableHttp {
+        eprintln!(
+            "note: minimal_client runs in Untrusted mode by default and only supports transport=streamable_http."
+        );
+        eprintln!("for stdio/unix, try:");
+        eprintln!("  cargo run -p mcp-kit --example client_with_policy -- --trust {server_name}");
+        eprintln!(
+            "  cargo run -p mcp-kit --features cli --bin mcpctl -- --trust list-tools {server_name}"
+        );
+        return Ok(());
+    }
 
     let mut manager = Manager::from_config(
         &config,

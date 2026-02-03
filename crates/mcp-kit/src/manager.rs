@@ -21,8 +21,26 @@ pub type ServerName = String;
 
 const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 const DNS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
+const STDIO_BASELINE_ENV_VARS: [&str; 8] = [
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "SystemRoot",
+    "SYSTEMROOT",
+];
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+
+fn apply_stdio_baseline_env(cmd: &mut Command) {
+    for key in STDIO_BASELINE_ENV_VARS {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
+}
 
 pub enum ServerRequestOutcome {
     Ok(Value),
@@ -179,12 +197,16 @@ impl Manager {
         self
     }
 
-    pub fn is_connected(&self, server_name: &str) -> bool {
-        self.conns.contains_key(server_name)
+    pub fn is_connected(&mut self, server_name: &str) -> bool {
+        self.is_connected_and_alive(server_name)
     }
 
-    pub fn connected_server_names(&self) -> Vec<ServerName> {
-        self.conns.keys().cloned().collect()
+    pub fn connected_server_names(&mut self) -> Vec<ServerName> {
+        let names = self.conns.keys().cloned().collect::<Vec<_>>();
+        names
+            .into_iter()
+            .filter(|name| self.is_connected_and_alive(name))
+            .collect()
     }
 
     pub fn initialize_result(&self, server_name: &str) -> Option<&Value> {
@@ -218,6 +240,10 @@ impl Manager {
                 cmd.stdin(Stdio::piped());
                 cmd.stdout(Stdio::piped());
                 cmd.stderr(Stdio::inherit());
+                if !server_cfg.inherit_env {
+                    cmd.env_clear();
+                    apply_stdio_baseline_env(&mut cmd);
+                }
                 cmd.envs(server_cfg.env.iter());
                 cmd.kill_on_drop(true);
 
@@ -650,7 +676,7 @@ impl Manager {
     }
 
     pub async fn request_typed_connected<R: McpRequest>(
-        &self,
+        &mut self,
         server_name: &str,
         params: Option<R::Params>,
     ) -> anyhow::Result<R::Result> {
@@ -725,7 +751,7 @@ impl Manager {
     }
 
     pub async fn notify_typed_connected<N: McpNotification>(
-        &self,
+        &mut self,
         server_name: &str,
         params: Option<N::Params>,
     ) -> anyhow::Result<()> {
@@ -896,18 +922,18 @@ impl Manager {
         .await
     }
 
-    pub async fn list_tools_connected(&self, server_name: &str) -> anyhow::Result<Value> {
+    pub async fn list_tools_connected(&mut self, server_name: &str) -> anyhow::Result<Value> {
         self.request_connected(server_name, "tools/list", None)
             .await
     }
 
-    pub async fn list_resources_connected(&self, server_name: &str) -> anyhow::Result<Value> {
+    pub async fn list_resources_connected(&mut self, server_name: &str) -> anyhow::Result<Value> {
         self.request_connected(server_name, "resources/list", None)
             .await
     }
 
     pub async fn list_resource_templates_connected(
-        &self,
+        &mut self,
         server_name: &str,
     ) -> anyhow::Result<Value> {
         self.request_connected(server_name, "resources/templates/list", None)
@@ -915,7 +941,7 @@ impl Manager {
     }
 
     pub async fn read_resource_connected(
-        &self,
+        &mut self,
         server_name: &str,
         uri: &str,
     ) -> anyhow::Result<Value> {
@@ -925,7 +951,7 @@ impl Manager {
     }
 
     pub async fn subscribe_resource_connected(
-        &self,
+        &mut self,
         server_name: &str,
         uri: &str,
     ) -> anyhow::Result<Value> {
@@ -935,7 +961,7 @@ impl Manager {
     }
 
     pub async fn unsubscribe_resource_connected(
-        &self,
+        &mut self,
         server_name: &str,
         uri: &str,
     ) -> anyhow::Result<Value> {
@@ -944,13 +970,13 @@ impl Manager {
             .await
     }
 
-    pub async fn list_prompts_connected(&self, server_name: &str) -> anyhow::Result<Value> {
+    pub async fn list_prompts_connected(&mut self, server_name: &str) -> anyhow::Result<Value> {
         self.request_connected(server_name, "prompts/list", None)
             .await
     }
 
     pub async fn get_prompt_connected(
-        &self,
+        &mut self,
         server_name: &str,
         prompt: &str,
         arguments: Option<Value>,
@@ -963,12 +989,12 @@ impl Manager {
             .await
     }
 
-    pub async fn ping_connected(&self, server_name: &str) -> anyhow::Result<Value> {
+    pub async fn ping_connected(&mut self, server_name: &str) -> anyhow::Result<Value> {
         self.request_connected(server_name, "ping", None).await
     }
 
     pub async fn set_logging_level_connected(
-        &self,
+        &mut self,
         server_name: &str,
         level: &str,
     ) -> anyhow::Result<Value> {
@@ -978,7 +1004,7 @@ impl Manager {
     }
 
     pub async fn complete_connected(
-        &self,
+        &mut self,
         server_name: &str,
         params: Value,
     ) -> anyhow::Result<Value> {
@@ -987,31 +1013,59 @@ impl Manager {
     }
 
     pub async fn request_connected(
-        &self,
+        &mut self,
         server_name: &str,
         method: &str,
         params: Option<Value>,
     ) -> anyhow::Result<Value> {
+        if !self.is_connected_and_alive(server_name) {
+            anyhow::bail!("mcp server not connected: {server_name}");
+        }
+
         let timeout = self.request_timeout;
-        let conn = self
-            .conns
-            .get(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?;
-        Self::request_raw(timeout, &conn.client, method, params).await
+        let result = {
+            let conn = self
+                .conns
+                .get(server_name)
+                .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?;
+            Self::request_raw(timeout, &conn.client, method, params).await
+        };
+
+        if let Err(err) = &result {
+            if should_disconnect_after_jsonrpc_error(err) {
+                self.disconnect(server_name);
+            }
+        }
+
+        result
     }
 
     pub async fn notify_connected(
-        &self,
+        &mut self,
         server_name: &str,
         method: &str,
         params: Option<Value>,
     ) -> anyhow::Result<()> {
+        if !self.is_connected_and_alive(server_name) {
+            anyhow::bail!("mcp server not connected: {server_name}");
+        }
+
         let timeout = self.request_timeout;
-        let conn = self
-            .conns
-            .get(server_name)
-            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?;
-        Self::notify_raw(timeout, &conn.client, method, params).await
+        let result = {
+            let conn = self
+                .conns
+                .get(server_name)
+                .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?;
+            Self::notify_raw(timeout, &conn.client, method, params).await
+        };
+
+        if let Err(err) = &result {
+            if should_disconnect_after_jsonrpc_error(err) {
+                self.disconnect(server_name);
+            }
+        }
+
+        result
     }
 
     async fn initialize(
@@ -1166,12 +1220,20 @@ fn validate_streamable_http_url_untrusted(
         .host_str()
         .ok_or_else(|| anyhow::anyhow!("streamable http url must include a host: {url}"))?;
     let host = host.trim_end_matches('.');
+    let host_for_ip = host.trim_start_matches('[').trim_end_matches(']');
     if !policy.allow_localhost {
         let host_lc = host.to_ascii_lowercase();
-        if host_lc == "localhost" || host_lc.ends_with(".localhost") || host_lc.ends_with(".local")
+        let is_ip_literal = host_for_ip.parse::<IpAddr>().is_ok();
+        let is_single_label = !is_ip_literal && !host_lc.contains('.');
+        if host_lc == "localhost"
+            || host_lc == "localhost.localdomain"
+            || host_lc.ends_with(".localhost")
+            || host_lc.ends_with(".local")
+            || host_lc.ends_with(".localdomain")
+            || is_single_label
         {
             anyhow::bail!(
-                "refusing to connect localhost/local domain in untrusted mode: {server_name} host={host} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
+                "refusing to connect localhost/local/single-label domain in untrusted mode: {server_name} host={host} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
             );
         }
     }
@@ -1187,7 +1249,6 @@ fn validate_streamable_http_url_untrusted(
         );
     }
 
-    let host_for_ip = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = host_for_ip.parse::<IpAddr>() {
         let ip = normalize_ip(ip);
         if is_untrusted_always_disallowed_ip(ip)
@@ -1459,6 +1520,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_connected_disconnects_after_protocol_error() {
+        let (client_stream, server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let server_task = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            assert_eq!(init_value["jsonrpc"], "2.0");
+            assert_eq!(init_value["method"], "initialize");
+            let init_id = init_value["id"].clone();
+
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": init_id,
+                "result": { "hello": "world" },
+            });
+            let mut response_line = serde_json::to_string(&response).unwrap();
+            response_line.push('\n');
+            server_write
+                .write_all(response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let note_line = lines.next_line().await.unwrap().unwrap();
+            let note_value: Value = serde_json::from_str(&note_line).unwrap();
+            assert_eq!(note_value["jsonrpc"], "2.0");
+            assert_eq!(note_value["method"], "notifications/initialized");
+
+            let ping_line = lines.next_line().await.unwrap().unwrap();
+            let ping_value: Value = serde_json::from_str(&ping_line).unwrap();
+            assert_eq!(ping_value["jsonrpc"], "2.0");
+            assert_eq!(ping_value["method"], "ping");
+            let ping_id = ping_value["id"].clone();
+
+            // Send an intentionally malformed JSON-RPC response (wrong jsonrpc version)
+            // to trigger a protocol error without necessarily closing the transport.
+            let response = serde_json::json!({
+                "jsonrpc": "1.0",
+                "id": ping_id,
+                "result": { "ok": true },
+            });
+            let mut response_line = serde_json::to_string(&response).unwrap();
+            response_line.push('\n');
+            server_write
+                .write_all(response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+        });
+
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(1));
+        manager
+            .connect_io("srv", client_read, client_write)
+            .await
+            .unwrap();
+
+        let err = manager
+            .request_connected("srv", "ping", None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("mcp request failed: ping"));
+
+        // Connection is dropped after Protocol/Io errors to avoid keeping a stale/broken client.
+        assert!(!manager.is_connected("srv"));
+        assert!(manager.initialize_result("srv").is_none());
+
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn connect_io_session_returns_session_and_supports_requests() {
         let (client_stream, server_stream) = tokio::io::duplex(1024);
         let (client_read, client_write) = tokio::io::split(client_stream);
@@ -1688,6 +1823,7 @@ mod tests {
         let server_cfg = ServerConfig {
             transport: Transport::Stdio,
             argv: vec!["mcp-server".to_string()],
+            inherit_env: true,
             unix_path: None,
             url: None,
             sse_url: None,
@@ -1714,6 +1850,7 @@ mod tests {
         let server_cfg = ServerConfig {
             transport: Transport::Unix,
             argv: Vec::new(),
+            inherit_env: true,
             unix_path: Some(PathBuf::from("/tmp/mcp.sock")),
             url: None,
             sse_url: None,
@@ -1740,6 +1877,7 @@ mod tests {
         let server_cfg = ServerConfig {
             transport: Transport::StreamableHttp,
             argv: Vec::new(),
+            inherit_env: true,
             unix_path: None,
             url: Some("https://example.com/mcp".to_string()),
             sse_url: None,
@@ -1766,6 +1904,7 @@ mod tests {
         let server_cfg = ServerConfig {
             transport: Transport::StreamableHttp,
             argv: Vec::new(),
+            inherit_env: true,
             unix_path: None,
             url: Some("http://example.com/mcp".to_string()),
             sse_url: None,
@@ -1792,6 +1931,7 @@ mod tests {
         let server_cfg = ServerConfig {
             transport: Transport::StreamableHttp,
             argv: Vec::new(),
+            inherit_env: true,
             unix_path: None,
             url: Some("https://localhost/mcp".to_string()),
             sse_url: None,
@@ -1811,6 +1951,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn untrusted_manager_refuses_streamable_http_localdomain() {
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
+        assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
+
+        let server_cfg = ServerConfig {
+            transport: Transport::StreamableHttp,
+            argv: Vec::new(),
+            inherit_env: true,
+            unix_path: None,
+            url: Some("https://localhost.localdomain/mcp".to_string()),
+            sse_url: None,
+            http_url: None,
+            bearer_token_env_var: None,
+            http_headers: BTreeMap::new(),
+            env_http_headers: BTreeMap::new(),
+            env: BTreeMap::new(),
+            stdout_log: None,
+        };
+
+        let err = manager
+            .connect("srv", &server_cfg, Path::new("."))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("localdomain"));
+    }
+
+    #[tokio::test]
+    async fn untrusted_manager_refuses_streamable_http_single_label_hosts() {
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
+        assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
+
+        let server_cfg = ServerConfig {
+            transport: Transport::StreamableHttp,
+            argv: Vec::new(),
+            inherit_env: true,
+            unix_path: None,
+            url: Some("https://example/mcp".to_string()),
+            sse_url: None,
+            http_url: None,
+            bearer_token_env_var: None,
+            http_headers: BTreeMap::new(),
+            env_http_headers: BTreeMap::new(),
+            env: BTreeMap::new(),
+            stdout_log: None,
+        };
+
+        let err = manager
+            .connect("srv", &server_cfg, Path::new("."))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("single-label"));
+    }
+
+    #[tokio::test]
     async fn untrusted_manager_refuses_streamable_http_private_ip() {
         let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
         assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
@@ -1818,6 +2012,7 @@ mod tests {
         let server_cfg = ServerConfig {
             transport: Transport::StreamableHttp,
             argv: Vec::new(),
+            inherit_env: true,
             unix_path: None,
             url: Some("https://192.168.0.10/mcp".to_string()),
             sse_url: None,
@@ -1847,6 +2042,7 @@ mod tests {
         let server_cfg = ServerConfig {
             transport: Transport::StreamableHttp,
             argv: Vec::new(),
+            inherit_env: true,
             unix_path: None,
             url: Some("https://[::ffff:127.0.0.1]/mcp".to_string()),
             sse_url: None,
@@ -1876,6 +2072,7 @@ mod tests {
         let server_cfg = ServerConfig {
             transport: Transport::StreamableHttp,
             argv: Vec::new(),
+            inherit_env: true,
             unix_path: None,
             url: Some("https://user:pass@example.com/mcp".to_string()),
             sse_url: None,
@@ -1908,6 +2105,7 @@ mod tests {
         let server_cfg = ServerConfig {
             transport: Transport::StreamableHttp,
             argv: Vec::new(),
+            inherit_env: true,
             unix_path: None,
             url: Some("https://example.com/mcp".to_string()),
             sse_url: None,

@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const MCP_CONFIG_VERSION: u32 = 1;
+const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 const DEFAULT_STDOUT_LOG_MAX_BYTES_PER_PART: u64 = 1024 * 1024;
 const DEFAULT_STDOUT_LOG_MAX_PARTS: u32 = 32;
 const DEFAULT_CONFIG_CANDIDATES: [&str; 2] = [".mcp.json", "mcp.json"];
@@ -36,6 +37,8 @@ struct ServerConfigFile {
     transport: Transport,
     #[serde(default)]
     argv: Option<Vec<String>>,
+    #[serde(default)]
+    inherit_env: Option<bool>,
     #[serde(default)]
     unix_path: Option<PathBuf>,
     #[serde(default)]
@@ -75,6 +78,8 @@ struct ExternalServerConfigFile {
     args: Option<Vec<String>>,
     #[serde(default)]
     argv: Option<Vec<String>>,
+    #[serde(default)]
+    inherit_env: Option<bool>,
     #[serde(default)]
     unix_path: Option<PathBuf>,
     #[serde(default)]
@@ -156,6 +161,12 @@ pub struct Config {
 pub struct ServerConfig {
     pub transport: Transport,
     pub argv: Vec<String>,
+    /// When true (default), inherit the current process environment when spawning
+    /// a `transport=stdio` server.
+    ///
+    /// When false, the child environment is cleared and only a small set of
+    /// non-secret baseline variables are propagated (plus any `env` entries).
+    pub inherit_env: bool,
     pub unix_path: Option<PathBuf>,
     pub url: Option<String>,
     pub sse_url: Option<String>,
@@ -172,6 +183,7 @@ impl ServerConfig {
         Self {
             transport: Transport::StreamableHttp,
             argv: Vec::new(),
+            inherit_env: true,
             unix_path: None,
             url: None,
             sse_url: Some(sse_url.into()),
@@ -194,6 +206,41 @@ fn is_valid_server_name(name: &str) -> bool {
         .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
 }
 
+async fn read_to_string_limited(path: &Path) -> anyhow::Result<String> {
+    let meta = tokio::fs::metadata(path)
+        .await
+        .with_context(|| format!("stat {}", path.display()))?;
+    if meta.len() > MAX_CONFIG_BYTES {
+        anyhow::bail!(
+            "mcp config too large: {} bytes (max {MAX_CONFIG_BYTES}): {}",
+            meta.len(),
+            path.display()
+        );
+    }
+    tokio::fs::read_to_string(path)
+        .await
+        .with_context(|| format!("read {}", path.display()))
+}
+
+async fn try_read_to_string_limited(path: &Path) -> anyhow::Result<Option<String>> {
+    let meta = match tokio::fs::metadata(path).await {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("stat {}", path.display())),
+    };
+    if meta.len() > MAX_CONFIG_BYTES {
+        anyhow::bail!(
+            "mcp config too large: {} bytes (max {MAX_CONFIG_BYTES}): {}",
+            meta.len(),
+            path.display()
+        );
+    }
+    let contents = tokio::fs::read_to_string(path)
+        .await
+        .with_context(|| format!("read {}", path.display()))?;
+    Ok(Some(contents))
+}
+
 impl Config {
     pub async fn load(thread_root: &Path, override_path: Option<PathBuf>) -> anyhow::Result<Self> {
         let (path, contents) = match override_path {
@@ -203,25 +250,19 @@ impl Config {
                 } else {
                     thread_root.join(path)
                 };
-                let contents = tokio::fs::read_to_string(&path)
-                    .await
-                    .with_context(|| format!("read {}", path.display()))?;
+                let contents = read_to_string_limited(&path).await?;
                 (Some(path), contents)
             }
             None => {
                 let mut found = None::<(PathBuf, String)>;
                 for candidate in DEFAULT_CONFIG_CANDIDATES {
                     let candidate_path = thread_root.join(candidate);
-                    match tokio::fs::read_to_string(&candidate_path).await {
-                        Ok(contents) => {
+                    match try_read_to_string_limited(&candidate_path).await? {
+                        Some(contents) => {
                             found = Some((candidate_path, contents));
                             break;
                         }
-                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-                        Err(err) => {
-                            return Err(err)
-                                .with_context(|| format!("read {}", candidate_path.display()));
-                        }
+                        None => continue,
                     }
                 }
 
@@ -320,6 +361,15 @@ impl Config {
                     if log.path.as_os_str().is_empty() {
                         anyhow::bail!("mcp server {name}: stdout_log.path must not be empty");
                     }
+                    if log
+                        .path
+                        .components()
+                        .any(|c| matches!(c, Component::ParentDir))
+                    {
+                        anyhow::bail!(
+                            "mcp server {name}: stdout_log.path must not contain `..` segments"
+                        );
+                    }
                     let path = if log.path.is_absolute() {
                         log.path
                     } else {
@@ -342,6 +392,18 @@ impl Config {
                     })
                 }
                 None => None,
+            };
+
+            let inherit_env = match server.transport {
+                Transport::Stdio => server.inherit_env.unwrap_or(true),
+                _ => {
+                    if server.inherit_env.is_some() {
+                        anyhow::bail!(
+                            "mcp server {name}: inherit_env is only valid for transport=stdio"
+                        );
+                    }
+                    true
+                }
             };
 
             let (argv, unix_path) = match server.transport {
@@ -521,6 +583,7 @@ impl Config {
                         ServerConfig {
                             transport: Transport::StreamableHttp,
                             argv: Vec::new(),
+                            inherit_env: true,
                             unix_path: None,
                             url,
                             sse_url,
@@ -541,6 +604,7 @@ impl Config {
                 ServerConfig {
                     transport: server.transport,
                     argv,
+                    inherit_env,
                     unix_path,
                     url: None,
                     sse_url: None,
@@ -638,6 +702,15 @@ impl Config {
                     if log.path.as_os_str().is_empty() {
                         anyhow::bail!("mcp server {name}: stdout_log.path must not be empty");
                     }
+                    if log
+                        .path
+                        .components()
+                        .any(|c| matches!(c, Component::ParentDir))
+                    {
+                        anyhow::bail!(
+                            "mcp server {name}: stdout_log.path must not contain `..` segments"
+                        );
+                    }
                     let path = if log.path.is_absolute() {
                         log.path
                     } else {
@@ -660,6 +733,18 @@ impl Config {
                     })
                 }
                 None => None,
+            };
+
+            let inherit_env = match transport {
+                Transport::Stdio => server.inherit_env.unwrap_or(true),
+                _ => {
+                    if server.inherit_env.is_some() {
+                        anyhow::bail!(
+                            "mcp server {name}: inherit_env is only valid for transport=stdio"
+                        );
+                    }
+                    true
+                }
             };
 
             match transport {
@@ -725,6 +810,7 @@ impl Config {
                         ServerConfig {
                             transport: Transport::Stdio,
                             argv,
+                            inherit_env,
                             unix_path: None,
                             url: None,
                             sse_url: None,
@@ -785,6 +871,7 @@ impl Config {
                         ServerConfig {
                             transport: Transport::Unix,
                             argv: Vec::new(),
+                            inherit_env: true,
                             unix_path: Some(unix_path),
                             url: None,
                             sse_url: None,
@@ -899,6 +986,7 @@ impl Config {
                         ServerConfig {
                             transport: Transport::StreamableHttp,
                             argv: Vec::new(),
+                            inherit_env: true,
                             unix_path: None,
                             url,
                             sse_url,
@@ -935,6 +1023,21 @@ mod tests {
         assert!(cfg.client.capabilities.is_none());
         assert!(cfg.client.roots.is_none());
         assert!(cfg.servers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_fails_closed_when_config_is_too_large() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = "a".repeat((MAX_CONFIG_BYTES + 1) as usize);
+        tokio::fs::write(dir.path().join("mcp.json"), big)
+            .await
+            .unwrap();
+
+        let err = Config::load(dir.path(), None).await.unwrap_err();
+        assert!(
+            err.to_string().contains("too large"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]
@@ -998,6 +1101,38 @@ mod tests {
         assert!(server.env.contains_key("NO_COLOR"));
         assert!(server.stdout_log.is_none());
         assert!(server.unix_path.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_parses_stdio_inherit_env() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{ "version": 1, "servers": { "a": { "transport": "stdio", "argv": ["mcp-a"], "inherit_env": false } } }"#,
+        )
+        .await
+        .unwrap();
+
+        let cfg = Config::load(dir.path(), None).await.unwrap();
+        let server = cfg.servers.get("a").unwrap();
+        assert!(!server.inherit_env);
+    }
+
+    #[tokio::test]
+    async fn load_denies_stdout_log_path_with_parent_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{ "version": 1, "servers": { "a": { "transport": "stdio", "argv": ["mcp-a"], "stdout_log": { "path": "../oops.log" } } } }"#,
+        )
+        .await
+        .unwrap();
+
+        let err = Config::load(dir.path(), None).await.unwrap_err();
+        assert!(
+            err.to_string().contains("stdout_log.path") && err.to_string().contains(".."),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]
@@ -1393,6 +1528,7 @@ mod tests {
         let err = Config::load(dir.path(), Some(PathBuf::from("missing.json")))
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("read"));
+        let msg = err.to_string();
+        assert!(msg.contains("stat") || msg.contains("read"), "err={msg}");
     }
 }
