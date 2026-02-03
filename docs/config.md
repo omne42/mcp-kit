@@ -16,6 +16,8 @@
 CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
 
 > 保护性限制：为避免异常/恶意配置导致内存放大，`mcp.json`（以及 `.mcp.json`）文件大小上限为 **4MiB**；超过会 fail-closed 报错。
+>
+> 同时，出于安全考虑，配置文件必须是普通文件（regular file）：如果是 symlink/目录/特殊文件，会被拒绝加载。
 
 ## 兼容格式（best-effort）
 
@@ -46,7 +48,7 @@ CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
 > 备注：
 >
 > - 有些工具会在同一个文件中同时包含其它顶层字段（例如 `plugin.json` 里的 `"version": "1.0.0"`）。只要存在 `mcpServers`，`Config::load` 就会按该 wrapper 解析。
-> - `mcpServers` 既支持 inline object，也支持 string（指向 `./.mcp.json` 等文件路径，按 config 文件所在目录解析）。安全起见，该路径必须为相对路径、不得包含 `..`，且解析后必须位于 `--root` 之下（同时拒绝 symlink 组件）。
+> - `mcpServers` 既支持 inline object，也支持 string（指向 `./.mcp.json` 等文件路径，按 config 文件所在目录解析）。安全起见，该路径必须为相对路径、不得包含 `..`，并且会做 canonicalize 后校验“解析结果仍位于 `--root` 之下”；允许 `--root` 内部的 symlink（例如 worktree/monorepo 目录结构），但禁止通过 symlink 越界。
 > - 当启用 Trusted mode（CLI `--trust` / `TrustMode::Trusted`）时，`transport=stdio` 的 `argv/env` 以及 `transport=streamable_http` 的 `url/sse_url/http_url/http_headers` 支持 `${VAR}` 占位符（从当前进程环境变量读取）。`${CLAUDE_PLUGIN_ROOT}` / `${MCP_ROOT}` 会替换为 `cwd/--root`。
 
 ### Claude Code `.mcp.json` 直接 server map

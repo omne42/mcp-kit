@@ -255,20 +255,41 @@ async fn read_to_string_limited(path: &Path) -> anyhow::Result<String> {
             path.display()
         );
     }
-    if meta.len() > MAX_CONFIG_BYTES {
+
+    let mut buf = Vec::new();
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+
+    use tokio::io::AsyncReadExt;
+
+    let file = options
+        .open(path)
+        .await
+        .with_context(|| format!("read {}", path.display()))?;
+    let file_meta = file
+        .metadata()
+        .await
+        .with_context(|| format!("stat {}", path.display()))?;
+    if !file_meta.file_type().is_file() {
+        let kind = describe_file_type(&file_meta);
         anyhow::bail!(
-            "mcp config too large: {} bytes (max {MAX_CONFIG_BYTES}): {}",
-            meta.len(),
+            "mcp config must be a regular file (got {kind}): {}",
             path.display()
         );
     }
-    use tokio::io::AsyncReadExt;
+    if file_meta.len() > MAX_CONFIG_BYTES {
+        anyhow::bail!(
+            "mcp config too large: {} bytes (max {MAX_CONFIG_BYTES}): {}",
+            file_meta.len(),
+            path.display()
+        );
+    }
 
-    let mut buf = Vec::new();
-    tokio::fs::File::open(path)
-        .await
-        .with_context(|| format!("read {}", path.display()))?
-        .take(MAX_CONFIG_BYTES + 1)
+    file.take(MAX_CONFIG_BYTES + 1)
         .read_to_end(&mut buf)
         .await
         .with_context(|| format!("read {}", path.display()))?;
@@ -298,21 +319,42 @@ async fn try_read_to_string_limited(path: &Path) -> anyhow::Result<Option<String
             path.display()
         );
     }
-    if meta.len() > MAX_CONFIG_BYTES {
-        anyhow::bail!(
-            "mcp config too large: {} bytes (max {MAX_CONFIG_BYTES}): {}",
-            meta.len(),
-            path.display()
-        );
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
 
     use tokio::io::AsyncReadExt;
 
     let mut buf = Vec::new();
-    tokio::fs::File::open(path)
+    let file = match options.open(path).await {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
+    };
+
+    let file_meta = file
+        .metadata()
         .await
-        .with_context(|| format!("read {}", path.display()))?
-        .take(MAX_CONFIG_BYTES + 1)
+        .with_context(|| format!("stat {}", path.display()))?;
+    if !file_meta.file_type().is_file() {
+        let kind = describe_file_type(&file_meta);
+        anyhow::bail!(
+            "mcp config must be a regular file (got {kind}): {}",
+            path.display()
+        );
+    }
+    if file_meta.len() > MAX_CONFIG_BYTES {
+        anyhow::bail!(
+            "mcp config too large: {} bytes (max {MAX_CONFIG_BYTES}): {}",
+            file_meta.len(),
+            path.display()
+        );
+    }
+
+    file.take(MAX_CONFIG_BYTES + 1)
         .read_to_end(&mut buf)
         .await
         .with_context(|| format!("read {}", path.display()))?;

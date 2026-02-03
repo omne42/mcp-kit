@@ -1458,7 +1458,11 @@ fn host_matches_allowlist(host: &str, allowed: &str) -> bool {
     if allowed.is_empty() {
         return false;
     }
-    host == allowed || host.ends_with(&format!(".{allowed}"))
+    if host == allowed {
+        return true;
+    }
+    host.strip_suffix(&allowed)
+        .is_some_and(|rest| rest.ends_with('.'))
 }
 
 fn is_untrusted_sensitive_http_header(header: &str) -> bool {

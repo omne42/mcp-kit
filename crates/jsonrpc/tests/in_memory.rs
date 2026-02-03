@@ -541,7 +541,7 @@ async fn wait_with_timeout_can_return_timeout_error() {
         )
         .await
         .expect_err("expected wait timeout error");
-    assert!(matches!(err, mcp_jsonrpc::Error::Protocol(msg) if msg.contains("timed out")));
+    assert!(err.is_wait_timeout(), "err={err:?}");
 
     let mut child = client.take_child().expect("child");
     child.start_kill().expect("kill");

@@ -111,6 +111,13 @@ pub enum Error {
     Protocol(String),
 }
 
+impl Error {
+    /// Returns true if this error was produced by `Client::wait_with_timeout`.
+    pub fn is_wait_timeout(&self) -> bool {
+        matches!(self, Error::Protocol(msg) if msg.starts_with("wait timed out after "))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum Id {

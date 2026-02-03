@@ -12,6 +12,7 @@
 - `mcp-jsonrpc`：新增 `ClientStats` / `Client::stats()` / `ClientHandle::stats()`，统计无效 JSON 行与因队列满/关闭导致的 notifications 丢弃数量。
 - `mcp-jsonrpc`：新增 `Client::connect_streamable_http_split_with_options(sse_url, http_url, ...)`，支持分离的 SSE 与 POST URL。
 - `mcp-jsonrpc`：新增 `Client::wait_with_timeout(timeout, on_timeout)` 与 `WaitOnTimeout`，支持带超时等待 child 退出（可选 kill）。
+- `mcp-jsonrpc`：新增 `Error::is_wait_timeout()`，便于在代码中判断 wait 超时错误。
 - `mcp-kit`：`mcp.json`（v1）解析、MCP server 连接与连接缓存管理（`Config/Manager/Connection`）。
 - `mcpctl`：基于配置的 MCP CLI（list-servers/list-tools/list-resources/list-prompts/call）。
 - `mcpctl`：新增 `--dns-check`，可选启用 Untrusted 下的 hostname DNS 校验。
@@ -86,9 +87,11 @@
 - Docs: make `docs/SUMMARY.md` mdbook-compatible and add section landing pages (`docs/guides.md`, `docs/reference.md`, `docs/more.md`).
 - Docs: clarify `stdout_log.max_parts` semantics for `mcp.json` vs Rust API.
 - githooks: if `mdbook` is installed, pre-commit now runs `mdbook build docs` when docs are staged, to catch rendering issues early.
+- CI: add GitHub Actions workflow to run fmt/test/clippy/mdbook/llms checks on PRs.
 - `mcp-kit`：`mcp.json v1` 中 `http_headers` 现在也接受别名字段 `headers`（便于复用 Cursor 等配置片段）。
 - `mcpctl list-servers` 默认不输出 stdio `argv` 明文（避免把 token/key 打到终端/CI）；可用 `--show-argv` 显式开启。
 - `dns_check`（`--dns-check`）支持可配置 DNS timeout，并默认 fail-closed（失败直接拒绝连接）；如确实需要可显式开启 fail-open，并同步更新文档说明。
+- `mcp-jsonrpc`：移除未使用的 `anyhow` 依赖，保持依赖最小化。
 
 ### Fixed
 - `mcp-jsonrpc`：当 server→client request 的 `jsonrpc` 版本非法但 `id` 合法时，`-32600 Invalid Request` 现在会回显原始 `id`（而不是 `null`），保持 JSON-RPC 2.0 相关性语义。
@@ -100,12 +103,14 @@
 - `mcp-kit`：当文件包含 `mcpServers` wrapper（例如 Claude plugin.json）时，`Config::load` 现在会优先按 wrapper 解析，而不是误判为 `mcp.json v1`。
 - `mcp-kit`：`mcpServers` 现在支持 string（指向 `./.mcp.json` 等文件路径），用于兼容 Claude plugin.json 的 `mcpServers` path 写法。
 - `mcp-kit`：配置加载读取做有界读取（防止特殊文件/无限流导致 hang），并要求配置文件为 regular file。
+- `mcp-kit`：配置读取在 unix 下使用 `O_NOFOLLOW` 并在 open 后再校验类型/大小，降低 TOCTOU 风险；缺失文件的 best-effort 读取在 open 阶段遇到 `NotFound` 会视为缺失。
 - `mcp-kit`：Trusted mode 下会展开 `${VAR}` 占位符（stdio `argv/env`、streamable_http `url/http_headers`），并支持 `${CLAUDE_PLUGIN_ROOT}` / `${MCP_ROOT}`。
 - `mcp-kit`：Trusted mode 下的 argv/url 占位符展开与 URL 校验失败不会回显原始明文（避免 token/secret 泄露到错误链）。
 - `mcp-jsonrpc`：`Client::wait()` 现在会关闭写端/child stdin，避免“等待 stdin EOF 才退出”的 stdio server 造成 hang；reader EOF/IO error 也会触发关闭写端。
 - `mcp-jsonrpc`：stdout_log 打开时会拒绝包含 symlink 组件的路径，避免意外写入到不安全位置。
 - `mcp-jsonrpc`：unix 下 stdout_log 打开使用 `O_NOFOLLOW`（缓解 TOCTOU symlink replacement），并调整相关测试与行为说明。
-- `mcp-kit`：`mcpServers: \"path\"` 间接引用读取新增 root 边界与 symlink 拒绝，避免通过 symlink 逃逸读取 `--root` 外文件。
+- `mcp-kit`：`mcpServers: \"path\"` 间接引用读取新增 root 边界与 canonicalize 校验，避免通过 symlink 逃逸读取 `--root` 外文件。
+- `mcp-kit`：host allowlist 匹配逻辑不再做额外字符串分配（小幅减少 hot path 开销）。
 - scripts: 加固 `scripts/gen-llms-txt.sh` 路径解析，拒绝路径穿越/符号链接导致的本机文件打包泄露风险。
 - Examples: `in_memory_duplex` 现在用 `Url::from_directory_path` 生成正确的目录 `file://` URI（支持空格/非 ASCII 的 percent-encoding）。
 - Examples: `minimal_client` / `client_with_policy` 默认省略 `tools/list` 的空 `params`（与 `Manager::list_tools`/`Session::list_tools` 语义一致）。
