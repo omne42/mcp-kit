@@ -79,7 +79,7 @@ async fn streamable_http_allows_initial_sse_405_and_retries_after_202() {
                         if get_idx == 0 {
                             let _ = socket
                                 .write_all(
-                                    b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n",
+                                    b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                                 )
                                 .await;
                             return;
@@ -136,7 +136,9 @@ async fn streamable_http_allows_initial_sse_405_and_retries_after_202() {
                         server_state.response_ready.notify_waiters();
 
                         let _ = socket
-                            .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+                            .write_all(
+                                b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
                             .await;
                     }
                     _ => {

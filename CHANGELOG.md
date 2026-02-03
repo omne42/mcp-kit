@@ -70,3 +70,4 @@
 - `mcp-kit`：Cursor/Claude style 外部配置中 `type=http|sse` 与推断 transport 冲突时会 fail-closed 报错。
 - Examples: `in_memory_duplex` 现在用 `Url::from_file_path` 生成正确的 `file://` URI（支持空格/非 ASCII 的 percent-encoding）。
 - Docs: `minimal_client` 补充 Untrusted 默认出站限制提示，并指向 `docs/security.md` 与 `client_with_policy` 的 `--allow-*` 用法。
+- Tests: stabilize flaky `streamable_http_allows_initial_sse_405_and_retries_after_202`.
