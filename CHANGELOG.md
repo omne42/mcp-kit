@@ -60,6 +60,7 @@
 - Docs: clarify `StreamableHttpOptions.request_timeout` semantics in `docs/jsonrpc.md`.
 - Docs: document split `sse_url/http_url`, `--dns-check`, and updated `[DONE]` semantics for streamable_http.
 - Docs: expand GitBook-style documentation under `docs/` and add `CONTRIBUTING.md`.
+- Docs: add `docs/book.toml` (mdbook) and `docs/llms.txt` (single-file doc bundle).
 - `mcp-kit`：`mcp.json v1` 中 `http_headers` 现在也接受别名字段 `headers`（便于复用 Cursor 等配置片段）。
 
 ### Fixed

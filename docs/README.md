@@ -1,34 +1,50 @@
 # mcp-kit 文档
 
-`mcp-kit` 是一个 **Rust workspace**，提供可复用的 MCP client/runner 组件：
+`mcp-kit` 是一个 **Rust workspace**：提供可复用的 MCP client/runner 组件，用于按配置连接 MCP servers（stdio / unix / streamable_http），并以 **Safe-by-default** 的方式提供 TrustMode 与远程出站策略。
+
+## 为什么用 mcp-kit？
+
+- **Remote-first**：原生支持远程 `transport=streamable_http`（HTTP SSE + POST）。
+- **Safe-by-default**：默认 `TrustMode::Untrusted`，拒绝本地 `stdio/unix`，并对远程出站做保守校验（https/host/ip/sensitive headers/env secrets）。
+- **低依赖、低仪式感**：数据层以 `serde_json::Value` 为主；typed wrapper 只覆盖常用 MCP 方法子集。
+- **可组合/可测试**：既能用 `Manager` 管多个 server，也能把单连接的 `Session` 交给其他模块持有；支持 `connect_io/connect_jsonrpc` 接入自定义 transport。
+- **CLI 先行**：`mcpctl` 适合快速验证配置、探测 tools/resources/prompts，并能显式切换 `--trust` 或收紧/放开 Untrusted 出站策略。
+
+## 组件一览
 
 - `mcp-jsonrpc`：最小 JSON-RPC 2.0 client（stdio / unix / streamable_http），支持 notification 与 server→client request，并内置 DoS 防护（有界队列 + 单消息大小限制）。
 - `mcp-kit`：`mcp.json`（v1）解析 + MCP 连接/初始化 + 会话管理（`Config / Manager / Session`），并提供常用 MCP 方法的便捷封装。
-- `mcpctl`：基于 `mcp.json` 的 CLI（用于快速验证配置、探测 server 的 tools/resources/prompts 等）。
-
-## 设计原则（读这个能少踩坑）
-
-- **Remote-first**：原生支持远程 `transport=streamable_http`（HTTP SSE + POST）。
-- **Safe-by-default**：默认 `TrustMode::Untrusted`，拒绝本地 `stdio/unix`（避免不可信仓库触发本地执行/本地 socket 访问），并对远程出站做保守校验。
-- **低依赖、低仪式感**：数据层以 `serde_json::Value` 为主，typed wrapper 只覆盖常用 MCP 方法子集。
-- **可组合**：既能用 `Manager` 一把梭，也能把单 server 的 `Session` 交给其他库持有；还可通过 `connect_io/connect_jsonrpc` 接入自定义 transport。
+- `mcpctl`：基于 `mcp.json` 的 CLI（`cargo run -p mcp-kit --features cli --bin mcpctl -- ...`）。
+- Examples：可运行示例在 `crates/mcp-kit/examples/`，索引见 `example/README.md` 与 [`示例`](examples.md)。
 
 ## 从哪里开始
 
 - 新手：先看 [`快速开始`](quickstart.md)（5 分钟跑通 `mcpctl` + 代码调用）。
 - 想先建立整体心智模型：看 [`核心概念与术语`](concepts.md)。
 - 配置：看 [`配置`](config.md)（发现顺序、schema、每种 transport 的字段与约束）。
-- CLI：看 [`CLI：mcpctl`](cli.md)（所有 flag/subcommand 的行为与示例）。
 - 作为库：看 [`作为库使用`](library.md)（`Config/Manager/Session` 最佳实践）。
-- 安全：看 [`安全模型`](security.md)（为什么默认不信任、哪些会被拒绝、如何按需放开）。
-- 传输：看 [`传输层`](transports.md)（stdio/unix/streamable_http 的差异与限制）。
-- streamable_http 细节：看 [`streamable_http 传输详解`](streamable_http.md)（SSE + POST、mcp-session-id、超时/redirect）。
-- 底层 JSON-RPC：看 [`mcp-jsonrpc`](jsonrpc.md)（队列/限制/handler 的用法）。
-- 日志：看 [`日志与观测`](logging.md)。
-- 调优：看 [`调优与限制`](tuning.md)。
-- API 索引：看 [`API 参考`](api.md)。
+- 安全：看 [`安全模型`](security.md)（默认拒绝什么、为什么拒绝、如何按需放开）。
+- 传输：看 [`传输层`](transports.md) 与 [`streamable_http 传输详解`](streamable_http.md)。
 
-## 目录导航（GitBook）
+## 本地预览（推荐 mdbook）
+
+本仓库的文档结构兼容 mdbook（目录由 `docs/SUMMARY.md` 驱动；配置见 `docs/book.toml`）。
+
+```bash
+cargo install mdbook
+mdbook serve docs --open
+```
+
+## llms.txt（把文档打包给 LLM）
+
+如果你希望把文档一次性喂给 LLM（Cursor/Claude/ChatGPT），用：
+
+- `docs/llms.txt`（生成后的单文件）
+- `./scripts/gen-llms-txt.sh`（生成脚本）
+
+详情见 [`llms.txt（给 LLM 用）`](llms.md)。
+
+## 目录导航（GitBook/HonKit）
 
 如果你用 GitBook/HonKit 一类工具渲染这套文档，入口是：
 

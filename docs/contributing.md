@@ -21,6 +21,23 @@ cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
+## 文档
+
+文档位于 `docs/`，目录由 `docs/SUMMARY.md` 驱动。
+
+本地预览（可选）：
+
+```bash
+cargo install mdbook
+mdbook serve docs --open
+```
+
+如果你改动了文档结构或内容，并希望更新给 LLM 用的打包文件，请运行：
+
+```bash
+./scripts/gen-llms-txt.sh
+```
+
 ## 提交内容的基本要求
 
 - 变更 `mcp.json` schema：请同时更新 `docs/config.md` 与相关测试。

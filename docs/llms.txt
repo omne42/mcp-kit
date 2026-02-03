@@ -1,0 +1,1894 @@
+# mcp-kit docs (llms.txt)
+
+This file is generated from the Markdown docs in `docs/`, following `docs/SUMMARY.md`.
+It is meant to be pasted into LLM tooling (Cursor/Claude/ChatGPT) as a single context bundle.
+
+Regenerate: `./scripts/gen-llms-txt.sh`
+
+---
+
+# 简介 (README.md)
+
+# mcp-kit 文档
+
+`mcp-kit` 是一个 **Rust workspace**：提供可复用的 MCP client/runner 组件，用于按配置连接 MCP servers（stdio / unix / streamable_http），并以 **Safe-by-default** 的方式提供 TrustMode 与远程出站策略。
+
+## 为什么用 mcp-kit？
+
+- **Remote-first**：原生支持远程 `transport=streamable_http`（HTTP SSE + POST）。
+- **Safe-by-default**：默认 `TrustMode::Untrusted`，拒绝本地 `stdio/unix`，并对远程出站做保守校验（https/host/ip/sensitive headers/env secrets）。
+- **低依赖、低仪式感**：数据层以 `serde_json::Value` 为主；typed wrapper 只覆盖常用 MCP 方法子集。
+- **可组合/可测试**：既能用 `Manager` 管多个 server，也能把单连接的 `Session` 交给其他模块持有；支持 `connect_io/connect_jsonrpc` 接入自定义 transport。
+- **CLI 先行**：`mcpctl` 适合快速验证配置、探测 tools/resources/prompts，并能显式切换 `--trust` 或收紧/放开 Untrusted 出站策略。
+
+## 组件一览
+
+- `mcp-jsonrpc`：最小 JSON-RPC 2.0 client（stdio / unix / streamable_http），支持 notification 与 server→client request，并内置 DoS 防护（有界队列 + 单消息大小限制）。
+- `mcp-kit`：`mcp.json`（v1）解析 + MCP 连接/初始化 + 会话管理（`Config / Manager / Session`），并提供常用 MCP 方法的便捷封装。
+- `mcpctl`：基于 `mcp.json` 的 CLI（`cargo run -p mcp-kit --features cli --bin mcpctl -- ...`）。
+- Examples：可运行示例在 `crates/mcp-kit/examples/`，索引见 `example/README.md` 与 [`示例`](examples.md)。
+
+## 从哪里开始
+
+- 新手：先看 [`快速开始`](quickstart.md)（5 分钟跑通 `mcpctl` + 代码调用）。
+- 想先建立整体心智模型：看 [`核心概念与术语`](concepts.md)。
+- 配置：看 [`配置`](config.md)（发现顺序、schema、每种 transport 的字段与约束）。
+- 作为库：看 [`作为库使用`](library.md)（`Config/Manager/Session` 最佳实践）。
+- 安全：看 [`安全模型`](security.md)（默认拒绝什么、为什么拒绝、如何按需放开）。
+- 传输：看 [`传输层`](transports.md) 与 [`streamable_http 传输详解`](streamable_http.md)。
+
+## 本地预览（推荐 mdbook）
+
+本仓库的文档结构兼容 mdbook（目录由 `docs/SUMMARY.md` 驱动；配置见 `docs/book.toml`）。
+
+```bash
+cargo install mdbook
+mdbook serve docs --open
+```
+
+## llms.txt（把文档打包给 LLM）
+
+如果你希望把文档一次性喂给 LLM（Cursor/Claude/ChatGPT），用：
+
+- `docs/llms.txt`（生成后的单文件）
+- `./scripts/gen-llms-txt.sh`（生成脚本）
+
+详情见 [`llms.txt（给 LLM 用）`](llms.md)。
+
+## 目录导航（GitBook/HonKit）
+
+如果你用 GitBook/HonKit 一类工具渲染这套文档，入口是：
+
+- `docs/README.md`（本页）
+- `docs/SUMMARY.md`（目录）
+
+---
+
+# 核心概念与术语 (concepts.md)
+
+# 核心概念与术语
+
+本章是“词典 + 心智模型”：读完后你能快速理解 `mcp-kit` 在做什么、各组件怎么拼起来。
+
+## MCP（Model Context Protocol）
+
+MCP 是一种基于 **JSON-RPC 2.0** 的协议约定，用于让 “MCP client” 与 “MCP server” 交互。
+
+常见交互包括：
+
+- `initialize`：握手，交换 protocol/version/capabilities 等信息
+- `tools/*`：列出并调用工具（tool）
+- `resources/*`：列出并读取资源（resource）
+- `prompts/*`：列出并获取 prompt 模板
+- `logging/setLevel`：控制 server 侧日志等级
+- `completion/complete`：补全相关能力（视 server 支持情况而定）
+
+> `mcp-kit` 提供了常用 method 的便捷 API，但不试图覆盖完整 MCP schema。
+
+## JSON-RPC 2.0
+
+JSON-RPC 2.0 是一种轻量的 RPC 协议：
+
+- request：包含 `id`，需要对端回复 response
+- notification：不包含 `id`，对端无需回复
+- response：对应某个 `id`，包含 `result` 或 `error`
+
+MCP 约定的 method 名称（例如 `tools/list`）就是 JSON-RPC 的 `method` 字段。
+
+## tool / resource / prompt
+
+这三个是 MCP server 暴露给 client 的“能力面”：
+
+- **tool**：可被调用的动作（例如搜索、读写、计算等）。调用入口通常是 `tools/call`。
+- **resource**：可读取的内容（例如文件、网页、数据集）。读取入口通常是 `resources/read`。
+- **prompt**：可参数化的 prompt 模板。读取入口通常是 `prompts/get`。
+
+不同 server 对具体字段/能力的支持程度可能不同，因此 `mcp-kit` 的 typed wrapper 以常用字段为主；缺失部分可以继续用 `serde_json::Value` 处理。
+
+## roots（根目录/根 URI）
+
+MCP 的 roots 能力用于让 client 告诉 server：“我允许你把哪些目录/URI 当作工作根”。
+
+在 `mcp-kit` 中：
+
+- 你可以在 `mcp.json` 的 `client.roots` 配置 roots
+- 或通过代码 `Manager::with_roots(...)` 注入
+
+启用后会发生两件事：
+
+1. initialize 的 `capabilities.roots` 会被自动声明
+2. `mcp-kit` 会内建响应 server→client 的 `roots/list` request
+
+## transport（传输方式）
+
+`mcp-kit` 支持三种 transport（见 [`传输层`](transports.md)）：
+
+- `stdio`：spawn 子进程，通过 stdin/stdout 交换 JSON-RPC 行
+- `unix`：连接已存在的 unix domain socket
+- `streamable_http`：远程 HTTP（SSE + POST），常用于远程 MCP server
+
+## Config / Manager / Session（mcp-kit 三件套）
+
+把它们理解成：**配置 → 多连接管理器 → 单连接会话**。
+
+- `Config`：负责加载并校验 `mcp.json`（v1），得到一组 server 配置
+- `Manager`：持有多个 server 的连接缓存；按需连接并执行 MCP initialize；提供便捷方法
+- `Session`：一个“已 initialize 的单连接”，可交给其他模块/库独立持有与使用
+
+常见使用路径：
+
+1. `Config::load` 读取配置
+2. `Manager::from_config` 创建 manager
+3. `Manager::request/list_tools/call_tool/...` 发请求（内部会按需 connect + initialize）
+4. （可选）`Manager::get_or_connect_session` 取出某个 server 的 `Session`，交给别的组件用
+
+## TrustMode（信任模型）
+
+`TrustMode` 是 `mcp-kit` 的关键安全开关（见 [`安全模型`](security.md)）：
+
+- 默认 `Untrusted`：拒绝 `stdio/unix`（防止不可信仓库诱导本地执行/本地 socket 访问），并对 `streamable_http` 做保守出站校验
+- `Trusted`：完全信任本地配置，允许本地 transport 与读取 env secrets 等
+
+CLI 中：
+
+- 默认等价于 `Untrusted`
+- `mcpctl --trust` 等价于 `Trusted`
+
+## UntrustedStreamableHttpPolicy（不完全信任下的出站策略）
+
+当你不想完全 `--trust`，但又需要“更严格/更宽松”的远程连接策略时，可配置：
+
+- 只允许特定 host（allowlist）
+- 是否允许 `http://`
+- 是否允许 localhost/私网 IP 字面量
+
+这只影响 `transport=streamable_http`。
+
+---
+
+# 快速开始 (quickstart.md)
+
+# 快速开始
+
+本章目标：**在 5 分钟内跑通一次连接**（CLI + 作为库调用），并理解为什么默认会“拒绝一些东西”。
+
+## 前置条件
+
+- Rust `1.85+`（本 workspace 的 `rust-version`）
+- 在本仓库内操作：进入 `mcp-kit/` 目录
+
+## 1）先把 `mcpctl` 跑起来
+
+`mcpctl` 在 `mcp-kit` crate 中，通过 feature `cli` 启用：
+
+```bash
+cd mcp-kit
+cargo run -p mcp-kit --features cli --bin mcpctl -- --help
+```
+
+## 2）准备一个最小的远程配置（推荐）
+
+在 workspace root（你运行 `mcpctl` 的 `--root`，默认当前目录）创建 `./.mcp.json`：
+
+```json
+{
+  "version": 1,
+  "servers": {
+    "remote": {
+      "transport": "streamable_http",
+      "url": "https://example.com/mcp"
+    }
+  }
+}
+```
+
+然后：
+
+```bash
+# 查看解析后的配置（确认最终生效字段）
+cargo run -p mcp-kit --features cli --bin mcpctl -- list-servers
+
+# 探测 tools（远程 https 且非 localhost/私网：默认无需 --trust）
+cargo run -p mcp-kit --features cli --bin mcpctl -- list-tools remote
+```
+
+如果你需要对远程出站做更严格/更宽松控制，见 [`安全模型`](security.md) 与 `mcpctl --help` 中的 `--allow-*` 选项。
+
+## 3）本地 stdio/unix 为什么默认跑不起来？
+
+如果你的 `mcp.json` 配的是本地：
+
+```json
+{
+  "version": 1,
+  "servers": {
+    "local": {
+      "transport": "stdio",
+      "argv": ["mcp-server-bin", "--stdio"]
+    }
+  }
+}
+```
+
+在默认模式下（Untrusted），`mcpctl list-tools local` 会报错：拒绝 spawn。本地 `stdio/unix` 必须显式信任：
+
+```bash
+cargo run -p mcp-kit --features cli --bin mcpctl -- --trust list-tools local
+```
+
+原因与威胁模型见 [`安全模型`](security.md)。
+
+## 4）作为库使用：最小代码
+
+`mcp-kit` 的典型流程是：
+
+1. `Config::load` 读取并校验 `mcp.json`。
+2. `Manager::from_config` 创建 client（可设置 protocol/capabilities/roots/超时/信任策略）。
+3. `Manager::request` / `request_typed` 发请求（内部会按需 connect + initialize）。
+
+示例（以 `tools/list` 为例）：
+
+```rust
+use std::time::Duration;
+
+use mcp_kit::{mcp, Config, Manager, UntrustedStreamableHttpPolicy};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let root = std::env::current_dir()?;
+    let config = Config::load(&root, None).await?;
+
+    let mut mcp = Manager::from_config(&config, "my-app", "0.1.0", Duration::from_secs(30))
+        .with_untrusted_streamable_http_policy(UntrustedStreamableHttpPolicy {
+            allowed_hosts: vec!["example.com".to_string()],
+            ..Default::default()
+        });
+
+    let tools = mcp
+        .request_typed::<mcp::ListToolsRequest>(&config, "remote", None, &root)
+        .await?;
+
+    println!("{}", serde_json::to_string_pretty(&tools)?);
+    Ok(())
+}
+```
+
+下一步建议：
+
+- 想把单 server 会话交给别的库：看 [`作为库使用`](library.md) 的 `Session`。
+- 想理解每个配置字段的含义与限制：看 [`配置`](config.md)。
+
+---
+
+# 配置（mcp.json v1） (config.md)
+
+# 配置（mcp.json v1）
+
+本章描述 `mcp_kit::Config` 支持的 `mcp.json`（v1）schema、默认发现顺序与各字段约束。
+
+> 说明：`mcp.json v1` schema 是 fail-closed（`deny_unknown_fields`）。这对安全非常重要：拼写错误不会被静默忽略。
+>
+> 另外，`Config::load` 也支持一些生态里常见的 `.mcp.json` / `mcpServers` 兼容格式（best-effort，会忽略未支持字段），见下文「兼容格式」。
+
+## 文件发现顺序
+
+默认发现顺序（均相对 `--root`，默认当前工作目录）：
+
+1. `./.mcp.json`
+2. `./mcp.json`
+
+CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
+
+## 兼容格式（best-effort）
+
+除了本文档描述的 `mcp.json v1`，`mcp-kit` 还支持两种常见格式，便于直接复用 Cursor / Claude Code 等工具的配置。
+
+### Cursor / `mcpServers` 包裹格式
+
+示例（来自多种 MCP 客户端的常见写法）：
+
+```json
+{
+  "mcpServers": {
+    "litellm": {
+      "url": "http://localhost:4000/everything/mcp",
+      "type": "http",
+      "headers": { "Authorization": "Bearer sk-..." }
+    }
+  }
+}
+```
+
+映射规则（当前实现）：
+
+- 每个 entry 会被视为一个 server
+- `url` / `headers` 会映射到 `transport=streamable_http`（HTTP SSE + POST）
+- `type` 目前仅用于校验（接受：`http|sse|streamable_http`），不改变映射
+
+### Claude Code `.mcp.json` 直接 server map
+
+示例：
+
+```json
+{
+  "filesystem": {
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/allowed/path"],
+    "env": { "LOG_LEVEL": "debug" }
+  }
+}
+```
+
+映射规则（当前实现）：
+
+- `command` + `args` → `transport=stdio` 的 `argv`
+- `env` 会注入到 child process
+
+> 注意：兼容格式不会解析 `client` 配置（`protocol_version/capabilities/roots`）；如果你需要这些功能，使用 `mcp.json v1`。
+
+## 顶层 schema
+
+```json
+{
+  "version": 1,
+  "client": {
+    "protocol_version": "2025-06-18",
+    "capabilities": {},
+    "roots": [
+      { "uri": "file:///repo", "name": "workspace" }
+    ]
+  },
+  "servers": {
+    "server_name": { "transport": "stdio", "argv": ["bin", "--stdio"] }
+  }
+}
+```
+
+字段说明：
+
+- `version`（必填）：目前只支持 `1`
+- `client`（可选）：覆盖 MCP initialize 中的 client 信息
+  - `protocol_version`（可选）：非空字符串
+  - `capabilities`（可选）：JSON object
+  - `roots`（可选）：启用 roots 能力并内建响应 `roots/list`（见下文）
+- `servers`（必填但可为空 object）：server 配置字典
+
+## server name 约束
+
+`servers` 的 key（server name）只允许字符：`[a-zA-Z0-9_-]`，且不能为空。
+
+## servers.<name> 通用字段
+
+所有 transport 共有字段：
+
+- `transport`（必填）：`"stdio" | "unix" | "streamable_http"`
+
+不同 transport 允许的字段不同；不允许的字段会报错。
+
+## transport=stdio
+
+```json
+{
+  "transport": "stdio",
+  "argv": ["mcp-server-bin", "--stdio"],
+  "env": { "KEY": "VALUE" },
+  "stdout_log": {
+    "path": "./.mcp-kit/logs/mcp/server.stdout.log",
+    "max_bytes_per_part": 1048576,
+    "max_parts": 32
+  }
+}
+```
+
+字段：
+
+- `argv`（必填）：非空数组；每项必须非空字符串
+- `env`（可选）：KV 字典，注入到 child process
+- `stdout_log`（可选）：stdout 旋转落盘（便于排查协议输出）
+  - `path`（必填）：可为相对路径（相对 `--root` 解析）
+  - `max_bytes_per_part`（可选，默认 1MiB，最小 1）
+  - `max_parts`（可选，默认 32，最小 1；`0` 表示不做保留上限：无限保留）
+
+stdout_log 的旋转文件命名/保留策略见 [`日志与观测`](logging.md)。
+
+安全：
+
+- 默认 `TrustMode::Untrusted` 会拒绝 `stdio`（避免不可信仓库导致本地执行）。需要显式 `--trust` 或 `Manager::with_trust_mode(Trusted)`。
+
+## transport=unix
+
+```json
+{ "transport": "unix", "unix_path": "/tmp/mcp.sock" }
+```
+
+字段：
+
+- `unix_path`（必填）：可为相对路径（相对 `--root` 解析）
+
+约束：
+
+- 不支持 `argv/env/stdout_log`（仅用于连接已存在的 unix socket）
+
+安全：
+
+- 默认 `TrustMode::Untrusted` 会拒绝 `unix`（避免不可信仓库连接本地敏感 socket）。需要显式信任。
+
+## transport=streamable_http
+
+```json
+{
+  "transport": "streamable_http",
+  "url": "https://example.com/mcp",
+  "http_headers": { "X-Client": "my-app" },
+  "bearer_token_env_var": "MCP_TOKEN",
+  "env_http_headers": { "X-Api-Key": "MCP_API_KEY" }
+}
+```
+
+字段：
+
+- `url`（可选）：远程 MCP server URL（同时用于 SSE 与 POST）
+- `sse_url` + `http_url`（可选）：分离的 SSE URL 与 POST URL（两者必须同时设置；不能与 `url` 同时出现）
+- `http_headers`（可选）：静态 header
+- `bearer_token_env_var`（可选）：从 env 读取 token，注入 `Authorization: Bearer ...`
+- `env_http_headers`（可选）：从 env 读取 header 值
+
+约束：
+
+- 不支持 `argv/unix_path/env/stdout_log`
+
+安全（默认 Untrusted）：
+
+- 允许连接远程 `https` 且非 localhost/私网的 `url`
+- 拒绝发送敏感 header：`Authorization/Cookie/Proxy-Authorization`
+- 拒绝读取 `bearer_token_env_var` / `env_http_headers`（env secrets）
+
+详见 [`安全模型`](security.md)。
+
+streamable_http 的具体 HTTP 形态（SSE + POST、`mcp-session-id`、回包为 SSE 的场景）见 [`streamable_http 传输详解`](streamable_http.md)。
+
+## client.roots 与 `roots/list`
+
+当配置了 `client.roots`（或在代码里用 `Manager::with_roots(...)`）：
+
+- 会自动在 initialize 中声明 `capabilities.roots`
+- 会内建响应 server→client request：`roots/list`（返回你配置的 roots）
+
+`Root` 结构：
+
+```json
+{ "uri": "file:///repo", "name": "workspace" }
+```
+
+其中：
+
+- `uri` 必须非空
+- `name` 可选；若存在必须非空
+
+---
+
+# CLI：mcpctl (cli.md)
+
+# mcpctl
+
+`mcpctl` 是一个基于 `mcp.json` 的 MCP client/runner（config-driven; stdio/unix/streamable_http）。
+
+它的定位是：
+
+- 快速验证配置是否正确（`list-servers`）
+- 探测 server 暴露的能力（tools/resources/prompts）
+- 发送 raw request/notification 进行调试
+
+## 运行方式
+
+当前仓库内（推荐）：
+
+```bash
+cd mcp-kit
+cargo run -p mcp-kit --features cli --bin mcpctl -- --help
+```
+
+> 注意：`mcpctl` 通过 feature `cli` 启用，避免 library 依赖方被迫引入 `clap`。
+
+## 全局参数（flags）
+
+- `--root <path>`：workspace root；用于相对路径解析，并作为 stdio server 的工作目录
+- `--config <path>`：覆盖配置文件路径（绝对或相对 `--root`）
+- `--json`：输出紧凑 JSON（默认 pretty JSON）
+- `--timeout-ms <ms>`：per-request 超时（默认 30000）
+
+安全相关：
+
+- `--trust`：完全信任 `mcp.json`（允许 stdio/unix、允许读取 env secrets、允许发送认证 header）
+- `--allow-http`：Untrusted 下允许连接 `http://`（默认只允许 https）
+- `--allow-localhost`：Untrusted 下允许连接 `localhost/*.localhost/*.local`
+- `--allow-private-ip`：Untrusted 下允许连接非公网 IP 字面量
+- `--dns-check`：Untrusted 下对 hostnames 做 best-effort DNS 校验（解析到非公网 IP 会拒绝；除非同时允许 `--allow-private-ip`）
+- `--allow-host <host>`：Untrusted 下设置 host allowlist（可重复）
+
+> `--allow-*` / `--dns-check` 只影响 `transport=streamable_http`，不会放开 stdio/unix（它们需要 `--trust`）。
+
+## 子命令（subcommands）
+
+### list-servers
+
+列出解析后的配置（包含 `client` 与 servers 的关键字段），用于确认最终生效值：
+
+```bash
+cargo run -p mcp-kit --features cli --bin mcpctl -- list-servers
+```
+
+### list-tools / list-resources / list-prompts
+
+```bash
+cargo run -p mcp-kit --features cli --bin mcpctl -- list-tools remote
+cargo run -p mcp-kit --features cli --bin mcpctl -- list-resources remote
+cargo run -p mcp-kit --features cli --bin mcpctl -- list-prompts remote
+```
+
+### call
+
+```bash
+cargo run -p mcp-kit --features cli --bin mcpctl -- call remote my.tool --arguments-json '{"k":"v"}'
+```
+
+### request（raw JSON-RPC request）
+
+```bash
+cargo run -p mcp-kit --features cli --bin mcpctl -- request remote tools/list
+cargo run -p mcp-kit --features cli --bin mcpctl -- request remote resources/read --params-json '{"uri":"file:///path/to/file"}'
+```
+
+### notify（raw JSON-RPC notification）
+
+```bash
+cargo run -p mcp-kit --features cli --bin mcpctl -- notify remote notifications/initialized
+```
+
+## 常见用法组合
+
+- 远程 server（https + 非 localhost/私网）：默认可用
+- 本地 stdio/unix 或需要读取 env secrets：加 `--trust`
+- 不完全信任但需要放开部分出站：使用 `--allow-host/--allow-http/...`
+
+安全细节见 [`安全模型`](security.md)。
+
+---
+
+# 作为库使用 (library.md)
+
+# 作为库使用（mcp-kit）
+
+本章聚焦 `mcp-kit` 的对外 API：`Config / Manager / Session`，以及常见集成方式。
+
+## 选择 `Manager` 还是 `Session`？
+
+- 用 `Manager`：你想“按配置管理多个 server”，并希望有连接缓存、自动 initialize、以及 `list_tools/call_tool/...` 等便捷方法。
+- 用 `Session`：你想把“单 server 的已初始化连接”交给其它库/模块持有（更接近“连接句柄”的语义）。
+
+`Manager` 内部也是通过 `Session` 的同等能力实现，只是多了缓存与按需连接。
+
+## 读取配置：`Config::load`
+
+```rust
+let root = std::env::current_dir()?;
+let config = mcp_kit::Config::load(&root, None).await?;
+```
+
+- 默认会按顺序发现（相对 `root`）：`./.mcp.json` → `./mcp.json`。
+- 你也可以传入 `Some(path)` 覆盖（绝对路径或相对 `root` 的路径）。
+- 对 `mcp.json v1`：schema 为 fail-closed，未知字段会报错（`deny_unknown_fields`）；对 `.mcp.json` / `mcpServers` 兼容格式：best-effort（会忽略未支持字段）。
+
+详情见 [`配置`](config.md)。
+
+## 创建 client：`Manager::from_config`
+
+```rust
+use std::time::Duration;
+
+let mut manager = mcp_kit::Manager::from_config(
+    &config,
+    "my-client",
+    "0.1.0",
+    Duration::from_secs(30),
+);
+```
+
+它会把 `config.client.protocol_version / capabilities / roots` 自动灌入 `Manager`：
+
+- `protocol_version`：用于 MCP `initialize`，并在 `streamable_http` 下加到请求 header `MCP-Protocol-Version`。
+- `capabilities`：透传到 initialize；如果启用了 roots，会确保声明 `capabilities.roots`。
+- `roots`：启用后会内建响应 server→client 的 `roots/list`（见下文“server→client handler”）。
+
+## 发请求：`request` / `request_typed`
+
+最通用的方式（raw JSON）：
+
+```rust
+let v = manager
+    .request(&config, "remote", "tools/list", None, &root)
+    .await?;
+```
+
+更推荐的方式（typed wrapper）：
+
+```rust
+use mcp_kit::mcp;
+
+let tools = manager
+    .request_typed::<mcp::ListToolsRequest>(&config, "remote", None, &root)
+    .await?;
+```
+
+说明：
+
+- `request*` 会自动 `connect + initialize`（若未连接）。
+- timeout 是 `Manager` 级别的 per-request 超时；可用 `.with_timeout(...)` 调整。
+- `mcp_kit::mcp` 只覆盖常用 MCP method 的子集；缺的部分继续用 `serde_json::Value` 即可。
+
+## 连接与会话：把 `Session` 交出去
+
+当你希望“上层统一管理配置，但把某个 server 的会话交给另一层库持有”：
+
+```rust
+let session = manager
+    .get_or_connect_session(&config, "remote", &root)
+    .await?;
+
+let tools = session.list_tools().await?;
+```
+
+相关方法：
+
+- `Manager::get_or_connect_session`：按配置连接并返回 `Session`
+- `Manager::take_session`：把已连接的会话取走（会从 `Manager` 的连接缓存中移除）
+- `Manager::connect_*_session`：一次性连接并直接返回 `Session`
+
+## server→client：处理 requests / notifications
+
+底层 JSON-RPC（`mcp-jsonrpc`）支持 server→client 的：
+
+- notification（无 `id`）
+- request（有 `id`，需要 respond）
+
+`mcp_kit::Manager` 默认行为：
+
+- 未识别的 server→client request：返回 JSON-RPC `-32601 Method not found`
+- 若启用 roots：内建响应 `roots/list`
+
+你可以注入 handler：
+
+```rust
+use std::sync::Arc;
+use mcp_kit::{ServerRequestOutcome, ServerRequestContext};
+
+let handler = Arc::new(|ctx: ServerRequestContext| {
+    Box::pin(async move {
+        if ctx.method == "example/ping" {
+            return ServerRequestOutcome::Ok(serde_json::json!({"ok": true}));
+        }
+        ServerRequestOutcome::MethodNotFound
+    })
+});
+
+manager = manager.with_server_request_handler(handler);
+```
+
+notification handler 类似：`with_server_notification_handler(...)`。
+
+## TrustMode 与远程策略
+
+`Manager` 默认 `TrustMode::Untrusted`：
+
+- 拒绝 `transport=stdio|unix`
+- 允许远程 `streamable_http`，但会做安全校验（https/host/ip/sensitive headers/env secrets）
+
+完全信任配置时显式开启：
+
+```rust
+use mcp_kit::TrustMode;
+manager = manager.with_trust_mode(TrustMode::Trusted);
+```
+
+想在“不完全信任”的前提下收紧/放开远程规则，配置：
+
+```rust
+use mcp_kit::UntrustedStreamableHttpPolicy;
+manager = manager.with_untrusted_streamable_http_policy(UntrustedStreamableHttpPolicy {
+    allowed_hosts: vec!["example.com".into()],
+    ..Default::default()
+});
+```
+
+细节见 [`安全模型`](security.md)。
+
+## 自定义 transport：`connect_io` / `connect_jsonrpc`
+
+用于测试、复用已有管道，或接入自定义 JSON-RPC transport：
+
+- `Manager::connect_io(server, read, write)`
+- `Manager::connect_jsonrpc(server, client)`
+
+这两者会复用同样的 initialize 与 handler 逻辑。
+
+如果你需要调整 `mcp-jsonrpc` 的 `Limits` 或 streamable_http 的网络选项（例如 connect_timeout / redirects），推荐先用 `mcp-jsonrpc` 构建 `Client`，再用 `connect_jsonrpc` 接入；细节见 [`调优与限制`](tuning.md)。
+
+---
+
+# 安全模型 (security.md)
+
+# 安全模型（TrustMode）
+
+本章解释 `mcp-kit` 为什么默认会“拒绝某些连接”，以及如何在**可控范围内**放开限制。
+
+## 威胁模型：为什么需要 TrustMode？
+
+`mcp.json` 往往来自“当前工作目录/仓库”。当你在一个不可信仓库里运行 MCP client 时，配置本身可能诱导客户端做出危险动作，例如：
+
+- `transport=stdio`：spawn 任意本地程序（等价于本地代码执行入口）。
+- `transport=unix`：连接任意 unix socket（可能访问本机敏感服务）。
+- `transport=streamable_http`：连接恶意 URL（可能 SSRF 到内网/本机），或携带敏感 header/token 外带 secrets。
+
+因此 `mcp-kit` 选择：**默认不信任本地配置（fail-closed）**。
+
+## TrustMode：Trusted vs Untrusted
+
+`mcp_kit::TrustMode`：
+
+- `Untrusted`（默认）：拒绝“本地危险动作”，并对远程出站做保守校验。
+- `Trusted`：完全信任配置，允许 `stdio/unix`，并允许发送敏感 header、读取 env secrets 等。
+
+CLI 对应：
+
+- `mcpctl` 默认等价于 `Untrusted`
+- `mcpctl --trust` 等价于 `Trusted`
+
+## Untrusted 下的具体限制（行为精确对应代码实现）
+
+### 1）禁止本地 transport
+
+- `transport=stdio`：直接拒绝（报错提示需要 `TrustMode::Trusted`）
+- `transport=unix`：直接拒绝
+
+### 2）远程 `streamable_http` 出站校验
+
+默认 `UntrustedStreamableHttpPolicy`：
+
+- `require_https = true`：只允许 `https://`
+- `allow_localhost = false`：拒绝 `localhost` / `*.localhost` / `*.local`
+- `allow_private_ips = false`：拒绝 loopback/link-local/private 等非公网 IP 字面量
+- `dns_check = false`：默认不做 DNS 解析检查（可选开启；见下文）
+- `allowed_hosts = []`：默认不做 host allowlist；一旦配置 allowlist，则只允许 allowlist 命中的 host/子域名
+
+另外，Untrusted 下还会拒绝：
+
+- URL 中带 `user:pass@host` 形式的“URL credentials”
+- 发送敏感 header：`Authorization` / `Proxy-Authorization` / `Cookie`
+
+### 3）禁止读取 env secrets（用于认证 header）
+
+在 `streamable_http` 配置中：
+
+- `bearer_token_env_var`
+- `env_http_headers`
+
+这两类会从本地环境变量读取 secrets。在 `Untrusted` 下会直接拒绝读取。
+
+## 如何放开：三种层级
+
+### A. 完全信任（最简单）
+
+- CLI：`mcpctl --trust ...`
+- 代码：`Manager::with_trust_mode(TrustMode::Trusted)`
+
+适用：你明确知道自己在可信仓库、可信二进制、可信网络环境中。
+
+### B. 不完全信任，但允许有限出站（推荐）
+
+通过 `UntrustedStreamableHttpPolicy` 收紧/放开“远程连接”规则（只影响 `streamable_http`）：
+
+- CLI：`--allow-http` / `--allow-localhost` / `--allow-private-ip` / `--allow-host <host>`
+- 代码：`Manager::with_untrusted_streamable_http_policy(...)`
+
+建议用法：
+
+- 尽量用 `allowed_hosts` 做 allowlist（把出站面收敛到最小）
+- 除非必要，不要开启 `allow_http` / `allow_private_ip` / `allow_localhost`
+
+### C. 精细化：自定义 header / token 注入（Trusted 才允许）
+
+当你需要认证（Bearer token / API key / Cookie 等）时，推荐做法是：
+
+- 不要把 secrets 写进 `mcp.json`
+- 用环境变量保存 secrets，再通过 `bearer_token_env_var` / `env_http_headers` 注入
+
+但请注意：为了防止“不可信仓库借配置外带本机 secrets”，上述两项在 `Untrusted` 下会被拒绝读取，因此需要：
+
+- CLI：`--trust`
+- 或代码：`Manager::with_trust_mode(TrustMode::Trusted)`
+
+## 重要注意点（限制与最佳实践）
+
+### IP 校验只覆盖“IP 字面量”
+
+Untrusted 下对 `127.0.0.1`、`10.0.0.0/8` 等 **IP 字面量** 会做拒绝/允许判断；但对域名（如 `example.com`）不会在此处做 DNS 解析与再校验。
+
+因此如果你想降低 SSRF 风险，强烈建议：
+
+- 使用 `allowed_hosts`（或 CLI `--allow-host`）做 host allowlist
+- 避免在 Untrusted 下开启 `--allow-localhost/--allow-private-ip/--allow-http`
+
+如果你希望做“域名解析到私网”的 best-effort 拦截，可以开启 `dns_check`（或 CLI `--dns-check`）。开启后：
+
+- hostnames 会做一次 DNS 解析；若解析到非公网 IP，会被拒绝（除非同时允许 `allow_private_ips` 或使用 `Trusted`）
+- 仍然不能完全防住 DNS rebinding；更强的威胁模型需要更底层的网络出站控制
+
+建议：
+
+- 当你需要在 Untrusted 下允许某些 hostname（例如使用 `allowed_hosts`/`--allow-host` 放开出站）且希望额外降低“域名解析到私网”的 SSRF 风险时，可以考虑开启 `dns_check`。
+- `dns_check` 只在 `allow_private_ips=false` 时有效；如果你同时开启了 `allow_private_ips`/`--allow-private-ip`，则解析到私网不再会被拒绝。
+- 这是 best-effort：会增加一次 DNS 解析（带超时），并可能在 VPN/企业网 split-horizon DNS 环境中产生误判；同时也无法彻底防住 rebinding。
+
+### Redirects 默认禁用
+
+`mcp-jsonrpc` 的 streamable_http 默认不跟随 HTTP redirects（`follow_redirects=false`），这是额外的一层 SSRF 风险降低。即使在 `Trusted` 下，该默认仍然生效（除非你在自己的 `mcp_jsonrpc::Client` 中显式开启）。
+
+### 仍然把 `mcp.json` 当作不可信输入
+
+即使你愿意在某些场景使用 `--trust`，也建议把它当作一次“显式的安全决策”：
+
+- CI/自动化脚本里谨慎使用 `--trust`
+- 对外部贡献的仓库默认保持 Untrusted
+- 对远程连接尽量收敛出站面（allowlist host），并对认证信息做最小化暴露
+
+---
+
+# 传输层（stdio / unix / streamable_http） (transports.md)
+
+# 传输层（stdio / unix / streamable_http）
+
+`mcp-kit` 支持三种 transport，分别覆盖“本地 spawn”“本地 socket”“远程 HTTP”三类场景。
+
+## transport=stdio（spawn 子进程）
+
+适用：你要以 child process 的方式启动 MCP server（`--stdio`）。
+
+配置字段（仅 stdio 支持）：
+
+- `argv`（必填）：`["server-bin", "--stdio"]`
+- `env`（可选）：注入到 child process 的环境变量
+- `stdout_log`（可选）：将 server stdout 旋转落盘（便于排查协议/输出）
+
+stdout_log 的文件命名/保留策略见 [`日志与观测`](logging.md)。
+
+行为要点：
+
+- `cwd`：child 的工作目录是 `--root`（CLI）或你传入 `Manager::connect(..., cwd)` 的目录
+- `stderr`：默认继承到父进程（便于直接看到报错）
+- `kill_on_drop = true`：连接被 drop 时，child 会被结束
+
+安全：
+
+- `TrustMode::Untrusted` 下会拒绝 spawn（见 [`安全模型`](security.md)）
+
+## transport=unix（连接已存在的 unix socket）
+
+适用：server 已经以守护进程或其他方式运行，并暴露 unix domain socket。
+
+配置字段（仅 unix 支持）：
+
+- `unix_path`（必填）：socket 路径（相对路径会按 `--root` 解析）
+
+约束：
+
+- 不支持 `argv/env/stdout_log`（因为不 spawn）
+
+安全：
+
+- `TrustMode::Untrusted` 下会拒绝连接（见 [`安全模型`](security.md)）
+
+## transport=streamable_http（远程 HTTP SSE + POST）
+
+适用：远程 MCP server。通常最推荐从这里开始。
+
+配置字段（仅 streamable_http 支持）：
+
+- `url`（可选）：例如 `https://example.com/mcp`（同时用于 SSE 与 POST）
+- `sse_url` + `http_url`（可选）：分离的 SSE 与 POST URL（两者必须同时设置；不能与 `url` 同时出现）
+- `http_headers`（可选）：静态 header（不涉及 secrets 时可在 Untrusted 下使用）
+- `bearer_token_env_var`（可选）：从 env 读取 token 并注入 `Authorization: Bearer ...`（Untrusted 下拒绝）
+- `env_http_headers`（可选）：从 env 读取 header 值（Untrusted 下拒绝）
+
+行为要点：
+
+- 会自动添加 header：`MCP-Protocol-Version: <protocol_version>`
+- 默认不跟随 redirects（减少 SSRF 风险；可在 `mcp-jsonrpc` 里 opt-in）
+- `mcp-kit` 会把自己的 per-request timeout 设置到 `mcp-jsonrpc` 的 HTTP request timeout
+
+更完整的实现细节（SSE 数据格式、`mcp-session-id`、POST 回包形态、timeout 语义）见 [`streamable_http 传输详解`](streamable_http.md) 与 [`调优与限制`](tuning.md)。
+
+安全（Untrusted 默认策略）：
+
+- 要求 `https://`
+- 拒绝 localhost / *.localhost / *.local
+- 拒绝非公网 IP 字面量
+- 拒绝敏感 header（Authorization/Cookie/Proxy-Authorization）
+
+详见 [`安全模型`](security.md)。
+
+## 自定义 transport
+
+如果你已经有一条读写管道，或者需要接入自建 transport（例如在测试里用 `tokio::io::duplex`）：
+
+- `Manager::connect_io(server, read, write)`
+- `Manager::connect_jsonrpc(server, mcp_jsonrpc::Client)`
+
+它们会复用同样的 initialize、超时、以及 server→client handler 逻辑。
+
+---
+
+# streamable_http 传输详解（SSE + POST） (streamable_http.md)
+
+# streamable_http 传输详解（SSE + POST）
+
+`transport=streamable_http` 是 `mcp-kit` 的远程优先方案：通过 **HTTP SSE** 接收 server 推送，通过 **HTTP POST** 发送 JSON-RPC request/notification。
+
+本章描述的是 `mcp-jsonrpc` 的具体实现细节，便于你对接自建 server、排查联通性问题，或在安全评审时快速定位行为边界。
+
+> 更高层（TrustMode/出站校验）见 [`安全模型`](security.md)。
+
+## 一句话理解
+
+- 建立一个 **GET SSE** 长连接：持续接收 JSON-RPC 消息（以及可能的 response stream）
+- 每发起一次 JSON-RPC 请求：通过 **POST** 把 JSON 发给 `http_url`（默认等于 `url`），然后把响应“桥接”为 JSON-RPC response
+
+## URL 与请求方式
+
+配置字段：`servers.<name>.url`
+
+在 `mcp-jsonrpc` 中：
+
+- SSE：`GET <sse_url>`（默认等于 `url`），并设置 `Accept: text/event-stream`
+- POST：`POST <http_url>`（默认等于 `url`），并设置 `Content-Type: application/json`
+
+> 默认使用同一个 `url` 同时承担 SSE 与 POST；也支持分离的 `sse_url/http_url`。
+
+### 兼容：握手前 SSE 可能返回 405
+
+一些实现会在 “initialize/initialized” 完成前拒绝建立 inbound SSE（`GET` 返回 `405 Method Not Allowed`）。
+
+`mcp-jsonrpc` 的行为：
+
+- 初次 `GET SSE` 返回 405：不会直接报错；client 仍可通过 POST 工作
+- 当某次 POST 返回 `202 Accepted`（或首次获得 `mcp-session-id`）后，会自动重试建立 inbound SSE
+- 一旦 inbound SSE 建立成功，如果后续 SSE 断开/失败，会 **fail-fast** 关闭 client（避免静默丢失推送）
+
+## 会话粘连：`mcp-session-id` header
+
+如果 server 在响应头返回 `mcp-session-id`：
+
+- client 会记录该值
+- 后续每次 POST 都会携带 header：`mcp-session-id: <value>`
+- 如果某次响应又返回新的 `mcp-session-id`，client 会更新并继续使用最新值
+
+这使得 server 可以把多个 HTTP 请求关联到同一个会话。
+
+## SSE 数据格式（client 期望）
+
+`mcp-jsonrpc` 的 SSE pump 只关心 `data:` 字段：
+
+- 会把同一个 event 中的多行 `data:` 拼接起来（用 `\n` 连接）
+- 遇到空行表示一个 event 结束，此时把累计的 `data` 当作“一条 JSON-RPC 消息”，写入内部 JSON-RPC 读循环
+- 如果累计 `data` 恰好是 `[DONE]`，则认为该 SSE 流结束（仅用于 POST 返回 SSE 的响应流；主 SSE（GET）不会把 `[DONE]` 当作断开信号）
+
+简化示例：
+
+```text
+data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}
+
+```
+
+> `mcp-jsonrpc` 会把 `data:` 后面的内容原样写入 JSON-RPC 流（再由 JSON parser 解析）。
+
+## POST 响应的两种形态
+
+当 client POST 发送 JSON-RPC request 后，server 的响应可能是：
+
+### 1）普通 JSON（最常见）
+
+- response body 是 JSON（或至少是可被视为 JSON-RPC response 的 JSON 文本）
+- client 会把 body 写回内部 JSON-RPC 读循环（等价于“收到一条 response”）
+
+### 2）SSE（用于流式回包）
+
+如果 `Content-Type` 以 `text/event-stream` 开头：
+
+- client 会把这个 POST 的响应当作 SSE 流来 pump（同样按 `data:` 拼 event）
+- pump 出来的 JSON-RPC 消息会被写回内部 JSON-RPC 读循环
+
+## 超时与重试语义
+
+`StreamableHttpOptions`：
+
+- `connect_timeout`：只用于建立 SSE/HTTP 连接（默认 10s）
+- `request_timeout`：用于单次 POST 的 send/response（包括 POST 返回 SSE 时的响应流）；不要用于限制主 SSE（GET）长连接
+
+请求级别行为：
+
+- 对 **request（有 id）**：HTTP 失败/超时会被桥接成 JSON-RPC error response（错误码 `-32000`），从而让 `request()` 返回错误
+- 对 **notification（无 id）**：HTTP 失败无法回传 response，因此无法通过 JSON-RPC error 表达；上层通常只能把它当作“尽力而为的 fire-and-forget”
+
+## Redirects 与代理
+
+为了降低 SSRF 风险与行为不确定性：
+
+- `follow_redirects` 默认 `false`（不跟随 30x）
+- 默认禁用“自动读取系统代理环境变量”（`reqwest::Client::builder().no_proxy()`）
+
+如果你需要不同的网络策略（例如走企业代理或允许 redirects），可以在上层自行构建 `mcp_jsonrpc::Client` 并接入 `mcp-kit`（见 [`作为库使用`](library.md) 的自定义 transport 章节）。
+
+## 与 mcp-kit 的关系
+
+`mcp-kit` 使用 `mcp-jsonrpc` 作为传输层，并在 `TrustMode::Untrusted` 下对 `streamable_http` 做额外校验：
+
+- 只允许 `https://`（除非显式放开）
+- 拒绝 localhost/私网 IP 字面量（除非显式放开）
+- 拒绝敏感 header（Authorization/Cookie/Proxy-Authorization）
+- 拒绝读取 env secrets（`bearer_token_env_var` / `env_http_headers`）
+
+详见 [`安全模型`](security.md) 与 [`配置`](config.md)。
+
+---
+
+# 日志与观测 (logging.md)
+
+# 日志与观测（stdout_log / stderr）
+
+本章聚焦两件事：
+
+- 如何抓到 stdio MCP server 的 stdout 交互（用于协议排查）
+- 如何理解 `mcp-jsonrpc` 的 stdout 旋转日志行为（文件命名、保留策略）
+
+## stdio 下的 stdout/stderr 约定
+
+在 `transport=stdio` 场景里：
+
+- **stdout**：通常承载 JSON-RPC 消息（MCP 协议数据）
+- **stderr**：通常承载日志（人类可读的调试输出）
+
+因此建议 MCP server 把日志写到 stderr，避免污染 stdout 的 JSON 流。
+
+## stdout_log：抓取 server stdout（并旋转落盘）
+
+`mcp-kit` 的配置字段：`servers.<name>.stdout_log`
+
+启用后，`mcp-jsonrpc` 会把“从 server stdout 读到的每一行”（非全空白行）写入文件，便于：
+
+- 复盘 MCP/JSON-RPC 往来消息
+- 排查 server 输出了非 JSON 的内容（被 client 忽略）
+- 排查消息顺序/分片/大小限制
+
+示例：
+
+```json
+{
+  "version": 1,
+  "servers": {
+    "local": {
+      "transport": "stdio",
+      "argv": ["mcp-server-bin", "--stdio"],
+      "stdout_log": {
+        "path": "./.mcp-kit/logs/mcp/server.stdout.log",
+        "max_bytes_per_part": 1048576,
+        "max_parts": 32
+      }
+    }
+  }
+}
+```
+
+约束：
+
+- 仅 `transport=stdio` 支持
+- `path` 可为相对路径（相对 `--root` 解析）
+- `max_bytes_per_part` 最小为 `1`
+- `max_parts=0` 在 `mcp-kit` 配置里表示“不限制保留数量”（无限保留）
+
+> 注意：stdout_log 会把协议数据落盘，可能包含敏感信息。建议放到项目专用目录，并结合访问控制与清理策略使用。
+
+## 旋转文件命名规则
+
+假设 `path` 是：
+
+`./.mcp-kit/logs/mcp/server.stdout.log`
+
+当文件达到 `max_bytes_per_part` 后：
+
+- 当前的 `server.stdout.log` 会被 rename 为：
+  - `server.stdout.segment-0001.log`
+  - `server.stdout.segment-0002.log`
+  - ...
+- 然后重新创建新的 `server.stdout.log` 继续写入
+
+part 编号会从“已存在的最大编号 + 1”开始，避免覆盖历史文件。
+
+## 保留策略：max_parts
+
+- `max_parts = None`：保留所有 `*.segment-XXXX.log`
+- `max_parts = Some(N)`：只保留最新的 N 个 segment 文件（更老的会被删除）
+
+注意：`max_parts` 只约束 segment 文件数量；当前写入中的 base 文件（`server.stdout.log`）始终存在。
+
+## 故障现象与建议
+
+### server 把日志写到了 stdout
+
+现象：
+
+- stdout_log 中出现非 JSON 内容
+- client 会忽略无法解析的 stdout 行（不影响后续 JSON 行），但可能让排查变困难
+
+建议：
+
+- 修改 server：把日志移到 stderr
+- 或在 server 中加开关：`--log-to-stderr`
+
+### stdout_log 写入失败
+
+stdout_log 是 best-effort：
+
+- 如果写入失败，`mcp-jsonrpc` 会打印一次错误并禁用后续 stdout_log（避免影响主链路）
+
+建议：
+
+- 确保 `path` 目录可创建/可写
+- 避免把 log 路径指向不可写位置
+
+---
+
+# 调优与限制 (tuning.md)
+
+# 调优与限制（timeouts / limits / 并发）
+
+本章整理 `mcp-kit` 的几个关键“旋钮”，用于在不同场景下做可靠性/性能/安全权衡。
+
+## 超时（timeout）
+
+### `mcp_kit::Manager` / `Session`：per-request timeout
+
+- `Manager` 默认 timeout：30s
+- `mcpctl` 默认 `--timeout-ms 30000`
+
+这会影响：
+
+- `Manager::request/*` / `Session::request/*`：等待 JSON-RPC response 的最长时间
+- `transport=streamable_http` 下：POST 请求的超时（`mcp_jsonrpc::StreamableHttpOptions.request_timeout`）
+
+建议：
+
+- 慢 server 或网络不稳定：增大 timeout
+- 明确需要快速失败：减小 timeout，并在上层做重试/降级
+
+### streamable_http：connect_timeout
+
+`mcp-jsonrpc` 的 streamable_http 默认 connect timeout 为 10s（用于建立 HTTP 连接/发起 SSE GET）。
+
+如果你需要修改 connect_timeout，需要在上层自行构建 `mcp_jsonrpc::Client::connect_streamable_http_with_options(...)` 并接入 `mcp-kit`（见下文“自定义 Limits/Options”）。
+
+## DoS 防护与队列（mcp_jsonrpc::Limits）
+
+`mcp-jsonrpc` 内置了几类限制，默认值适用于大多数 MCP server，但你可以按需调整。
+
+### 1）单条消息大小：`max_message_bytes`
+
+限制的是“一行 JSON-RPC 消息”的最大字节数（stdio/unix）以及 SSE event 的最大累计 `data` 字节数（streamable_http）。
+
+过大风险：
+
+- 内存占用与解析开销上升
+
+过小风险：
+
+- 大返回值（例如 `resources/read` 大文件/大 JSON）会触发错误
+
+### 2）server→client 通知队列：`notifications_capacity`
+
+server→client notifications 会进入有界队列：
+
+- 队列满时，新的 notification 会被丢弃（best-effort）
+
+如果你的 server 会大量推 notification（例如日志/进度），可以调大。
+
+### 3）server→client requests 队列：`requests_capacity`
+
+server→client requests（需要 respond）同样进入有界队列：
+
+- 队列满时，`mcp-jsonrpc` 会对该 request 立即回复 JSON-RPC error：`-32000 client overloaded`
+
+如果你的 server 会频繁发起 server→client request（例如 roots/list / 其他反向调用），建议调大或确保 handler 足够快。
+
+## 并发模型（重要）
+
+### 同一连接的写入串行化
+
+为了避免 JSON-RPC 输出交错，同一连接的写入被串行化：
+
+- 你可以并发发起多个 request（上层 future 并发）
+- 但底层写入会排队，并按顺序写入
+
+### 不同 server 并发
+
+不同 server 之间互不影响：
+
+- 同一个 `Manager` 可以同时管理多个连接
+- 也可以在上层用多个 `Manager` 做隔离（按需）
+
+## 自定义 Limits/Options（高级）
+
+`mcp-kit` 默认使用 `mcp_jsonrpc::SpawnOptions::default()`（即默认 Limits）。
+
+如果你需要自定义 Limits（或 streamable_http 的 connect_timeout / follow_redirects 等），推荐路径是：
+
+1. 直接用 `mcp-jsonrpc` 构建 client（带 options）
+2. 用 `Manager::connect_jsonrpc(...)` 或 `connect_jsonrpc_session(...)` 接入
+
+示例（调大 server→client requests 队列）：
+
+```rust
+use mcp_jsonrpc::{Client, Limits, SpawnOptions};
+
+let mut client = Client::connect_streamable_http_with_options(
+    "https://example.com/mcp",
+    Default::default(),
+    SpawnOptions {
+        limits: Limits {
+            requests_capacity: 256,
+            ..Default::default()
+        },
+        ..Default::default()
+    },
+)
+.await?;
+
+manager.connect_jsonrpc("remote", client).await?;
+```
+
+> 这条路径同样适用于 `connect_io_with_options`（例如测试时使用 `tokio::io::duplex`）。
+
+## 常见调优建议
+
+- 远程网络慢：增大 `--timeout-ms`（或 `Manager::with_timeout`）
+- server 会推大量反向 request：调大 `requests_capacity`
+- 返回体很大：调大 `max_message_bytes`（并评估内存风险）
+- 安全优先：尽量保持默认 Untrusted，并使用 `--allow-host` 收敛远程出站范围
+
+---
+
+# mcp-jsonrpc（JSON-RPC client） (jsonrpc.md)
+
+# mcp-jsonrpc（JSON-RPC client）
+
+`mcp-jsonrpc` 是一个最小 JSON-RPC 2.0 client。它是 `mcp-kit` 的底座，也可以独立使用。
+
+## 核心类型
+
+- `mcp_jsonrpc::Client`：一个连接（可能包含 child process），提供 `request/notify` 并可接收 server→client 的 notifications/requests。
+- `mcp_jsonrpc::ClientHandle`：可 clone 的“写端 + pending map”，用于从 reader task 中回写响应。
+- `mcp_jsonrpc::Notification`：server→client notification（无 `id`）。
+- `mcp_jsonrpc::IncomingRequest`：server→client request（有 `id`，必须 respond）。
+
+## 连接方式（transports）
+
+- `Client::spawn(program, args)` / `spawn_with_options`：stdio spawn child
+- `Client::connect_unix(path)`：连接已有 unix socket
+- `Client::connect_streamable_http(url)` / `connect_streamable_http_with_options`：远程 HTTP SSE + POST（同一个 URL）
+- `Client::connect_streamable_http_split_with_options(sse_url, http_url, ...)`：远程 HTTP SSE + POST（分离 URL）
+- `Client::connect_io(read, write)`：用任意 `AsyncRead/AsyncWrite` 作为 transport（测试/复用管道）
+
+## Options：stdout log 与 DoS 防护
+
+`SpawnOptions`：
+
+- `stdout_log: Option<StdoutLog>`：把“读到的每一行”写到旋转日志（常用于 stdio server 的 stdout 协议排查）
+- `limits: Limits`：限制单消息大小与队列容量（减少 DoS 风险）
+
+stdout_log 的旋转文件命名与保留策略见 [`日志与观测`](logging.md)。
+
+`Limits`（默认值在代码中定义）：
+
+- `max_message_bytes`：单条 JSON-RPC 消息（单行）的最大字节数
+- `notifications_capacity`：缓存 server→client notifications 的队列长度
+- `requests_capacity`：缓存 server→client requests 的队列长度
+
+当 server→client requests 队列满时，`mcp-jsonrpc` 会对该 request 立即回应 `-32000 client overloaded`（而不是无限堆积）。
+
+关于如何调整 timeout/limits 以适配高吞吐或大消息场景，见 [`调优与限制`](tuning.md)。
+
+## 安装 handler：处理 server→client
+
+`mcp_jsonrpc::Client` 默认会把 server→client 的消息放入 channel，调用方需要“取走并消费”：
+
+```rust
+let mut client = mcp_jsonrpc::Client::connect_streamable_http("https://example.com/mcp").await?;
+
+if let Some(mut requests) = client.take_requests() {
+    tokio::spawn(async move {
+        while let Some(req) = requests.recv().await {
+            let _ = req.respond_ok(serde_json::json!({"ok": true})).await;
+        }
+    });
+}
+```
+
+`mcp_kit::Manager` 会在 install connection 时自动接管这部分（并提供可注入 handler），一般上层不需要直接操作 `mcp-jsonrpc` 的 channel。
+
+## Streamable HTTP 的安全/行为
+
+`StreamableHttpOptions`：
+
+- `headers`：额外 header
+- `connect_timeout`：建立连接超时（默认 10s）
+- `request_timeout`：用于单次 POST 的 send/response（包括 POST 返回 SSE 时的响应流）；不要用于限制主 SSE（GET）长连接
+- `follow_redirects`：是否跟随 HTTP redirects（默认 `false`，减少 SSRF 风险）
+
+在 `mcp-kit` 中：
+
+- 会在 `Untrusted` 下对 URL/host/ip/header/env 做额外校验（见 [`安全模型`](security.md)）
+- 会把 `Manager` 的 per-request timeout 传给 `StreamableHttpOptions.request_timeout`
+
+streamable_http 的具体请求形态（SSE + POST、`mcp-session-id`、回包为 SSE 的场景）见 [`streamable_http 传输详解`](streamable_http.md)。
+
+---
+
+# API 参考 (api.md)
+
+# API 参考
+
+本章给出 `mcp-kit` 暴露的主要 API 入口与定位（完整细节建议直接看 rustdoc）。
+
+## mcp-kit
+
+入口：`use mcp_kit::*;`
+
+### 配置
+
+- `Config::load(root, override_path)`：读取并校验 `mcp.json`（v1），并解析为 `Config`
+- `Transport`：`Stdio | Unix | StreamableHttp`
+- `ServerConfig`：按 transport 聚合后的 server 配置
+- `StdoutLogConfig`：stdio server stdout 旋转日志配置
+- `Root`：MCP roots 能力（`client.roots`）
+
+### 连接与会话
+
+- `Manager`：多 server 连接缓存 + initialize + 便捷请求
+  - `from_config` / `new`
+  - `connect` / `get_or_connect`
+  - `request` / `notify` / `request_typed` / `notify_typed`
+  - `list_tools` / `call_tool` / `read_resource` / `get_prompt` 等常用 MCP 方法
+  - `connect_io` / `connect_jsonrpc`：接入自定义 transport
+  - `with_server_request_handler` / `with_server_notification_handler`：处理 server→client
+- `Session`：单连接 MCP 会话（已 initialize）
+  - `request` / `notify`（raw）
+  - `request_typed` / `notify_typed`
+  - `list_tools` / `call_tool` / `read_resource` 等便捷方法
+
+### typed 方法抽象（轻量）
+
+- `McpRequest` / `McpNotification`：method + params/result 的轻量 trait（schema-agnostic）
+- `mcp_kit::mcp`：常用方法的 typed wrapper 子集（`ListToolsRequest` / `CallToolRequest` / `ListResourcesRequest` …）
+
+### 安全
+
+- `TrustMode::{Untrusted, Trusted}`
+- `UntrustedStreamableHttpPolicy`：Untrusted 下的远程出站策略（https/host/ip/allowlist/dns_check）
+
+## mcp-jsonrpc
+
+入口：`use mcp_jsonrpc::*;`
+
+- `Client`：JSON-RPC 连接（stdio/unix/streamable_http/io）
+  - `request(method, params)` / `notify(method, params)`
+  - `take_requests()` / `take_notifications()`：消费 server→client 消息
+- `ClientHandle`：可 clone 的写端句柄（用于 respond server→client requests）
+- `IncomingRequest` / `Notification`
+- `SpawnOptions` / `StdoutLog` / `Limits` / `StreamableHttpOptions`
+- `Error` / `Id`
+
+## 生成 rustdoc（推荐）
+
+在 `mcp-kit/` 下：
+
+```bash
+cargo doc -p mcp-kit -p mcp-jsonrpc --no-deps
+```
+
+---
+
+# 设计与边界 (design.md)
+
+# 设计
+
+目标：把 “mcp.json 配置解析 + JSON-RPC（stdio / unix / streamable http）+ MCP 会话管理” 做成独立库/CLI，供上层产品复用。
+
+## 架构总览
+
+从下到上分 3 层：
+
+1. `mcp-jsonrpc`：负责“怎么把一条 JSON-RPC 消息送到对端，再把对端返回/推送的消息读回来”
+2. `mcp-kit`：负责“按 MCP 约定 initialize，并把常用 MCP 方法封装成好用的 API”
+3. `mcpctl`：基于配置的 CLI（把库能力暴露成命令行操作）
+
+这套拆分的关键好处是：
+
+- 上层可以仅依赖 `mcp-kit`（不需要 CLI）
+- 上层也可以绕过配置，直接把自建 transport 注入 `Manager::connect_io/connect_jsonrpc`
+
+## 核心数据结构
+
+- `Config { client, servers: BTreeMap<String, ServerConfig> }`
+- `Manager`：连接缓存 + MCP initialize + request/notify 便捷方法
+- `Connection { child: Option<Child>, client }`（unix 连接没有 child）
+- `McpRequest` / `McpNotification`：轻量 typed method 抽象（参考 `docs/examples.md` 的用法示例）
+- `mcp_kit::mcp`：常用 MCP method 的轻量 typed wrapper 子集（可选使用）
+- `Session`：单连接 MCP 会话（已完成 initialize，可直接 request/notify 与调用便捷方法）
+- `Manager::initialize_result`：暴露每个 server 的 initialize 响应（便于上层读取 serverInfo/capabilities 等信息）
+
+## 初始化流程（简化）
+
+以 `Manager::request(...)` 为例：
+
+1. 若未连接：根据 `ServerConfig.transport` 建立 JSON-RPC 连接（stdio/unix/streamable_http）
+2. 调用 MCP `initialize`，并缓存 initialize result
+3. 发送 `notifications/initialized`
+4. 发送用户请求（例如 `tools/list`）
+
+## server→client（反向消息）
+
+MCP/JSON-RPC 允许 server 主动发消息给 client：
+
+- notification：只需要消费
+- request：需要 client respond
+
+`mcp-jsonrpc` 会把它们放进有界 channel。
+
+`mcp_kit::Manager` 会在安装连接时：
+
+- `take_requests()`：起一个任务循环消费 server→client requests，并交给 `server_request_handler`
+- `take_notifications()`：起一个任务循环消费 server→client notifications，并交给 `server_notification_handler`
+
+默认 handler：
+
+- request：未知方法返回 `-32601 Method not found`
+- 若启用 roots：内建响应 `roots/list`
+
+## 并发与背压
+
+- 同一连接：写入串行化（避免 JSON-RPC 输出交错）；可以并发发起请求，但写入层会排队
+- server→client：有界队列；requests 队列满会立刻回复 `-32000 client overloaded`（保护客户端内存）
+
+## 边界
+
+提供：
+
+- `mcp-jsonrpc`：最小 JSON-RPC client（stdio / unix / streamable http），支持 notifications 与可选 stdout 旋转落盘。
+- `mcp-kit`：`mcp.json` 解析、连接/初始化、请求超时与 server→client request/notification hook。
+  - 安全默认：`Manager` 默认 `TrustMode::Untrusted`。
+    - 拒绝 `transport=stdio|unix`（避免不可信仓库导致本地执行/本地 socket 滥用）
+    - `transport=streamable_http` 仅允许 `https` 且非 localhost/私网目标；并拒绝发送 `Authorization`/`Cookie` 等敏感 header、拒绝读取 env secrets 用于认证 header
+    - 仅在上层显式设置 `TrustMode::Trusted` 后才放开
+    - 上层也可通过 `Manager::with_untrusted_streamable_http_policy(UntrustedStreamableHttpPolicy)` 自定义 untrusted 下的出站策略（allowlist / 允许 http / 允许私网等）
+  - 若配置了 `client.roots`（或通过 `Manager::with_roots`），会自动声明 `capabilities.roots` 并内建响应 server→client 的 `roots/list`。
+  - 除 stdio/unix 外，也可通过 `Manager::connect_io` / `Manager::connect_jsonrpc` 接入自定义 JSON-RPC transport（例如测试或自建管道）。
+  - 也可用 `Manager::{get_or_connect_session, connect_*_session}` 在握手完成后取出 `Session`，将“单 server 会话”交给其他库持有。
+  - 便捷方法覆盖 MCP 常用请求：`ping` / `tools/*` / `resources/*` / `prompts/*` / `logging/setLevel` / `completion/complete`；其他方法可用 `Manager::request` / `Manager::request_typed`。
+
+不提供：
+
+- MCP server 实现（仅 client/runner）。
+- 高层语义（如 approvals、sandbox、工具执行策略等），由上层决定。
+- 自动重连/守护进程（需要时由上层 drop/重建连接）。
+
+约束：
+
+- 本仓库不引入任何上层应用的 thread/process 等领域 ID。
+- 单连接写入会被串行化（避免并发写导致 JSON-RPC 输出交错）；允许并发发起请求，但会在写入层面排队。
+- 需要处理 server→client 的 JSON-RPC request：`mcp_kit::Manager` 默认对未知方法返回 `-32601 Method not found`，并提供可注入的 request/notification handler。
+
+## 策略（v1）
+
+- **日志**：由上层选择是否将 server stdout 旋转落盘（`mcp_jsonrpc::SpawnOptions`，支持 `max_parts` 保留上限）。
+- **超时**：`Manager` 级别的 per-request timeout（默认 30s）。
+- **重连**：v1 不做自动重连；上层可通过 drop/重建连接实现。
+- **并发**：同一连接串行；不同 server 可由上层并发使用多个 `Manager` 或拆分任务。
+
+---
+
+# 示例 (examples.md)
+
+# 示例
+
+本章给出一些“可复制”的配置与代码片段，方便作为模板。
+
+## 可运行示例
+
+- `minimal_client`（最简；**默认只适用于 `transport=streamable_http`** / Untrusted）：
+  - 源码：`crates/mcp-kit/examples/minimal_client.rs`
+  - 运行：`cargo run -p mcp-kit --example minimal_client -- <server>`
+  - 注意：`Untrusted` 默认只允许 `https://` 且拒绝 `localhost/私网` 目标；详见 `docs/security.md`。本地/测试环境请用 `client_with_policy` 的 `--allow-*` flags（或 `mcpctl --allow-*`），或直接 `--trust`
+  - 如果你要连 `transport=stdio|unix`，请用 `client_with_policy --trust` 或 `mcpctl --trust`
+- `client_with_policy`（支持 `--trust` + Untrusted 出站策略 flags；无 clap，手写 args）：
+  - 源码：`crates/mcp-kit/examples/client_with_policy.rs`
+  - 运行：`cargo run -p mcp-kit --example client_with_policy -- [flags] <server>`
+- `in_memory_duplex`（无需外部 server；`Manager::connect_io` + duplex；演示 server→client request）：
+  - 源码：`crates/mcp-kit/examples/in_memory_duplex.rs`
+  - 运行：`cargo run -p mcp-kit --example in_memory_duplex`
+- `session_handoff`（无需外部 server；`Manager::connect_io_session` + `Session`；演示把单连接交给其它模块持有）：
+  - 源码：`crates/mcp-kit/examples/session_handoff.rs`
+  - 运行：`cargo run -p mcp-kit --example session_handoff`
+- `streamable_http_split`（需要真实 server；演示拆分 `sse_url/http_url`）：
+  - 源码：`crates/mcp-kit/examples/streamable_http_split.rs`
+  - 运行：`cargo run -p mcp-kit --example streamable_http_split -- <sse_url> <http_url>`
+
+## 1）最小远程配置（streamable_http）
+
+`.mcp.json`：
+
+```json
+{
+  "version": 1,
+  "servers": {
+    "remote": {
+      "transport": "streamable_http",
+      "url": "https://example.com/mcp"
+    }
+  }
+}
+```
+
+命令：
+
+```bash
+cargo run -p mcp-kit --features cli --bin mcpctl -- list-tools remote
+```
+
+## 2）远程 + host allowlist（Untrusted 下更安全）
+
+```bash
+cargo run -p mcp-kit --features cli --bin mcpctl -- --allow-host example.com list-tools remote
+```
+
+等价的代码配置：
+
+```rust
+use mcp_kit::UntrustedStreamableHttpPolicy;
+manager = manager.with_untrusted_streamable_http_policy(UntrustedStreamableHttpPolicy {
+    allowed_hosts: vec!["example.com".into()],
+    ..Default::default()
+});
+```
+
+## 3）本地 stdio 配置（需要 --trust）
+
+```json
+{
+  "version": 1,
+  "servers": {
+    "local": {
+      "transport": "stdio",
+      "argv": ["mcp-server-bin", "--stdio"],
+      "env": { "NO_COLOR": "1" },
+      "stdout_log": {
+        "path": "./.mcp-kit/logs/mcp/server.stdout.log",
+        "max_bytes_per_part": 1048576,
+        "max_parts": 32
+      }
+    }
+  }
+}
+```
+
+```bash
+cargo run -p mcp-kit --features cli --bin mcpctl -- --trust list-tools local
+```
+
+## 4）使用 `Session`：把单连接交给其它模块
+
+```rust
+let session = manager.get_or_connect_session(&config, "remote", &root).await?;
+let tools = session.list_tools().await?;
+```
+
+## 5）处理 server→client request：自定义方法 + 保留 built-in `roots/list`
+
+```rust
+use std::sync::Arc;
+use mcp_kit::{ServerRequestContext, ServerRequestOutcome};
+
+let handler = Arc::new(|ctx: ServerRequestContext| {
+    Box::pin(async move {
+        match ctx.method.as_str() {
+            "example/ping" => ServerRequestOutcome::Ok(serde_json::json!({"ok": true})),
+            _ => ServerRequestOutcome::MethodNotFound,
+        }
+    }) as _
+});
+
+manager = manager.with_server_request_handler(handler);
+```
+
+可运行版本见：`crates/mcp-kit/examples/in_memory_duplex.rs`。
+
+---
+
+# FAQ (faq.md)
+
+# FAQ
+
+## Q：为什么默认连不上本地 `stdio/unix`？
+
+因为 `mcp.json` 往往来自当前仓库/目录。对不可信仓库而言：
+
+- `stdio` 等价于“按配置执行本地程序”
+- `unix` 等价于“按配置连接本地 socket”
+
+`mcp-kit` 默认 `TrustMode::Untrusted`，会拒绝这两类危险动作。需要显式信任：
+
+- CLI：`mcpctl --trust ...`
+- 代码：`Manager::with_trust_mode(TrustMode::Trusted)`
+
+详见 [`安全模型`](security.md)。
+
+## Q：Untrusted 下可以用 token/auth 吗？
+
+不可以。`bearer_token_env_var` 和 `env_http_headers` 会读取本地环境变量（secrets），在 Untrusted 下会被拒绝。
+
+如果你确实要用认证 header：
+
+- 用 `--trust`（或 `TrustMode::Trusted`）
+- 或者在你自己的上层代码里自行注入 header（但同样建议只在可信环境启用）
+
+## Q：`mcp_kit::mcp` 的 typed wrapper 为什么不全？
+
+这是一个“常用子集”，目标是低依赖、低维护成本。完整 schema 建议上层按需：
+
+- 继续使用 `serde_json::Value`
+- 或在你自己的 crate 中实现 `McpRequest/McpNotification` 扩展 typed 方法
+
+## Q：是否支持自动重连/守护进程？
+
+v1 不做。上层可以通过 drop/重建 `Manager` 或 `Session` 实现重连策略。
+
+## Q：如何把连接交给其他库持有？
+
+使用 `Manager::get_or_connect_session` / `take_session` 取出 `Session`，然后在其它模块里调用 `Session::{request, notify, list_tools, call_tool, ...}`。
+
+## Q：如何处理 server→client 的 `roots/list`？
+
+两种方式：
+
+- 在 `mcp.json` 里配置 `client.roots`（推荐）
+- 或用 `Manager::with_roots(...)`
+
+启用后 `mcp-kit` 会自动声明 `capabilities.roots`，并内建响应 `roots/list`。
+
+---
+
+# 故障排查 (troubleshooting.md)
+
+# 故障排查
+
+本章按“报错信息 → 原因 → 解决方式”的形式整理常见问题。
+
+## 配置加载阶段
+
+### unsupported mcp.json version X (expected 1)
+
+原因：当前只支持 `version: 1`。
+
+解决：把 `mcp.json` 顶层 `version` 改为 `1`。
+
+### invalid mcp server name: <name>
+
+原因：server 名称只允许 `[a-zA-Z0-9_-]`。
+
+解决：重命名 `servers` 的 key，例如 `my-server_1`。
+
+### deny_unknown_fields / 未知字段导致解析失败
+
+原因：对 `mcp.json v1` schema，`mcp-kit` 采用 fail-closed：顶层和 `servers.<name>` 都启用了 `deny_unknown_fields`。
+
+说明：如果你使用的是 Cursor/Claude Code 常见的 `.mcp.json` / `mcpServers` 兼容格式，未知字段通常会被忽略；但字段类型不匹配、缺少必要字段仍会报错。
+
+解决：删除拼写错误/未支持的字段；或升级代码以支持新字段。
+
+## 连接阶段（TrustMode）
+
+### refusing to spawn mcp server in untrusted mode
+
+原因：默认 `TrustMode::Untrusted` 禁止 `transport=stdio`。
+
+解决：
+
+- CLI：加 `--trust`
+- 代码：`Manager::with_trust_mode(TrustMode::Trusted)`
+
+### refusing to connect unix mcp server in untrusted mode
+
+原因：默认 `TrustMode::Untrusted` 禁止 `transport=unix`。
+
+解决：同上。
+
+## 远程 streamable_http（出站校验）
+
+### refusing to connect non-https streamable http url in untrusted mode
+
+原因：默认要求 `https://`。
+
+解决（任选其一）：
+
+- 改用 `https://`
+- CLI：加 `--allow-http`
+- 代码：`UntrustedStreamableHttpPolicy { require_https: false, .. }`
+
+### refusing to connect localhost/local domain in untrusted mode
+
+原因：默认拒绝 `localhost / *.localhost / *.local`。
+
+解决：
+
+- CLI：加 `--allow-localhost`
+- 代码：`UntrustedStreamableHttpPolicy { allow_localhost: true, .. }`
+
+### refusing to connect non-global ip in untrusted mode
+
+原因：默认拒绝 loopback/link-local/private 等非公网 IP 字面量。
+
+解决：
+
+- CLI：加 `--allow-private-ip`
+- 代码：`UntrustedStreamableHttpPolicy { allow_private_ips: true, .. }`
+
+### refusing to connect hostname that resolves to non-global ip in untrusted mode
+
+原因：启用了 `dns_check`（或 CLI `--dns-check`），并且该 hostname 解析到了非公网 IP。
+
+解决（任选其一）：
+
+- 关闭 `dns_check`（或不传 `--dns-check`）
+- CLI：加 `--allow-private-ip`（允许私网/loopback）
+- 或使用 `--trust`（Trusted mode）
+
+### refusing to send sensitive http header in untrusted mode
+
+原因：默认拒绝 `Authorization` / `Proxy-Authorization` / `Cookie`。
+
+解决：改为 `--trust`（或 Trusted mode）。
+
+### refusing to read bearer token env var / refusing to read http header env vars
+
+原因：读取 env secrets 只允许在 Trusted 下进行。
+
+解决：改为 `--trust`（或 Trusted mode）。
+
+## 超时与协议问题
+
+### mcp request timed out: <method>
+
+原因：网络问题、server 卡住、或 timeout 太短。
+
+解决：
+
+- CLI：调大 `--timeout-ms`
+- 代码：`Manager::with_timeout(...)` 或 `Session::with_timeout(...)`
+
+### client overloaded（-32000）
+
+原因：`mcp-jsonrpc` 的 server→client requests 队列满，触发背压保护。
+
+解决：
+
+- 确保你在消费 `requests` channel（`mcp-kit` 默认会接管并消费）
+- 或使用自建 `mcp_jsonrpc::Client`，调大 `SpawnOptions.limits.requests_capacity` 再 `Manager::connect_jsonrpc(...)`
+
+---
+
+# 贡献指南 (contributing.md)
+
+# 贡献指南
+
+欢迎贡献！本项目目标是成为“可复用的 MCP client/runner 基建”，因此对**安全默认值**与**向后兼容**较为敏感。
+
+## 开发环境
+
+- Rust `1.85+`
+- 建议启用本仓库自带 hooks：
+
+```bash
+cd mcp-kit
+git config core.hooksPath githooks
+```
+
+## 本地验证（gates）
+
+```bash
+cargo fmt --all
+cargo check --workspace --all-targets --all-features
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+```
+
+## 文档
+
+文档位于 `docs/`，目录由 `docs/SUMMARY.md` 驱动。
+
+本地预览（可选）：
+
+```bash
+cargo install mdbook
+mdbook serve docs --open
+```
+
+如果你改动了文档结构或内容，并希望更新给 LLM 用的打包文件，请运行：
+
+```bash
+./scripts/gen-llms-txt.sh
+```
+
+## 提交内容的基本要求
+
+- 变更 `mcp.json` schema：请同时更新 `docs/config.md` 与相关测试。
+- 变更 TrustMode/策略：请更新 `docs/security.md`，并尽量补测试覆盖。
+- 新增常用 MCP 方法：优先在 `mcp_kit::mcp` 添加 typed wrapper，并在 `docs/library.md` / `docs/api.md` 里补入口说明。
+- 影响 CLI：更新 `docs/cli.md`，并保证 `--help` 与文档一致。
+
+## PR 建议
+
+- 一次 PR 聚焦一个主题（配置/安全/transport/CLI 等）
+- 尽量提供复现步骤或最小示例
+- 如果会影响用户行为，请在 `CHANGELOG.md` 的 `[Unreleased]` 下补条目
+
+---
+
+# 发布与版本 (release.md)
+
+# 发布与版本
+
+本项目遵循：
+
+- 版本号：Semantic Versioning
+- 变更记录：Keep a Changelog（见 `CHANGELOG.md`）
+
+## workspace 版本
+
+`mcp-kit` 是 workspace，版本号在 `mcp-kit/Cargo.toml` 的：
+
+- `[workspace.package] version`
+
+## 发布检查清单（建议）
+
+1. 更新 `CHANGELOG.md`：把本次变更整理到对应版本
+2. bump 版本号：更新 `mcp-kit/Cargo.toml`（必要时更新 `Cargo.lock`）
+3. 跑一遍 gates（见 [`贡献指南`](contributing.md)）
+4. 打 tag（例如 `vX.Y.Z`）
+
+> 若未来需要发布到 crates.io，建议把 `mcp-jsonrpc` / `mcp-kit` 分别 publish，并确保 README/docs 与 feature flags 描述一致。
