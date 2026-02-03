@@ -105,6 +105,8 @@ manager.connect_jsonrpc("remote", client).await?;
 
 > 这条路径同样适用于 `connect_io_with_options`（例如测试时使用 `tokio::io::duplex`）。
 
+可运行版本见：`crates/mcp-kit/examples/streamable_http_custom_options.rs`。
+
 ## 常见调优建议
 
 - 远程网络慢：增大 `--timeout-ms`（或 `Manager::with_timeout`）

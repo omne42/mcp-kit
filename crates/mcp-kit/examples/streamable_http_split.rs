@@ -1,8 +1,7 @@
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use mcp_kit::{Manager, ServerConfig, Transport, mcp};
+use mcp_kit::{Manager, ServerConfig, mcp};
 
 fn print_help() {
     eprintln!("Usage:");
@@ -33,19 +32,7 @@ async fn main() -> Result<()> {
 
     let cwd = std::env::current_dir()?;
 
-    let server_cfg = ServerConfig {
-        transport: Transport::StreamableHttp,
-        argv: Vec::new(),
-        unix_path: None,
-        url: None,
-        sse_url: Some(sse_url),
-        http_url: Some(http_url),
-        bearer_token_env_var: None,
-        http_headers: BTreeMap::new(),
-        env_http_headers: BTreeMap::new(),
-        env: BTreeMap::new(),
-        stdout_log: None,
-    };
+    let server_cfg = ServerConfig::streamable_http_split(sse_url, http_url);
 
     let mut manager = Manager::new(
         "streamable-http-split",
@@ -58,10 +45,7 @@ async fn main() -> Result<()> {
         .context("connect streamable_http (split urls)")?;
 
     let tools = manager
-        .request_typed_connected::<mcp::ListToolsRequest>(
-            "remote",
-            Some(mcp::ListToolsRequestParams::default()),
-        )
+        .request_typed_connected::<mcp::ListToolsRequest>("remote", None)
         .await
         .context("tools/list")?;
 

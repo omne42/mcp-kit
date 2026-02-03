@@ -21,6 +21,7 @@
 - `TrustMode`：安全默认不信任本地配置；需要显式切换到 Trusted 才允许从配置启动/连接 server。
 - `roots/list`：当配置了 `client.roots` 时，内建响应 server→client request，并自动声明 `capabilities.roots`。
 - `Manager::{connect_io, connect_jsonrpc}`：支持接入自定义 JSON-RPC 连接（便于测试与复用 transport）。
+- `ServerConfig::streamable_http_split(sse_url, http_url)`：便捷构造 split URL 的 `transport=streamable_http` 配置（用于手写/测试场景）。
 - `Manager::initialize_result`：暴露 server initialize 响应。
 - `Manager`：补齐 MCP 常用请求便捷方法（`ping`、`resources/templates/list`、`resources/read`、`resources/subscribe`、`resources/unsubscribe`、`prompts/get`、`logging/setLevel`、`completion/complete`）。
 - `Session`：单连接 MCP 会话（从 `Manager` 取出后可独立调用 `request/notify` 与便捷方法）。
@@ -28,6 +29,7 @@
 - `mcp-kit`：`Config::load` 支持 Cursor/Claude Code 常见的 `.mcp.json` / `mcpServers` 兼容格式（best-effort）。
 - `mcp-jsonrpc`：`streamable_http` 兼容握手前 `GET SSE` 返回 `405`，并在 `202 Accepted`（或首次获得 `mcp-session-id`）后自动重试建立 inbound SSE。
 - Examples: add runnable `client_with_policy`, `in_memory_duplex`, `session_handoff`, and `streamable_http_split` under `crates/mcp-kit/examples/`.
+- Examples: add runnable `streamable_http_custom_options` to demonstrate custom `StreamableHttpOptions` + `Manager::connect_jsonrpc`.
 - Docs: add a quick example index at `example/README.md`.
 - Docs: expand runnable examples section and clarify Untrusted/Trusted usage in `docs/examples.md`.
 
@@ -61,11 +63,12 @@
 - Docs: document split `sse_url/http_url`, `--dns-check`, and updated `[DONE]` semantics for streamable_http.
 - Docs: expand GitBook-style documentation under `docs/` and add `CONTRIBUTING.md`.
 - Docs: add `docs/book.toml` (mdbook) and `llms.txt` / `docs/llms.txt` (single-file doc bundle), plus a pre-commit freshness check.
-- Docs: refresh `docs/README.md` with a 1-minute copy/paste quickstart.
+- Docs: refresh `docs/README.md` with a 1-minute copy/paste quickstart (now uses typed `tools/list` request to match runnable examples).
 - Docs: add a minimal `Cargo.toml` dependency snippet to the 1-minute quickstart so the Rust example compiles.
 - Docs: prefer the repo-root `llms.txt` in `docs/llms.md` usage instructions.
 - Docs: make `docs/SUMMARY.md` mdbook-compatible and add section landing pages (`docs/guides.md`, `docs/reference.md`, `docs/more.md`).
-- githooks: if `mdbook` is installed, pre-commit now runs `mdbook build docs` to catch rendering issues early.
+- Docs: clarify `stdout_log.max_parts` semantics for `mcp.json` vs Rust API.
+- githooks: if `mdbook` is installed, pre-commit now runs `mdbook build docs` when docs are staged, to catch rendering issues early.
 - `mcp-kit`：`mcp.json v1` 中 `http_headers` 现在也接受别名字段 `headers`（便于复用 Cursor 等配置片段）。
 
 ### Fixed
@@ -77,5 +80,6 @@
 - `mcp-kit`：Cursor/Claude style 外部配置中 `type=http|sse` 与推断 transport 冲突时会 fail-closed 报错。
 - Examples: `in_memory_duplex` 现在用 `Url::from_directory_path` 生成正确的目录 `file://` URI（支持空格/非 ASCII 的 percent-encoding）。
 - Examples: `minimal_client` / `client_with_policy` 默认省略 `tools/list` 的空 `params`（与 `Manager::list_tools`/`Session::list_tools` 语义一致）。
+- Examples: `streamable_http_split` 默认省略 `tools/list` 的空 `params`，提升对严格 server 的兼容性。
 - Docs: `minimal_client` 补充 Untrusted 默认出站限制提示，并指向 `docs/security.md` 与 `client_with_policy` 的 `--allow-*` 用法。
 - Tests: stabilize flaky `streamable_http_allows_initial_sse_405_and_retries_after_202`.

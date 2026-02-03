@@ -167,6 +167,24 @@ pub struct ServerConfig {
     pub stdout_log: Option<StdoutLogConfig>,
 }
 
+impl ServerConfig {
+    pub fn streamable_http_split(sse_url: impl Into<String>, http_url: impl Into<String>) -> Self {
+        Self {
+            transport: Transport::StreamableHttp,
+            argv: Vec::new(),
+            unix_path: None,
+            url: None,
+            sse_url: Some(sse_url.into()),
+            http_url: Some(http_url.into()),
+            bearer_token_env_var: None,
+            http_headers: BTreeMap::new(),
+            env_http_headers: BTreeMap::new(),
+            env: BTreeMap::new(),
+            stdout_log: None,
+        }
+    }
+}
+
 fn is_valid_server_name(name: &str) -> bool {
     let name = name.trim();
     if name.is_empty() {

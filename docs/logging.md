@@ -70,8 +70,15 @@ part 编号会从“已存在的最大编号 + 1”开始，避免覆盖历史�
 
 ## 保留策略：max_parts
 
-- `max_parts = None`：保留所有 `*.segment-XXXX.log`
-- `max_parts = Some(N)`：只保留最新的 N 个 segment 文件（更老的会被删除）
+在 `mcp.json v1` 配置里：
+
+- `max_parts = 0`：不限制保留数量（无限保留所有 `*.segment-XXXX.log`）
+- `max_parts = N`（N>=1）：只保留最新的 N 个 segment 文件（更老的会被删除）
+
+在 Rust API（`mcp_jsonrpc::StdoutLog`）里，等价表达是：
+
+- `max_parts: None` ↔ `max_parts = 0`
+- `max_parts: Some(N)` ↔ `max_parts = N`
 
 注意：`max_parts` 只约束 segment 文件数量；当前写入中的 base 文件（`server.stdout.log`）始终存在。
 

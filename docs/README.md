@@ -42,7 +42,7 @@ mcp-kit = { path = "../mcp-kit/crates/mcp-kit" }
 ```rust
 use std::time::Duration;
 
-use mcp_kit::{Config, Manager};
+use mcp_kit::{Config, Manager, mcp};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -50,7 +50,9 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::load(&root, None).await?;
 
     let mut manager = Manager::from_config(&config, "my-client", "0.1.0", Duration::from_secs(30));
-    let tools = manager.list_tools(&config, "remote", &root).await?;
+    let tools = manager
+        .request_typed::<mcp::ListToolsRequest>(&config, "remote", None, &root)
+        .await?;
 
     println!("{}", serde_json::to_string_pretty(&tools)?);
     Ok(())

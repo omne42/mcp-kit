@@ -27,4 +27,7 @@ cargo run -p mcp-kit --example session_handoff
 
 # Requires a real MCP server: split SSE + POST URLs for streamable_http
 cargo run -p mcp-kit --example streamable_http_split -- <sse_url> <http_url>
+
+# Requires a real MCP server: customize StreamableHttpOptions (connect timeout, request timeout, redirects)
+cargo run -p mcp-kit --example streamable_http_custom_options -- [flags] <sse_url> [http_url]
 ```

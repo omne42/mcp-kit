@@ -10,10 +10,14 @@ fi
 
 has_changelog=0
 other_count=0
+needs_mdbook=0
 while IFS= read -r path; do
   [[ -z "$path" ]] && continue
   if [[ "$path" == "CHANGELOG.md" ]]; then
     has_changelog=1
+  elif [[ "$path" == docs/* ]]; then
+    needs_mdbook=1
+    other_count=$((other_count + 1))
   else
     other_count=$((other_count + 1))
   fi
@@ -61,7 +65,7 @@ if [[ -x "$repo_root/scripts/gen-llms-txt.sh" ]]; then
   (cd "$repo_root" && ./scripts/gen-llms-txt.sh --check) >/dev/null
 fi
 
-if [[ -f "$repo_root/docs/book.toml" ]]; then
+if [[ "$needs_mdbook" -eq 1 && -f "$repo_root/docs/book.toml" ]]; then
   if command -v mdbook >/dev/null 2>&1; then
     echo "pre-commit: building docs (mdbook)" >&2
     (cd "$repo_root" && mdbook build docs) >/dev/null
