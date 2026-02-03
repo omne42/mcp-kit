@@ -111,10 +111,12 @@ pub enum Error {
     Protocol(String),
 }
 
+const WAIT_TIMEOUT_MARKER: &str = "[mcp-jsonrpc wait_timeout]";
+
 impl Error {
     /// Returns true if this error was produced by `Client::wait_with_timeout`.
     pub fn is_wait_timeout(&self) -> bool {
-        matches!(self, Error::Protocol(msg) if msg.starts_with("wait timed out after "))
+        matches!(self, Error::Protocol(msg) if msg.starts_with(WAIT_TIMEOUT_MARKER))
     }
 }
 
@@ -812,9 +814,9 @@ impl Client {
         match tokio::time::timeout(timeout, child.wait()).await {
             Ok(status) => Ok(Some(status?)),
             Err(_) => match on_timeout {
-                WaitOnTimeout::ReturnError => {
-                    Err(Error::Protocol(format!("wait timed out after {timeout:?}")))
-                }
+                WaitOnTimeout::ReturnError => Err(Error::Protocol(format!(
+                    "{WAIT_TIMEOUT_MARKER} wait timed out after {timeout:?}"
+                ))),
                 WaitOnTimeout::Kill { kill_timeout } => {
                     let child_id = child.id();
                     if let Err(err) = child.start_kill() {
@@ -822,12 +824,12 @@ impl Client {
                             Ok(Some(status)) => return Ok(Some(status)),
                             Ok(None) => {
                                 return Err(Error::Protocol(format!(
-                                    "wait timed out after {timeout:?}; failed to kill child (id={child_id:?}): {err}"
+                                    "{WAIT_TIMEOUT_MARKER} wait timed out after {timeout:?}; failed to kill child (id={child_id:?}): {err}"
                                 )));
                             }
                             Err(try_wait_err) => {
                                 return Err(Error::Protocol(format!(
-                                    "wait timed out after {timeout:?}; failed to kill child (id={child_id:?}): {err}; try_wait failed: {try_wait_err}"
+                                    "{WAIT_TIMEOUT_MARKER} wait timed out after {timeout:?}; failed to kill child (id={child_id:?}): {err}; try_wait failed: {try_wait_err}"
                                 )));
                             }
                         }
@@ -836,7 +838,7 @@ impl Client {
                     match tokio::time::timeout(kill_timeout, child.wait()).await {
                         Ok(status) => Ok(Some(status?)),
                         Err(_) => Err(Error::Protocol(format!(
-                            "wait timed out after {timeout:?}; killed child (id={child_id:?}) but it did not exit within {kill_timeout:?}"
+                            "{WAIT_TIMEOUT_MARKER} wait timed out after {timeout:?}; killed child (id={child_id:?}) but it did not exit within {kill_timeout:?}"
                         ))),
                     }
                 }

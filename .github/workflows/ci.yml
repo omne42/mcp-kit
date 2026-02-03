@@ -8,12 +8,43 @@ on:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - name: Read toolchain from Cargo.toml
+        id: msrv
+        run: |
+          toolchain="$(
+            python - <<'PY'
+          import tomllib
+          from pathlib import Path
+          
+          with Path("Cargo.toml").open("rb") as f:
+              data = tomllib.load(f)
+          
+          msrv = data["workspace"]["package"]["rust-version"]
+          if msrv.count(".") == 1:
+              msrv = msrv + ".0"
+          
+          print(msrv)
+          PY
+          )"
+          echo "msrv=$toolchain" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ steps.msrv.outputs.msrv }}
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2

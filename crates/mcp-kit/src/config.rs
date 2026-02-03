@@ -371,14 +371,11 @@ async fn try_read_to_string_limited(path: &Path) -> anyhow::Result<Option<String
     Ok(Some(contents))
 }
 
-async fn canonicalize_in_root(thread_root: &Path, path: &Path) -> anyhow::Result<PathBuf> {
-    let canonical_root = tokio::fs::canonicalize(thread_root)
-        .await
-        .with_context(|| format!("canonicalize {}", thread_root.display()))?;
+async fn canonicalize_in_root(canonical_root: &Path, path: &Path) -> anyhow::Result<PathBuf> {
     let canonical_path = tokio::fs::canonicalize(path)
         .await
         .with_context(|| format!("canonicalize {}", path.display()))?;
-    if !canonical_path.starts_with(&canonical_root) {
+    if !canonical_path.starts_with(canonical_root) {
         anyhow::bail!(
             "path escapes root: {} (root={})",
             canonical_path.display(),
@@ -428,6 +425,9 @@ impl Config {
 
         let mut path = path;
         let mut contents = contents;
+        let canonical_root = tokio::fs::canonicalize(thread_root)
+            .await
+            .with_context(|| format!("canonicalize {}", thread_root.display()))?;
 
         let cfg: ConfigFile = {
             let mut hops = 0usize;
@@ -477,7 +477,7 @@ impl Config {
                                         .unwrap_or(thread_root);
                                     let next_path = base_dir.join(&mcp_path);
                                     let canonical_next_path =
-                                        canonicalize_in_root(thread_root, &next_path)
+                                        canonicalize_in_root(&canonical_root, &next_path)
                                             .await
                                             .context("resolve mcpServers path")?;
                                     contents = read_to_string_limited(&canonical_next_path).await?;

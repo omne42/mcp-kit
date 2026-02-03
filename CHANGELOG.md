@@ -12,7 +12,7 @@
 - `mcp-jsonrpc`：新增 `ClientStats` / `Client::stats()` / `ClientHandle::stats()`，统计无效 JSON 行与因队列满/关闭导致的 notifications 丢弃数量。
 - `mcp-jsonrpc`：新增 `Client::connect_streamable_http_split_with_options(sse_url, http_url, ...)`，支持分离的 SSE 与 POST URL。
 - `mcp-jsonrpc`：新增 `Client::wait_with_timeout(timeout, on_timeout)` 与 `WaitOnTimeout`，支持带超时等待 child 退出（可选 kill）。
-- `mcp-jsonrpc`：新增 `Error::is_wait_timeout()`，便于在代码中判断 wait 超时错误。
+- `mcp-jsonrpc`：新增 `Error::is_wait_timeout()`，便于在代码中判断 wait 超时错误（使用稳定 marker，不依赖具体报错文案）。
 - `mcp-kit`：`mcp.json`（v1）解析、MCP server 连接与连接缓存管理（`Config/Manager/Connection`）。
 - `mcpctl`：基于配置的 MCP CLI（list-servers/list-tools/list-resources/list-prompts/call）。
 - `mcpctl`：新增 `--dns-check`，可选启用 Untrusted 下的 hostname DNS 校验。
@@ -87,7 +87,7 @@
 - Docs: make `docs/SUMMARY.md` mdbook-compatible and add section landing pages (`docs/guides.md`, `docs/reference.md`, `docs/more.md`).
 - Docs: clarify `stdout_log.max_parts` semantics for `mcp.json` vs Rust API.
 - githooks: if `mdbook` is installed, pre-commit now runs `mdbook build docs` when docs are staged, to catch rendering issues early.
-- CI: add GitHub Actions workflow to run fmt/test/clippy/mdbook/llms checks on PRs.
+- CI: add GitHub Actions workflow (ubuntu/macos/windows) to run fmt/test/clippy/mdbook/llms checks, deriving toolchain from `Cargo.toml` `rust-version`.
 - `mcp-kit`：`mcp.json v1` 中 `http_headers` 现在也接受别名字段 `headers`（便于复用 Cursor 等配置片段）。
 - `mcpctl list-servers` 默认不输出 stdio `argv` 明文（避免把 token/key 打到终端/CI）；可用 `--show-argv` 显式开启。
 - `dns_check`（`--dns-check`）支持可配置 DNS timeout，并默认 fail-closed（失败直接拒绝连接）；如确实需要可显式开启 fail-open，并同步更新文档说明。
@@ -110,8 +110,10 @@
 - `mcp-jsonrpc`：stdout_log 打开时会拒绝包含 symlink 组件的路径，避免意外写入到不安全位置。
 - `mcp-jsonrpc`：unix 下 stdout_log 打开使用 `O_NOFOLLOW`（缓解 TOCTOU symlink replacement），并调整相关测试与行为说明。
 - `mcp-kit`：`mcpServers: \"path\"` 间接引用读取新增 root 边界与 canonicalize 校验，避免通过 symlink 逃逸读取 `--root` 外文件。
+- `mcp-kit`：解析 `mcpServers` 间接引用时缓存 canonical root，减少重复 canonicalize 开销。
 - `mcp-kit`：host allowlist 匹配逻辑不再做额外字符串分配（小幅减少 hot path 开销）。
 - scripts: 加固 `scripts/gen-llms-txt.sh` 路径解析，拒绝路径穿越/符号链接导致的本机文件打包泄露风险。
+- scripts: `scripts/gen-llms-txt.sh` 在缺少 `realpath` 时允许回退到 `python`（提升在 Windows CI 环境中的兼容性）。
 - Examples: `in_memory_duplex` 现在用 `Url::from_directory_path` 生成正确的目录 `file://` URI（支持空格/非 ASCII 的 percent-encoding）。
 - Examples: `minimal_client` / `client_with_policy` 默认省略 `tools/list` 的空 `params`（与 `Manager::list_tools`/`Session::list_tools` 语义一致）。
 - Examples: `streamable_http_split` 默认省略 `tools/list` 的空 `params`，提升对严格 server 的兼容性。

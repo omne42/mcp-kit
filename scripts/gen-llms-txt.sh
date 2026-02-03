@@ -24,7 +24,11 @@ realpath_compat() {
     python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$path"
     return
   fi
-  die "realpath not found (need \`realpath\` or \`python3\`): $path"
+  if command -v python >/dev/null 2>&1; then
+    python -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$path"
+    return
+  fi
+  die "realpath not found (need \`realpath\` or \`python3\` or \`python\`): $path"
 }
 
 ensure_no_symlink_components() {

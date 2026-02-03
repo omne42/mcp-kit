@@ -93,7 +93,7 @@ if let Some(status) = status {
 - `WaitOnTimeout::ReturnError`：返回超时错误，并保留 child 继续运行（可用 `Client::take_child()` 接管）
 - `WaitOnTimeout::Kill { kill_timeout }`：尝试 kill child，并再等待最多 `kill_timeout`
 
-提示：如果你需要在代码中判断是否为 wait 超时，可用 `mcp_jsonrpc::Error::is_wait_timeout()`。
+提示：如果你需要在代码中判断是否为 wait 超时，可用 `mcp_jsonrpc::Error::is_wait_timeout()`（该方法基于内部稳定 marker 判断，不依赖具体报错文案）。
 
 ## Streamable HTTP 的安全/行为
 
