@@ -404,7 +404,10 @@ CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
 - `url` / `headers` 会映射到 `transport=streamable_http`（HTTP SSE + POST）
 - `type` 目前仅用于校验（接受：`http|sse|streamable_http`），不改变映射
 
-> 备注：有些工具会在同一个文件中同时包含其它顶层字段（例如 `plugin.json` 里的 `"version": "1.0.0"`）。只要存在 `mcpServers` object，`Config::load` 就会按该 wrapper 解析。
+> 备注：
+>
+> - 有些工具会在同一个文件中同时包含其它顶层字段（例如 `plugin.json` 里的 `"version": "1.0.0"`）。只要存在 `mcpServers`，`Config::load` 就会按该 wrapper 解析。
+> - `mcpServers` 既支持 inline object，也支持 string（指向 `./.mcp.json` 等文件路径，按 config 文件所在目录解析）。
 
 ### Claude Code `.mcp.json` 直接 server map
 

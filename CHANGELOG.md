@@ -92,6 +92,7 @@
 - `mcp-kit`：对无 child 的连接（unix/streamable_http）会检查 JSON-RPC client closed 状态并清理缓存，避免复用失活连接。
 - `mcp-kit`：Cursor/Claude style 外部配置中 `type=http|sse` 与推断 transport 冲突时会 fail-closed 报错。
 - `mcp-kit`：当文件包含 `mcpServers` wrapper（例如 Claude plugin.json）时，`Config::load` 现在会优先按 wrapper 解析，而不是误判为 `mcp.json v1`。
+- `mcp-kit`：`mcpServers` 现在支持 string（指向 `./.mcp.json` 等文件路径），用于兼容 Claude plugin.json 的 `mcpServers` path 写法。
 - Examples: `in_memory_duplex` 现在用 `Url::from_directory_path` 生成正确的目录 `file://` URI（支持空格/非 ASCII 的 percent-encoding）。
 - Examples: `minimal_client` / `client_with_policy` 默认省略 `tools/list` 的空 `params`（与 `Manager::list_tools`/`Session::list_tools` 语义一致）。
 - Examples: `streamable_http_split` 默认省略 `tools/list` 的空 `params`，提升对严格 server 的兼容性。

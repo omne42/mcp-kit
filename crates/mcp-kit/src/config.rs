@@ -279,33 +279,84 @@ impl Config {
             }
         };
 
-        let parse_ctx = match &path {
-            Some(path) => format!("parse {}", path.display()),
-            None => "parse mcp config".to_string(),
-        };
+        let mut path = path;
+        let mut contents = contents;
 
-        let json: Value = serde_json::from_str(&contents).with_context(|| parse_ctx.clone())?;
-        let cfg: ConfigFile = match json {
-            Value::Object(mut root) => {
-                if let Some(mcp_servers) = root.remove("mcpServers") {
-                    let Value::Object(servers) = mcp_servers else {
-                        anyhow::bail!(
-                            "unsupported mcpServers format: `mcpServers` must be an object"
-                        );
-                    };
-                    return Self::load_external_servers(thread_root, path, servers);
-                } else if matches!(root.get("version"), Some(Value::Number(_))) {
-                    serde_json::from_value(Value::Object(root))
-                        .with_context(|| parse_ctx.clone())?
-                } else if root.contains_key("servers") {
-                    anyhow::bail!(
-                        "unsupported mcp.json format: missing `version` (expected v{MCP_CONFIG_VERSION})"
-                    );
-                } else {
-                    return Self::load_external_servers(thread_root, path, root);
+        let cfg: ConfigFile = {
+            let mut hops = 0usize;
+            loop {
+                let parse_ctx = match &path {
+                    Some(path) => format!("parse {}", path.display()),
+                    None => "parse mcp config".to_string(),
+                };
+
+                let json: Value =
+                    serde_json::from_str(&contents).with_context(|| parse_ctx.clone())?;
+
+                match json {
+                    Value::Object(mut root) => {
+                        if let Some(mcp_servers) = root.remove("mcpServers") {
+                            match mcp_servers {
+                                Value::Object(servers) => {
+                                    return Self::load_external_servers(thread_root, path, servers);
+                                }
+                                Value::String(mcp_path) => {
+                                    hops += 1;
+                                    if hops > 16 {
+                                        anyhow::bail!(
+                                            "mcpServers path indirection too deep (possible cycle)"
+                                        );
+                                    }
+
+                                    let mcp_path = PathBuf::from(mcp_path);
+                                    if mcp_path.as_os_str().is_empty() {
+                                        anyhow::bail!(
+                                            "unsupported mcpServers format: path must not be empty"
+                                        );
+                                    }
+                                    if mcp_path.is_absolute()
+                                        || mcp_path
+                                            .components()
+                                            .any(|c| matches!(c, Component::ParentDir))
+                                    {
+                                        anyhow::bail!(
+                                            "unsupported mcpServers format: path must be relative and must not contain `..` segments"
+                                        );
+                                    }
+
+                                    let base_dir = path
+                                        .as_ref()
+                                        .and_then(|p| p.parent())
+                                        .unwrap_or(thread_root);
+                                    let next_path = base_dir.join(mcp_path);
+                                    contents = read_to_string_limited(&next_path).await?;
+                                    path = Some(next_path);
+                                    continue;
+                                }
+                                _ => {
+                                    anyhow::bail!(
+                                        "unsupported mcpServers format: `mcpServers` must be an object or a string path"
+                                    );
+                                }
+                            }
+                        }
+
+                        if matches!(root.get("version"), Some(Value::Number(_))) {
+                            break serde_json::from_value(Value::Object(root))
+                                .with_context(|| parse_ctx.clone())?;
+                        }
+
+                        if root.contains_key("servers") {
+                            anyhow::bail!(
+                                "unsupported mcp.json format: missing `version` (expected v{MCP_CONFIG_VERSION})"
+                            );
+                        }
+
+                        return Self::load_external_servers(thread_root, path, root);
+                    }
+                    _ => anyhow::bail!("invalid mcp config: expected a JSON object"),
                 }
             }
-            _ => anyhow::bail!("invalid mcp config: expected a JSON object"),
         };
         if cfg.version != MCP_CONFIG_VERSION {
             anyhow::bail!(
@@ -1515,6 +1566,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cfg.path.as_ref().unwrap(), &dir.path().join("plugin.json"));
+        let server = cfg.servers.get("filesystem").unwrap();
+        assert_eq!(server.transport, Transport::Stdio);
+        assert_eq!(
+            server.argv,
+            vec![
+                "npx".to_string(),
+                "-y".to_string(),
+                "echo".to_string(),
+                "hi".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn load_parses_mcp_servers_path_to_dot_mcp_json() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join("plugin.json"),
+            r#"{
+  "name": "my-plugin",
+  "version": "1.0.0",
+  "mcpServers": "./.mcp.json"
+}"#,
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            dir.path().join(".mcp.json"),
+            r#"{
+  "filesystem": {
+    "command": "npx",
+    "args": ["-y", "echo", "hi"]
+  }
+}"#,
+        )
+        .await
+        .unwrap();
+
+        let cfg = Config::load(dir.path(), Some(PathBuf::from("plugin.json")))
+            .await
+            .unwrap();
+        assert_eq!(cfg.path.as_ref().unwrap(), &dir.path().join(".mcp.json"));
         let server = cfg.servers.get("filesystem").unwrap();
         assert_eq!(server.transport, Transport::Stdio);
         assert_eq!(
