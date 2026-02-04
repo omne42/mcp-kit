@@ -100,8 +100,8 @@ impl Session {
         outcome
             .with_context(|| {
                 format!(
-                    "mcp request timed out: {method} (server={})",
-                    self.server_name
+                    "mcp request timed out after {:?}: {method} (server={})",
+                    self.request_timeout, self.server_name
                 )
             })?
             .with_context(|| format!("mcp request failed: {method} (server={})", self.server_name))
@@ -116,8 +116,8 @@ impl Session {
         outcome
             .with_context(|| {
                 format!(
-                    "mcp notification timed out: {method} (server={})",
-                    self.server_name
+                    "mcp notification timed out after {:?}: {method} (server={})",
+                    self.request_timeout, self.server_name
                 )
             })?
             .with_context(|| {

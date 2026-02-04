@@ -108,18 +108,41 @@ pub struct ServerNotificationContext {
 pub type ServerNotificationHandler =
     Arc<dyn Fn(ServerNotificationContext) -> BoxFuture<()> + Send + Sync>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProtocolVersionCheck {
+    /// Fail closed (default): reject servers whose `initialize` result includes a different
+    /// `protocolVersion`.
+    #[default]
+    Strict,
+    /// Allow mismatches but record them in `Manager::protocol_version_mismatches`.
+    Warn,
+    /// Allow mismatches without recording.
+    Ignore,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtocolVersionMismatch {
+    pub server_name: ServerName,
+    pub client_protocol_version: String,
+    pub server_protocol_version: String,
+}
+
 pub struct Manager {
     conns: HashMap<ServerName, Connection>,
     init_results: HashMap<ServerName, Value>,
     client_name: String,
     client_version: String,
     protocol_version: String,
+    protocol_version_check: ProtocolVersionCheck,
+    protocol_version_mismatches: Vec<ProtocolVersionMismatch>,
     capabilities: Value,
     roots: Option<Arc<Vec<Root>>>,
     trust_mode: TrustMode,
     untrusted_streamable_http_policy: UntrustedStreamableHttpPolicy,
     allow_stdout_log_outside_root: bool,
     request_timeout: Duration,
+    server_handler_concurrency: usize,
+    server_handler_timeout: Option<Duration>,
     server_request_handler: ServerRequestHandler,
     server_notification_handler: ServerNotificationHandler,
 }
@@ -294,12 +317,16 @@ impl Manager {
             client_name: client_name.into(),
             client_version: client_version.into(),
             protocol_version: MCP_PROTOCOL_VERSION.to_string(),
+            protocol_version_check: ProtocolVersionCheck::Strict,
+            protocol_version_mismatches: Vec::new(),
             capabilities: Value::Object(serde_json::Map::new()),
             roots: None,
             trust_mode: TrustMode::Untrusted,
             untrusted_streamable_http_policy: UntrustedStreamableHttpPolicy::default(),
             allow_stdout_log_outside_root: false,
             request_timeout: timeout,
+            server_handler_concurrency: 1,
+            server_handler_timeout: None,
             server_request_handler,
             server_notification_handler,
         }
@@ -337,6 +364,19 @@ impl Manager {
         self
     }
 
+    pub fn with_protocol_version_check(mut self, check: ProtocolVersionCheck) -> Self {
+        self.protocol_version_check = check;
+        self
+    }
+
+    pub fn protocol_version_mismatches(&self) -> &[ProtocolVersionMismatch] {
+        &self.protocol_version_mismatches
+    }
+
+    pub fn take_protocol_version_mismatches(&mut self) -> Vec<ProtocolVersionMismatch> {
+        std::mem::take(&mut self.protocol_version_mismatches)
+    }
+
     pub fn with_capabilities(mut self, capabilities: Value) -> Self {
         self.capabilities = capabilities;
         if self.roots.is_some() {
@@ -358,6 +398,27 @@ impl Manager {
 
     pub fn with_server_notification_handler(mut self, handler: ServerNotificationHandler) -> Self {
         self.server_notification_handler = handler;
+        self
+    }
+
+    /// Set the maximum number of in-flight server→client handler calls per connection.
+    ///
+    /// Default: 1 (sequential handling).
+    pub fn with_server_handler_concurrency(mut self, concurrency: usize) -> Self {
+        self.server_handler_concurrency = concurrency.max(1);
+        self
+    }
+
+    /// Set a per-message timeout for server→client request/notification handlers.
+    ///
+    /// Default: no timeout.
+    pub fn with_server_handler_timeout(mut self, timeout: Duration) -> Self {
+        self.server_handler_timeout = Some(timeout);
+        self
+    }
+
+    pub fn without_server_handler_timeout(mut self) -> Self {
+        self.server_handler_timeout = None;
         self
     }
 
@@ -756,8 +817,37 @@ impl Manager {
         mut client: mcp_jsonrpc::Client,
         child: Option<Child>,
     ) -> anyhow::Result<()> {
+        struct HandlerTasksGuard {
+            tasks: Vec<tokio::task::JoinHandle<()>>,
+            armed: bool,
+        }
+
+        impl HandlerTasksGuard {
+            fn new(tasks: Vec<tokio::task::JoinHandle<()>>) -> Self {
+                Self { tasks, armed: true }
+            }
+
+            fn disarm(mut self) -> Vec<tokio::task::JoinHandle<()>> {
+                self.armed = false;
+                std::mem::take(&mut self.tasks)
+            }
+        }
+
+        impl Drop for HandlerTasksGuard {
+            fn drop(&mut self) {
+                if !self.armed {
+                    return;
+                }
+                for task in self.tasks.drain(..) {
+                    task.abort();
+                }
+            }
+        }
+
         let handler_tasks = self.attach_client_handlers(server_name, &mut client);
+        let handler_tasks_guard = HandlerTasksGuard::new(handler_tasks);
         let init_result = self.initialize(server_name, &client).await?;
+        let handler_tasks = handler_tasks_guard.disarm();
 
         self.init_results
             .insert(server_name.to_string(), init_result);
@@ -778,48 +868,91 @@ impl Manager {
         client: &mut mcp_jsonrpc::Client,
     ) -> Vec<tokio::task::JoinHandle<()>> {
         let mut tasks = Vec::new();
+        let handler_concurrency = self.server_handler_concurrency.max(1);
+        let handler_timeout = self.server_handler_timeout;
 
         if let Some(mut requests_rx) = client.take_requests() {
             let handler = self.server_request_handler.clone();
             let roots = self.roots.clone();
             let server_name = server_name.to_string();
             tasks.push(tokio::spawn(async move {
-                while let Some(req) = requests_rx.recv().await {
-                    let ctx = ServerRequestContext {
-                        server_name: server_name.clone(),
-                        method: req.method.clone(),
-                        params: req.params.clone(),
-                    };
+                let mut in_flight = tokio::task::JoinSet::new();
 
-                    let mut outcome = handler(ctx).await;
-                    if matches!(outcome, ServerRequestOutcome::MethodNotFound) {
-                        if let Some(result) =
-                            try_handle_built_in_request(&req.method, roots.as_ref())
-                        {
-                            outcome = ServerRequestOutcome::Ok(result);
+                loop {
+                    tokio::select! {
+                        Some(req) = requests_rx.recv(), if in_flight.len() < handler_concurrency => {
+                            let handler = handler.clone();
+                            let roots = roots.clone();
+                            let server_name = server_name.clone();
+                            in_flight.spawn(async move {
+                                const JSONRPC_SERVER_ERROR: i64 = -32000;
+
+                                let method = req.method.clone();
+                                let ctx = ServerRequestContext {
+                                    server_name: server_name.clone(),
+                                    method: method.clone(),
+                                    params: req.params.clone(),
+                                };
+
+                                let mut outcome = match handler_timeout {
+                                    Some(timeout) => match tokio::time::timeout(timeout, handler(ctx)).await {
+                                        Ok(outcome) => outcome,
+                                        Err(_) => ServerRequestOutcome::Error {
+                                            code: JSONRPC_SERVER_ERROR,
+                                            message: format!("server request handler timed out after {timeout:?}: {method}"),
+                                            data: None,
+                                        },
+                                    },
+                                    None => handler(ctx).await,
+                                };
+
+                                if matches!(outcome, ServerRequestOutcome::MethodNotFound) {
+                                    if let Some(result) =
+                                        try_handle_built_in_request(&method, roots.as_ref())
+                                    {
+                                        outcome = ServerRequestOutcome::Ok(result);
+                                    }
+                                }
+
+                                match outcome {
+                                    ServerRequestOutcome::Ok(result) => {
+                                        let _ = req.respond_ok(result).await;
+                                    }
+                                    ServerRequestOutcome::Error { code, message, data } => {
+                                        let _ = req.respond_error(code, message, data).await;
+                                    }
+                                    ServerRequestOutcome::MethodNotFound => {
+                                        let _ = req
+                                            .respond_error(
+                                                JSONRPC_METHOD_NOT_FOUND,
+                                                format!("method not found: {}", method.as_str()),
+                                                None,
+                                            )
+                                            .await;
+                                    }
+                                }
+                            });
                         }
+                        Some(outcome) = in_flight.join_next(), if !in_flight.is_empty() => {
+                            match outcome {
+                                Ok(()) => {}
+                                Err(err) if err.is_panic() => {
+                                    panic!("server request handler panicked");
+                                }
+                                Err(_) => {}
+                            }
+                        }
+                        else => break,
                     }
+                }
 
+                while let Some(outcome) = in_flight.join_next().await {
                     match outcome {
-                        ServerRequestOutcome::Ok(result) => {
-                            let _ = req.respond_ok(result).await;
+                        Ok(()) => {}
+                        Err(err) if err.is_panic() => {
+                            panic!("server request handler panicked");
                         }
-                        ServerRequestOutcome::Error {
-                            code,
-                            message,
-                            data,
-                        } => {
-                            let _ = req.respond_error(code, message, data).await;
-                        }
-                        ServerRequestOutcome::MethodNotFound => {
-                            let _ = req
-                                .respond_error(
-                                    JSONRPC_METHOD_NOT_FOUND,
-                                    format!("method not found: {}", req.method.as_str()),
-                                    None,
-                                )
-                                .await;
-                        }
+                        Err(_) => {}
                     }
                 }
             }));
@@ -829,13 +962,49 @@ impl Manager {
             let handler = self.server_notification_handler.clone();
             let server_name = server_name.to_string();
             tasks.push(tokio::spawn(async move {
-                while let Some(note) = notifications_rx.recv().await {
-                    let ctx = ServerNotificationContext {
-                        server_name: server_name.clone(),
-                        method: note.method,
-                        params: note.params,
-                    };
-                    handler(ctx).await;
+                let mut in_flight = tokio::task::JoinSet::new();
+
+                loop {
+                    tokio::select! {
+                        Some(note) = notifications_rx.recv(), if in_flight.len() < handler_concurrency => {
+                            let handler = handler.clone();
+                            let server_name = server_name.clone();
+                            in_flight.spawn(async move {
+                                let ctx = ServerNotificationContext {
+                                    server_name: server_name.clone(),
+                                    method: note.method,
+                                    params: note.params,
+                                };
+
+                                match handler_timeout {
+                                    Some(timeout) => {
+                                        let _ = tokio::time::timeout(timeout, handler(ctx)).await;
+                                    }
+                                    None => handler(ctx).await,
+                                }
+                            });
+                        }
+                        Some(outcome) = in_flight.join_next(), if !in_flight.is_empty() => {
+                            match outcome {
+                                Ok(()) => {}
+                                Err(err) if err.is_panic() => {
+                                    panic!("server notification handler panicked");
+                                }
+                                Err(_) => {}
+                            }
+                        }
+                        else => break,
+                    }
+                }
+
+                while let Some(outcome) = in_flight.join_next().await {
+                    match outcome {
+                        Ok(()) => {}
+                        Err(err) if err.is_panic() => {
+                            panic!("server notification handler panicked");
+                        }
+                        Err(_) => {}
+                    }
                 }
             }));
         }
@@ -1410,7 +1579,7 @@ impl Manager {
     }
 
     async fn initialize(
-        &self,
+        &mut self,
         server_name: &str,
         client: &mcp_jsonrpc::Client,
     ) -> anyhow::Result<Value> {
@@ -1430,29 +1599,42 @@ impl Manager {
             "capabilities": &self.capabilities,
         });
 
-        let outcome = tokio::time::timeout(
-            self.request_timeout,
-            client.request("initialize", initialize_params),
-        )
-        .await;
+        let timeout = self.request_timeout;
+        let outcome =
+            tokio::time::timeout(timeout, client.request("initialize", initialize_params)).await;
         let result = outcome
-            .context("mcp initialize timed out")?
+            .with_context(|| {
+                format!("mcp initialize timed out after {timeout:?} (server={server_name})")
+            })?
             .with_context(|| format!("mcp initialize failed (server={server_name})"))?;
 
         if let Some(server_protocol_version) =
             result.get("protocolVersion").and_then(|v| v.as_str())
         {
             if server_protocol_version != self.protocol_version {
-                anyhow::bail!(
-                    "mcp initialize protocolVersion mismatch (server={server_name}): client={}, server={}",
-                    self.protocol_version,
-                    server_protocol_version
-                );
+                match self.protocol_version_check {
+                    ProtocolVersionCheck::Strict => {
+                        anyhow::bail!(
+                            "mcp initialize protocolVersion mismatch (server={server_name}): client={}, server={}",
+                            self.protocol_version,
+                            server_protocol_version
+                        );
+                    }
+                    ProtocolVersionCheck::Warn => {
+                        self.protocol_version_mismatches
+                            .push(ProtocolVersionMismatch {
+                                server_name: server_name.to_string(),
+                                client_protocol_version: self.protocol_version.clone(),
+                                server_protocol_version: server_protocol_version.to_string(),
+                            });
+                    }
+                    ProtocolVersionCheck::Ignore => {}
+                }
             }
         }
 
         Self::notify_raw(
-            self.request_timeout,
+            timeout,
             server_name,
             client,
             "notifications/initialized",
@@ -1472,7 +1654,9 @@ impl Manager {
     ) -> anyhow::Result<Value> {
         let outcome = tokio::time::timeout(timeout, client.request_optional(method, params)).await;
         outcome
-            .with_context(|| format!("mcp request timed out: {method} (server={server_name})"))?
+            .with_context(|| {
+                format!("mcp request timed out after {timeout:?}: {method} (server={server_name})")
+            })?
             .with_context(|| format!("mcp request failed: {method} (server={server_name})"))
     }
 
@@ -1486,7 +1670,9 @@ impl Manager {
         let outcome = tokio::time::timeout(timeout, client.notify(method, params)).await;
         outcome
             .with_context(|| {
-                format!("mcp notification timed out: {method} (server={server_name})")
+                format!(
+                    "mcp notification timed out after {timeout:?}: {method} (server={server_name})"
+                )
             })?
             .with_context(|| format!("mcp notification failed: {method} (server={server_name})"))
     }
@@ -2115,6 +2301,64 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("protocolVersion mismatch"));
+
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connect_io_allows_initialize_protocol_version_mismatch_when_configured() {
+        let (client_stream, server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let server_task = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            assert_eq!(init_value["jsonrpc"], "2.0");
+            assert_eq!(init_value["method"], "initialize");
+            let id = init_value["id"].clone();
+
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "protocolVersion": "1900-01-01", "hello": "world" },
+            });
+            let mut response_line = serde_json::to_string(&response).unwrap();
+            response_line.push('\n');
+            server_write
+                .write_all(response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let note_line = lines.next_line().await.unwrap().unwrap();
+            let note_value: Value = serde_json::from_str(&note_line).unwrap();
+            assert_eq!(note_value["jsonrpc"], "2.0");
+            assert_eq!(note_value["method"], "notifications/initialized");
+        });
+
+        let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+            .with_trust_mode(TrustMode::Trusted)
+            .with_protocol_version_check(ProtocolVersionCheck::Warn);
+        let session = manager
+            .connect_io_session("srv", client_read, client_write)
+            .await
+            .unwrap();
+        assert_eq!(
+            session.initialize_result(),
+            &serde_json::json!({ "protocolVersion": "1900-01-01", "hello": "world" })
+        );
+        assert_eq!(manager.protocol_version_mismatches().len(), 1);
+        assert_eq!(
+            manager.protocol_version_mismatches()[0],
+            ProtocolVersionMismatch {
+                server_name: "srv".to_string(),
+                client_protocol_version: MCP_PROTOCOL_VERSION.to_string(),
+                server_protocol_version: "1900-01-01".to_string(),
+            }
+        );
 
         server_task.await.unwrap();
     }

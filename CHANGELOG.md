@@ -33,6 +33,9 @@
 - `Manager::{connect_io, connect_jsonrpc}`：支持接入自定义 JSON-RPC 连接（需要 `TrustMode::Trusted`）。
 - `ServerConfig::streamable_http_split(sse_url, http_url)`：便捷构造 split URL 的 `transport=streamable_http` 配置（用于手写/测试场景；现在返回 `Result`）。
 - `Manager::initialize_result`：暴露 server initialize 响应。
+- `mcp-kit`：新增 `ProtocolVersionCheck` 与 `Manager::with_protocol_version_check(...)`，用于控制 `initialize.protocolVersion` mismatch 的处理策略，并可通过 `Manager::protocol_version_mismatches()` 获取告警信息。
+- `mcp-kit`：新增 `Manager::with_server_handler_concurrency(...)` 与 `Manager::with_server_handler_timeout(...)`，用于限制/保护 server→client handler 的并发与超时行为。
+- `mcp-kit`：新增 `Config::load_required(...)`，用于在缺少配置文件时 fail-fast（区别于 `Config::load` 的“缺省为空配置”语义）。
 - `Manager`：补齐 MCP 常用请求便捷方法（`ping`、`resources/templates/list`、`resources/read`、`resources/subscribe`、`resources/unsubscribe`、`prompts/get`、`logging/setLevel`、`completion/complete`）。
 - `Session`：单连接 MCP 会话（从 `Manager` 取出后可独立调用 `request/notify` 与便捷方法）。
 - `Manager::{take_session, get_or_connect_session, connect_*_session}`：支持把握手完成的会话交给上层库持有。
@@ -117,6 +120,7 @@
 - `mcp-jsonrpc`：当入站消息包含 `method` 但类型非法时，会返回 `-32600 Invalid Request`（若有 `id`）并避免误当作 response 消费 pending。
 - `mcp-jsonrpc`：`streamable_http` 的 HTTP 200 + 空 JSON body（非 202）现在会桥接为 `-32000` error，避免 request 悬挂。
 - `mcp-kit`：对无 child 的连接（unix/streamable_http）会检查 JSON-RPC client closed 状态并清理缓存，避免复用失活连接。
+- `mcp-kit`：当 `initialize` 失败时会自动 abort 已挂载的 server→client handler tasks，避免遗留后台任务。
 - `mcp-kit`：Cursor/Claude style 外部配置中 `type=http|sse` 与推断 transport 冲突时会 fail-closed 报错。
 - `mcp-kit`：当文件包含 `mcpServers` wrapper（例如 Claude plugin.json）时，`Config::load` 现在会优先按 wrapper 解析，而不是误判为 `mcp.json v1`。
 - `mcp-kit`：`mcpServers` 现在支持 string（指向 `./.mcp.json` 等文件路径），用于兼容 Claude plugin.json 的 `mcpServers` path 写法。

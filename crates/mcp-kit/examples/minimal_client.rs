@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
         eprintln!("for stdio/unix, try:");
         eprintln!("  cargo run -p mcp-kit --example client_with_policy -- --trust {server_name}");
         eprintln!(
-            "  cargo run -p mcp-kit --features cli --bin mcpctl -- --trust list-tools {server_name}"
+            "  cargo run -p mcp-kit --features cli --bin mcpctl -- --trust --yes-trust list-tools {server_name}"
         );
         return Ok(());
     }

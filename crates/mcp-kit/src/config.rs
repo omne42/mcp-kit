@@ -161,8 +161,10 @@ pub struct Config {
 pub struct ServerConfig {
     transport: Transport,
     argv: Vec<String>,
-    /// When true (default), inherit the current process environment when spawning
-    /// a `transport=stdio` server.
+    /// When true, inherit the current process environment when spawning a
+    /// `transport=stdio` server.
+    ///
+    /// Default: `false` for `transport=stdio` (safer-by-default).
     ///
     /// When false, the child environment is cleared and only a small set of
     /// non-secret baseline variables are propagated (plus any `env` entries).
@@ -566,6 +568,24 @@ async fn canonicalize_in_root(canonical_root: &Path, path: &Path) -> anyhow::Res
 }
 
 impl Config {
+    /// Load `mcp.json` (v1), but fail if no config file is found.
+    ///
+    /// Unlike `Config::load`, this does not treat missing config as "empty config".
+    pub async fn load_required(
+        thread_root: &Path,
+        override_path: Option<PathBuf>,
+    ) -> anyhow::Result<Self> {
+        let cfg = Self::load(thread_root, override_path).await?;
+        if cfg.path().is_none() {
+            anyhow::bail!(
+                "mcp config not found under root {} (tried: {})",
+                thread_root.display(),
+                DEFAULT_CONFIG_CANDIDATES.join(", ")
+            );
+        }
+        Ok(cfg)
+    }
+
     pub async fn load(thread_root: &Path, override_path: Option<PathBuf>) -> anyhow::Result<Self> {
         let (path, contents) = match override_path {
             Some(path) => {
@@ -1521,6 +1541,13 @@ mod tests {
         assert!(cfg.client.capabilities.is_none());
         assert!(cfg.client.roots.is_none());
         assert!(cfg.servers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_required_errors_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = Config::load_required(dir.path(), None).await.unwrap_err();
+        assert!(err.to_string().contains("not found"), "err={err:#}");
     }
 
     #[tokio::test]
