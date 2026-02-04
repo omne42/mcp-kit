@@ -5,16 +5,21 @@
 - 版本号：Semantic Versioning
 - 变更记录：Keep a Changelog（见 `CHANGELOG.md`）
 
+约定（在 `1.0.0` 之前）：
+
+- `0.y.z`：我们仍尽量遵循 SemVer 语义：**breaking change** bump `y`；仅修复/兼容性增强 bump `z`。
+- `CHANGELOG.md`：开发期统一写在 `[Unreleased]`，发布时再归档到具体版本并填写日期。
+
 ## workspace 版本
 
-`mcp-kit` 是 workspace，版本号在 `mcp-kit/Cargo.toml` 的：
+`mcp-kit` 是 workspace，版本号在仓库根目录 `Cargo.toml` 的：
 
-- `[workspace.package] version`
+- `[workspace.package] version`（各 crate 通过 `version.workspace = true` 继承）
 
 ## 发布检查清单（建议）
 
 1. 更新 `CHANGELOG.md`：把本次变更整理到对应版本
-2. bump 版本号：更新 `mcp-kit/Cargo.toml`（必要时更新 `Cargo.lock`）
+2. bump 版本号：更新根目录 `Cargo.toml`（必要时更新 `Cargo.lock`）
 3. 跑一遍 gates（见 [`贡献指南`](contributing.md)）
 4. 打 tag（例如 `vX.Y.Z`）
 

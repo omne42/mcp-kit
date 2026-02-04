@@ -44,7 +44,7 @@
 
 解决：
 
-- CLI：加 `--trust`
+- CLI：加 `--trust --yes-trust`
 - 代码：`Manager::with_trust_mode(TrustMode::Trusted)`
 
 ### refusing to connect unix mcp server in untrusted mode
@@ -91,7 +91,7 @@
 
 - 关闭 `dns_check`（或不传 `--dns-check`）
 - CLI：加 `--allow-private-ip`（允许私网/loopback）
-- 或使用 `--trust`（Trusted mode）
+- 或使用 `--trust --yes-trust`（Trusted mode）
 
 ### refusing to connect hostname with failed/timed out dns lookup in untrusted mode
 
@@ -103,19 +103,19 @@
 - CLI：调大 DNS timeout（`--dns-timeout-ms 5000`）
 - CLI：如确实需要，可用 `--dns-fail-open` 忽略 DNS 失败/超时（风险更高）
 - 修复本机 DNS（例如 VPN / 企业网 split-horizon / 网络策略导致的解析失败）
-- 或使用 `--trust`（Trusted mode）
+- 或使用 `--trust --yes-trust`（Trusted mode）
 
 ### refusing to send sensitive http header in untrusted mode
 
 原因：默认拒绝 `Authorization` / `Proxy-Authorization` / `Cookie`。
 
-解决：改为 `--trust`（或 Trusted mode）。
+解决：改为 `--trust --yes-trust`（或 Trusted mode）。
 
 ### refusing to read bearer token env var / refusing to read http header env vars
 
 原因：读取 env secrets 只允许在 Trusted 下进行。
 
-解决：改为 `--trust`（或 Trusted mode）。
+解决：改为 `--trust --yes-trust`（或 Trusted mode）。
 
 ## 超时与协议问题
 

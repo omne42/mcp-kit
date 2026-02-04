@@ -63,7 +63,7 @@ cargo run -p mcp-kit --features cli --bin mcpctl -- list-tools remote
 在默认模式下（Untrusted），`mcpctl list-tools local` 会报错：拒绝 spawn。本地 `stdio/unix` 必须显式信任：
 
 ```bash
-cargo run -p mcp-kit --features cli --bin mcpctl -- --trust list-tools local
+cargo run -p mcp-kit --features cli --bin mcpctl -- --trust --yes-trust list-tools local
 ```
 
 原因与威胁模型见 [`安全模型`](security.md)。

@@ -17,6 +17,13 @@ struct Cli {
     #[arg(long)]
     config: Option<PathBuf>,
 
+    /// Allow `--config` to point outside `--root`.
+    ///
+    /// WARNING: This can read config from outside the workspace. Only use this with trusted
+    /// paths.
+    #[arg(long, default_value_t = false)]
+    allow_config_outside_root: bool,
+
     /// JSON output (default: pretty JSON).
     #[arg(long, default_value_t = false)]
     json: bool,
@@ -28,8 +35,12 @@ struct Cli {
     /// Fully trust `mcp.json` (allows spawning processes / connecting unix sockets).
     ///
     /// WARNING: Only use this with trusted repositories and trusted server binaries.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = false, requires = "yes_trust")]
     trust: bool,
+
+    /// Acknowledge the risks of `--trust` (required when `--trust` is set).
+    #[arg(long, default_value_t = false)]
+    yes_trust: bool,
 
     /// Allow stdout_log.path to point outside --root.
     ///
@@ -71,6 +82,12 @@ struct Cli {
     /// `--dns-fail-open` is set.
     #[arg(long, default_value_t = false)]
     dns_check: bool,
+
+    /// Disable DNS checks even when `--allow-host` is set.
+    ///
+    /// WARNING: This can re-introduce SSRF risk via hostnames resolving to non-global IPs.
+    #[arg(long, default_value_t = false, conflicts_with = "dns_check")]
+    no_dns_check: bool,
 
     /// DNS lookup timeout in milliseconds (only used with `--dns-check`).
     ///
@@ -137,7 +154,40 @@ async fn main() -> anyhow::Result<()> {
         .root
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
+    if let Some(path) = cli.config.as_ref() {
+        let resolved = if path.is_absolute() {
+            path.clone()
+        } else {
+            root.join(path)
+        };
+
+        let canonical_root = tokio::fs::canonicalize(&root).await.unwrap_or(root.clone());
+        if let Ok(canonical_config) = tokio::fs::canonicalize(&resolved).await {
+            if !canonical_config.starts_with(&canonical_root) {
+                if !cli.allow_config_outside_root {
+                    anyhow::bail!(
+                        "--config must be within --root (pass --allow-config-outside-root to override): {}",
+                        resolved.display()
+                    );
+                }
+                eprintln!(
+                    "WARNING: --config points outside --root: {}",
+                    resolved.display()
+                );
+            }
+        }
+    }
+
     let config = mcp_kit::Config::load(&root, cli.config.clone()).await?;
+
+    let auto_dns_check =
+        !cli.trust && !cli.allow_host.is_empty() && !cli.dns_check && !cli.no_dns_check;
+    if auto_dns_check {
+        eprintln!("NOTE: enabling DNS checks because --allow-host was provided.");
+        eprintln!("  - Pass --no-dns-check to opt out (less safe).");
+        eprintln!("  - Pass --dns-check explicitly to customize timeout/fail-open settings.");
+    }
+    let effective_dns_check = cli.dns_check || auto_dns_check;
 
     if cli.trust {
         eprintln!("WARNING: --trust disables the default safety restrictions.");
@@ -146,9 +196,9 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("Only use this with trusted repositories and trusted server binaries.");
 
         let risky_stdio = config
-            .servers
+            .servers()
             .iter()
-            .filter(|(_, cfg)| cfg.transport == mcp_kit::Transport::Stdio && cfg.inherit_env)
+            .filter(|(_, cfg)| cfg.transport() == mcp_kit::Transport::Stdio && cfg.inherit_env())
             .map(|(name, _)| name.as_str())
             .collect::<Vec<_>>();
         if !risky_stdio.is_empty() {
@@ -162,17 +212,15 @@ async fn main() -> anyhow::Result<()> {
         }
 
         let has_stdout_log = config
-            .servers
+            .servers()
             .values()
-            .any(|cfg| cfg.transport == mcp_kit::Transport::Stdio && cfg.stdout_log.is_some());
+            .any(|cfg| cfg.transport() == mcp_kit::Transport::Stdio && cfg.stdout_log().is_some());
         if has_stdout_log {
             eprintln!("WARNING: stdout_log writes protocol data to disk and may contain secrets.");
         }
-    } else if !cli.allow_host.is_empty() && !cli.dns_check && !cli.allow_private_ip {
-        eprintln!("NOTE: --allow-host does not enable DNS checks by default.");
-        eprintln!(
-            "Consider adding --dns-check to reduce SSRF risk from hostnames resolving to non-global IPs."
-        );
+    } else if !cli.allow_host.is_empty() && cli.no_dns_check && !cli.allow_private_ip {
+        eprintln!("WARNING: --allow-host is set with DNS checks disabled (--no-dns-check).");
+        eprintln!("This can re-introduce SSRF risk via hostnames resolving to non-global IPs.");
     }
 
     let timeout = Duration::from_millis(cli.timeout_ms);
@@ -187,7 +235,7 @@ async fn main() -> anyhow::Result<()> {
         && (cli.allow_http
             || cli.allow_localhost
             || cli.allow_private_ip
-            || cli.dns_check
+            || effective_dns_check
             || cli.dns_timeout_ms.is_some()
             || cli.dns_fail_open
             || !cli.allow_host.is_empty())
@@ -202,7 +250,7 @@ async fn main() -> anyhow::Result<()> {
         if cli.allow_private_ip {
             policy.allow_private_ips = true;
         }
-        if cli.dns_check {
+        if effective_dns_check {
             policy.dns_check = true;
             if let Some(timeout_ms) = cli.dns_timeout_ms {
                 policy.dns_timeout = Duration::from_millis(timeout_ms);
@@ -224,41 +272,41 @@ async fn main() -> anyhow::Result<()> {
     let result = match cli.command {
         Command::ListServers => {
             let servers = config
-                .servers
+                .servers()
                 .iter()
                 .map(|(name, cfg)| {
                     let mut server = serde_json::json!({
                         "name": name,
-                        "transport": cfg.transport,
-                        "argv_program": cfg.argv.first(),
-                        "argv_argc": cfg.argv.len(),
-                        "inherit_env": cfg.inherit_env,
-                        "unix_path": cfg.unix_path.as_ref().map(|p| p.display().to_string()),
-                        "url": cfg.url.as_deref(),
-                        "sse_url": cfg.sse_url.as_deref(),
-                        "http_url": cfg.http_url.as_deref(),
-                        "bearer_token_env_var": cfg.bearer_token_env_var.as_deref(),
-                        "env_keys": cfg.env.keys().cloned().collect::<Vec<_>>(),
-                        "http_header_keys": cfg.http_headers.keys().cloned().collect::<Vec<_>>(),
-                        "env_http_header_keys": cfg.env_http_headers.keys().cloned().collect::<Vec<_>>(),
-                        "stdout_log": cfg.stdout_log.as_ref().map(|log| serde_json::json!({
+                        "transport": cfg.transport(),
+                        "argv_program": cfg.argv().first(),
+                        "argv_argc": cfg.argv().len(),
+                        "inherit_env": cfg.inherit_env(),
+                        "unix_path": cfg.unix_path().map(|p| p.display().to_string()),
+                        "url": cfg.url(),
+                        "sse_url": cfg.sse_url(),
+                        "http_url": cfg.http_url(),
+                        "bearer_token_env_var": cfg.bearer_token_env_var(),
+                        "env_keys": cfg.env().keys().cloned().collect::<Vec<_>>(),
+                        "http_header_keys": cfg.http_headers().keys().cloned().collect::<Vec<_>>(),
+                        "env_http_header_keys": cfg.env_http_headers().keys().cloned().collect::<Vec<_>>(),
+                        "stdout_log": cfg.stdout_log().map(|log| serde_json::json!({
                             "path": log.path.display().to_string(),
                             "max_bytes_per_part": log.max_bytes_per_part,
                             "max_parts": log.max_parts,
                         })),
                     });
                     if cli.show_argv {
-                        server["argv"] = serde_json::json!(&cfg.argv);
+                        server["argv"] = serde_json::json!(cfg.argv());
                     }
                     server
                 })
                 .collect::<Vec<_>>();
 
             serde_json::json!({
-                "config_path": config.path.as_ref().map(|p| p.display().to_string()),
+                "config_path": config.path().map(|p| p.display().to_string()),
                 "client": {
-                    "protocol_version": config.client.protocol_version,
-                    "capabilities": config.client.capabilities,
+                    "protocol_version": config.client().protocol_version.clone(),
+                    "capabilities": config.client().capabilities.clone(),
                 },
                 "servers": servers,
             })

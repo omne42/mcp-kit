@@ -152,48 +152,228 @@ pub struct StdoutLogConfig {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub path: Option<PathBuf>,
-    pub client: ClientConfig,
-    pub servers: BTreeMap<String, ServerConfig>,
+    path: Option<PathBuf>,
+    client: ClientConfig,
+    servers: BTreeMap<String, ServerConfig>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    pub transport: Transport,
-    pub argv: Vec<String>,
+    transport: Transport,
+    argv: Vec<String>,
     /// When true (default), inherit the current process environment when spawning
     /// a `transport=stdio` server.
     ///
     /// When false, the child environment is cleared and only a small set of
     /// non-secret baseline variables are propagated (plus any `env` entries).
-    pub inherit_env: bool,
-    pub unix_path: Option<PathBuf>,
-    pub url: Option<String>,
-    pub sse_url: Option<String>,
-    pub http_url: Option<String>,
-    pub bearer_token_env_var: Option<String>,
-    pub http_headers: BTreeMap<String, String>,
-    pub env_http_headers: BTreeMap<String, String>,
-    pub env: BTreeMap<String, String>,
-    pub stdout_log: Option<StdoutLogConfig>,
+    inherit_env: bool,
+    unix_path: Option<PathBuf>,
+    url: Option<String>,
+    sse_url: Option<String>,
+    http_url: Option<String>,
+    bearer_token_env_var: Option<String>,
+    http_headers: BTreeMap<String, String>,
+    env_http_headers: BTreeMap<String, String>,
+    env: BTreeMap<String, String>,
+    stdout_log: Option<StdoutLogConfig>,
 }
 
 impl ServerConfig {
-    pub fn streamable_http_split(sse_url: impl Into<String>, http_url: impl Into<String>) -> Self {
-        Self {
-            transport: Transport::StreamableHttp,
-            argv: Vec::new(),
-            inherit_env: true,
+    pub fn stdio(argv: Vec<String>) -> anyhow::Result<Self> {
+        if argv.is_empty() {
+            anyhow::bail!("mcp stdio argv must not be empty");
+        }
+        for (idx, arg) in argv.iter().enumerate() {
+            if arg.trim().is_empty() {
+                anyhow::bail!("mcp stdio argv[{idx}] must not be empty");
+            }
+        }
+        Ok(Self {
+            transport: Transport::Stdio,
+            argv,
+            inherit_env: false,
             unix_path: None,
             url: None,
-            sse_url: Some(sse_url.into()),
-            http_url: Some(http_url.into()),
+            sse_url: None,
+            http_url: None,
             bearer_token_env_var: None,
             http_headers: BTreeMap::new(),
             env_http_headers: BTreeMap::new(),
             env: BTreeMap::new(),
             stdout_log: None,
+        })
+    }
+
+    pub fn unix(unix_path: PathBuf) -> anyhow::Result<Self> {
+        if unix_path.as_os_str().is_empty() {
+            anyhow::bail!("mcp unix_path must not be empty");
         }
+        Ok(Self {
+            transport: Transport::Unix,
+            argv: Vec::new(),
+            inherit_env: true,
+            unix_path: Some(unix_path),
+            url: None,
+            sse_url: None,
+            http_url: None,
+            bearer_token_env_var: None,
+            http_headers: BTreeMap::new(),
+            env_http_headers: BTreeMap::new(),
+            env: BTreeMap::new(),
+            stdout_log: None,
+        })
+    }
+
+    pub fn streamable_http(url: impl Into<String>) -> anyhow::Result<Self> {
+        let url = url.into();
+        if url.trim().is_empty() {
+            anyhow::bail!("mcp streamable_http url must not be empty");
+        }
+        Ok(Self {
+            transport: Transport::StreamableHttp,
+            argv: Vec::new(),
+            inherit_env: true,
+            unix_path: None,
+            url: Some(url),
+            sse_url: None,
+            http_url: None,
+            bearer_token_env_var: None,
+            http_headers: BTreeMap::new(),
+            env_http_headers: BTreeMap::new(),
+            env: BTreeMap::new(),
+            stdout_log: None,
+        })
+    }
+
+    pub fn streamable_http_split(
+        sse_url: impl Into<String>,
+        http_url: impl Into<String>,
+    ) -> anyhow::Result<Self> {
+        let sse_url = sse_url.into();
+        let http_url = http_url.into();
+        if sse_url.trim().is_empty() {
+            anyhow::bail!("mcp streamable_http sse_url must not be empty");
+        }
+        if http_url.trim().is_empty() {
+            anyhow::bail!("mcp streamable_http http_url must not be empty");
+        }
+        Ok(Self {
+            transport: Transport::StreamableHttp,
+            argv: Vec::new(),
+            inherit_env: true,
+            unix_path: None,
+            url: None,
+            sse_url: Some(sse_url),
+            http_url: Some(http_url),
+            bearer_token_env_var: None,
+            http_headers: BTreeMap::new(),
+            env_http_headers: BTreeMap::new(),
+            env: BTreeMap::new(),
+            stdout_log: None,
+        })
+    }
+
+    pub fn transport(&self) -> Transport {
+        self.transport
+    }
+
+    pub fn argv(&self) -> &[String] {
+        &self.argv
+    }
+
+    pub fn inherit_env(&self) -> bool {
+        self.inherit_env
+    }
+
+    pub fn unix_path(&self) -> Option<&Path> {
+        self.unix_path.as_deref()
+    }
+
+    pub fn url(&self) -> Option<&str> {
+        self.url.as_deref()
+    }
+
+    pub fn sse_url(&self) -> Option<&str> {
+        self.sse_url.as_deref()
+    }
+
+    pub fn http_url(&self) -> Option<&str> {
+        self.http_url.as_deref()
+    }
+
+    pub fn bearer_token_env_var(&self) -> Option<&str> {
+        self.bearer_token_env_var.as_deref()
+    }
+
+    pub fn http_headers(&self) -> &BTreeMap<String, String> {
+        &self.http_headers
+    }
+
+    pub fn env_http_headers(&self) -> &BTreeMap<String, String> {
+        &self.env_http_headers
+    }
+
+    pub fn env(&self) -> &BTreeMap<String, String> {
+        &self.env
+    }
+
+    pub fn stdout_log(&self) -> Option<&StdoutLogConfig> {
+        self.stdout_log.as_ref()
+    }
+
+    pub fn set_inherit_env(&mut self, inherit_env: bool) {
+        self.inherit_env = inherit_env;
+    }
+
+    pub fn set_bearer_token_env_var(&mut self, bearer_token_env_var: Option<String>) {
+        self.bearer_token_env_var = bearer_token_env_var;
+    }
+
+    pub fn env_mut(&mut self) -> &mut BTreeMap<String, String> {
+        &mut self.env
+    }
+
+    pub fn http_headers_mut(&mut self) -> &mut BTreeMap<String, String> {
+        &mut self.http_headers
+    }
+
+    pub fn env_http_headers_mut(&mut self) -> &mut BTreeMap<String, String> {
+        &mut self.env_http_headers
+    }
+
+    pub fn set_stdout_log(&mut self, stdout_log: Option<StdoutLogConfig>) {
+        self.stdout_log = stdout_log;
+    }
+}
+
+impl Config {
+    pub fn new(client: ClientConfig, servers: BTreeMap<String, ServerConfig>) -> Self {
+        Self {
+            path: None,
+            client,
+            servers,
+        }
+    }
+
+    pub fn with_path(mut self, path: PathBuf) -> Self {
+        self.path = Some(path);
+        self
+    }
+
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    pub fn client(&self) -> &ClientConfig {
+        &self.client
+    }
+
+    pub fn servers(&self) -> &BTreeMap<String, ServerConfig> {
+        &self.servers
+    }
+
+    pub fn server(&self, name: &str) -> Option<&ServerConfig> {
+        self.servers.get(name)
     }
 }
 
@@ -597,7 +777,7 @@ impl Config {
             };
 
             let inherit_env = match server.transport {
-                Transport::Stdio => server.inherit_env.unwrap_or(true),
+                Transport::Stdio => server.inherit_env.unwrap_or(false),
                 _ => {
                     if server.inherit_env.is_some() {
                         anyhow::bail!(
@@ -938,7 +1118,7 @@ impl Config {
             };
 
             let inherit_env = match transport {
-                Transport::Stdio => server.inherit_env.unwrap_or(true),
+                Transport::Stdio => server.inherit_env.unwrap_or(false),
                 _ => {
                     if server.inherit_env.is_some() {
                         anyhow::bail!(

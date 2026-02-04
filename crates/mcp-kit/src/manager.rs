@@ -125,25 +125,53 @@ pub struct Manager {
 }
 
 pub struct Connection {
-    pub child: Option<Child>,
-    pub client: mcp_jsonrpc::Client,
+    child: Option<Child>,
+    client: mcp_jsonrpc::Client,
+    handler_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl Connection {
+    pub fn client(&self) -> &mcp_jsonrpc::Client {
+        &self.client
+    }
+
+    pub fn client_mut(&mut self) -> &mut mcp_jsonrpc::Client {
+        &mut self.client
+    }
+
+    pub fn child_id(&self) -> Option<u32> {
+        self.child.as_ref().and_then(|child| child.id())
+    }
+
+    pub fn take_child(&mut self) -> Option<Child> {
+        self.child.take()
+    }
+
     /// Closes the JSON-RPC client and (if present) waits for the underlying child process to exit.
     ///
     /// Note: this can hang indefinitely if the child process does not exit. Prefer
     /// `Connection::wait_with_timeout` if you need an upper bound.
     pub async fn wait(mut self) -> anyhow::Result<Option<std::process::ExitStatus>> {
         let status = self.client.wait().await.context("close jsonrpc client")?;
-        if status.is_some() {
-            return Ok(status);
+        let status = match status {
+            Some(status) => Some(status),
+            None => match &mut self.child {
+                Some(child) => Some(child.wait().await?),
+                None => None,
+            },
+        };
+
+        let handler_tasks = std::mem::take(&mut self.handler_tasks);
+        for task in handler_tasks {
+            if let Err(err) = task.await {
+                if err.is_panic() {
+                    anyhow::bail!("server handler task panicked");
+                }
+                anyhow::bail!("server handler task failed: {err}");
+            }
         }
 
-        match &mut self.child {
-            Some(child) => Ok(Some(child.wait().await?)),
-            None => Ok(None),
-        }
+        Ok(status)
     }
 
     /// Closes the JSON-RPC client and waits for the underlying child process to exit, up to
@@ -158,46 +186,64 @@ impl Connection {
             .wait_with_timeout(timeout, on_timeout)
             .await
             .context("close jsonrpc client")?;
-        if status.is_some() {
-            return Ok(status);
-        }
-
-        let Some(child) = &mut self.child else {
-            return Ok(None);
-        };
-
-        match tokio::time::timeout(timeout, child.wait()).await {
-            Ok(status) => Ok(Some(status?)),
-            Err(_) => match on_timeout {
-                mcp_jsonrpc::WaitOnTimeout::ReturnError => {
-                    anyhow::bail!("wait timed out after {timeout:?}")
-                }
-                mcp_jsonrpc::WaitOnTimeout::Kill { kill_timeout } => {
-                    let child_id = child.id();
-                    if let Err(err) = child.start_kill() {
-                        match child.try_wait() {
-                            Ok(Some(status)) => return Ok(Some(status)),
-                            Ok(None) => {
-                                anyhow::bail!(
-                                    "wait timed out after {timeout:?}; failed to kill child (id={child_id:?}): {err}"
-                                )
+        let status = match status {
+            Some(status) => Some(status),
+            None => match &mut self.child {
+                Some(child) => match tokio::time::timeout(timeout, child.wait()).await {
+                    Ok(status) => Some(status?),
+                    Err(_) => match on_timeout {
+                        mcp_jsonrpc::WaitOnTimeout::ReturnError => {
+                            anyhow::bail!("wait timed out after {timeout:?}")
+                        }
+                        mcp_jsonrpc::WaitOnTimeout::Kill { kill_timeout } => {
+                            let child_id = child.id();
+                            if let Err(err) = child.start_kill() {
+                                match child.try_wait() {
+                                    Ok(Some(status)) => return Ok(Some(status)),
+                                    Ok(None) => {
+                                        anyhow::bail!(
+                                            "wait timed out after {timeout:?}; failed to kill child (id={child_id:?}): {err}"
+                                        )
+                                    }
+                                    Err(try_wait_err) => {
+                                        anyhow::bail!(
+                                            "wait timed out after {timeout:?}; failed to kill child (id={child_id:?}): {err}; try_wait failed: {try_wait_err}"
+                                        )
+                                    }
+                                }
                             }
-                            Err(try_wait_err) => {
-                                anyhow::bail!(
-                                    "wait timed out after {timeout:?}; failed to kill child (id={child_id:?}): {err}; try_wait failed: {try_wait_err}"
-                                )
+
+                            match tokio::time::timeout(kill_timeout, child.wait()).await {
+                                Ok(status) => Some(status?),
+                                Err(_) => anyhow::bail!(
+                                    "wait timed out after {timeout:?}; killed child (id={child_id:?}) but it did not exit within {kill_timeout:?}"
+                                ),
                             }
                         }
-                    }
-
-                    match tokio::time::timeout(kill_timeout, child.wait()).await {
-                        Ok(status) => Ok(Some(status?)),
-                        Err(_) => anyhow::bail!(
-                            "wait timed out after {timeout:?}; killed child (id={child_id:?}) but it did not exit within {kill_timeout:?}"
-                        ),
-                    }
-                }
+                    },
+                },
+                None => None,
             },
+        };
+
+        let handler_tasks = std::mem::take(&mut self.handler_tasks);
+        for task in handler_tasks {
+            if let Err(err) = task.await {
+                if err.is_panic() {
+                    anyhow::bail!("server handler task panicked");
+                }
+                anyhow::bail!("server handler task failed: {err}");
+            }
+        }
+
+        Ok(status)
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        for task in self.handler_tasks.drain(..) {
+            task.abort();
         }
     }
 }
@@ -220,13 +266,13 @@ impl Manager {
         timeout: Duration,
     ) -> Self {
         let mut manager = Self::new(client_name, client_version, timeout);
-        if let Some(protocol_version) = config.client.protocol_version.clone() {
+        if let Some(protocol_version) = config.client().protocol_version.clone() {
             manager = manager.with_protocol_version(protocol_version);
         }
-        if let Some(capabilities) = config.client.capabilities.clone() {
+        if let Some(capabilities) = config.client().capabilities.clone() {
             manager = manager.with_capabilities(capabilities);
         }
-        if let Some(roots) = config.client.roots.clone() {
+        if let Some(roots) = config.client().roots.clone() {
             manager = manager.with_roots(roots);
         }
         manager
@@ -341,19 +387,19 @@ impl Manager {
             return Ok(());
         }
 
-        let (client, child) = match server_cfg.transport {
+        let (client, child) = match server_cfg.transport() {
             Transport::Stdio => {
                 if self.trust_mode == TrustMode::Untrusted {
                     anyhow::bail!(
                         "refusing to spawn mcp server in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
                     );
                 }
-                if server_cfg.argv.is_empty() {
+                if server_cfg.argv().is_empty() {
                     anyhow::bail!("mcp server argv must not be empty");
                 }
 
                 let expanded_argv = server_cfg
-                    .argv
+                    .argv()
                     .iter()
                     .enumerate()
                     .map(|(idx, arg)| {
@@ -372,18 +418,18 @@ impl Manager {
                 cmd.stdin(Stdio::piped());
                 cmd.stdout(Stdio::piped());
                 cmd.stderr(Stdio::inherit());
-                if !server_cfg.inherit_env {
+                if !server_cfg.inherit_env() {
                     cmd.env_clear();
                     apply_stdio_baseline_env(&mut cmd);
                 }
-                for (key, value) in server_cfg.env.iter() {
+                for (key, value) in server_cfg.env().iter() {
                     let value = expand_placeholders_trusted(value, cwd)
                         .with_context(|| format!("expand env placeholder: {key}"))?;
                     cmd.env(key, value);
                 }
                 cmd.kill_on_drop(true);
 
-                let stdout_log = server_cfg.stdout_log.as_ref().map(|log| {
+                let stdout_log = server_cfg.stdout_log().map(|log| {
                     if !self.allow_stdout_log_outside_root && !log.path.starts_with(cwd) {
                         anyhow::bail!(
                             "mcp server {server_name}: stdout_log.path must be within root (set Manager::with_allow_stdout_log_outside_root(true) to override): {}",
@@ -408,7 +454,7 @@ impl Manager {
                 .with_context(|| {
                     format!(
                         "spawn mcp server (server={server_name}) argv redacted (argc={})",
-                        server_cfg.argv.len()
+                        server_cfg.argv().len()
                     )
                 })?;
                 let child = client.take_child();
@@ -421,8 +467,7 @@ impl Manager {
                     );
                 }
                 let unix_path = server_cfg
-                    .unix_path
-                    .as_ref()
+                    .unix_path()
                     .ok_or_else(|| anyhow::anyhow!("mcp server unix_path must be set"))?;
                 let client = mcp_jsonrpc::Client::connect_unix(unix_path)
                     .await
@@ -433,9 +478,9 @@ impl Manager {
             }
             Transport::StreamableHttp => {
                 let (sse_url_raw, post_url_raw) = match (
-                    server_cfg.url.as_deref(),
-                    server_cfg.sse_url.as_deref(),
-                    server_cfg.http_url.as_deref(),
+                    server_cfg.url(),
+                    server_cfg.sse_url(),
+                    server_cfg.http_url(),
                 ) {
                     (Some(url), None, None) => (url, url),
                     (None, Some(sse_url), Some(http_url)) => (sse_url, http_url),
@@ -446,7 +491,7 @@ impl Manager {
                     }
                 };
 
-                let (sse_url_field, post_url_field) = if server_cfg.url.is_some() {
+                let (sse_url_field, post_url_field) = if server_cfg.url().is_some() {
                     ("url", "url")
                 } else {
                     ("sse_url", "http_url")
@@ -511,7 +556,7 @@ impl Manager {
                 }
 
                 let mut headers: std::collections::HashMap<String, String> = server_cfg
-                    .http_headers
+                    .http_headers()
                     .iter()
                     .map(|(k, v)| {
                         let v = if self.trust_mode == TrustMode::Trusted {
@@ -529,7 +574,7 @@ impl Manager {
                     self.protocol_version.clone(),
                 );
 
-                if let Some(env_var) = server_cfg.bearer_token_env_var.as_deref() {
+                if let Some(env_var) = server_cfg.bearer_token_env_var() {
                     if self.trust_mode == TrustMode::Untrusted {
                         anyhow::bail!(
                             "refusing to read bearer token env var in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
@@ -540,14 +585,14 @@ impl Manager {
                     headers.insert("Authorization".to_string(), format!("Bearer {token}"));
                 }
 
-                if !server_cfg.env_http_headers.is_empty() {
+                if !server_cfg.env_http_headers().is_empty() {
                     if self.trust_mode == TrustMode::Untrusted {
                         anyhow::bail!(
                             "refusing to read http header env vars in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
                         );
                     }
 
-                    for (header, env_var) in server_cfg.env_http_headers.iter() {
+                    for (header, env_var) in server_cfg.env_http_headers().iter() {
                         let value = std::env::var(env_var)
                             .with_context(|| format!("read http header env var: {env_var}"))?;
                         headers.insert(header.to_string(), value);
@@ -683,7 +728,7 @@ impl Manager {
 
     fn connection_exited(&mut self, server_name: &str) -> Option<bool> {
         let conn = self.conns.get_mut(server_name)?;
-        Some(match &mut conn.child {
+        let exited = match &mut conn.child {
             Some(child) => {
                 if child.try_wait().ok().flatten().is_some() {
                     true
@@ -692,7 +737,17 @@ impl Manager {
                 }
             }
             None => conn.client.handle().is_closed(),
-        })
+        };
+
+        if exited {
+            return Some(true);
+        }
+
+        if conn.handler_tasks.iter().any(|task| task.is_finished()) {
+            return Some(true);
+        }
+
+        Some(false)
     }
 
     async fn install_connection(
@@ -701,22 +756,34 @@ impl Manager {
         mut client: mcp_jsonrpc::Client,
         child: Option<Child>,
     ) -> anyhow::Result<()> {
-        self.attach_client_handlers(server_name, &mut client);
+        let handler_tasks = self.attach_client_handlers(server_name, &mut client);
         let init_result = self.initialize(server_name, &client).await?;
 
         self.init_results
             .insert(server_name.to_string(), init_result);
-        self.conns
-            .insert(server_name.to_string(), Connection { child, client });
+        self.conns.insert(
+            server_name.to_string(),
+            Connection {
+                child,
+                client,
+                handler_tasks,
+            },
+        );
         Ok(())
     }
 
-    fn attach_client_handlers(&self, server_name: &str, client: &mut mcp_jsonrpc::Client) {
+    fn attach_client_handlers(
+        &self,
+        server_name: &str,
+        client: &mut mcp_jsonrpc::Client,
+    ) -> Vec<tokio::task::JoinHandle<()>> {
+        let mut tasks = Vec::new();
+
         if let Some(mut requests_rx) = client.take_requests() {
             let handler = self.server_request_handler.clone();
             let roots = self.roots.clone();
             let server_name = server_name.to_string();
-            tokio::spawn(async move {
+            tasks.push(tokio::spawn(async move {
                 while let Some(req) = requests_rx.recv().await {
                     let ctx = ServerRequestContext {
                         server_name: server_name.clone(),
@@ -755,13 +822,13 @@ impl Manager {
                         }
                     }
                 }
-            });
+            }));
         }
 
         if let Some(mut notifications_rx) = client.take_notifications() {
             let handler = self.server_notification_handler.clone();
             let server_name = server_name.to_string();
-            tokio::spawn(async move {
+            tasks.push(tokio::spawn(async move {
                 while let Some(note) = notifications_rx.recv().await {
                     let ctx = ServerNotificationContext {
                         server_name: server_name.clone(),
@@ -770,8 +837,10 @@ impl Manager {
                     };
                     handler(ctx).await;
                 }
-            });
+            }));
         }
+
+        tasks
     }
 
     pub async fn get_or_connect(
@@ -781,8 +850,7 @@ impl Manager {
         cwd: &Path,
     ) -> anyhow::Result<()> {
         let server_cfg = config
-            .servers
-            .get(server_name)
+            .server(server_name)
             .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
         self.connect(server_name, server_cfg, cwd).await
     }
@@ -824,8 +892,11 @@ impl Manager {
     }
 
     pub fn take_session(&mut self, server_name: &str) -> Option<Session> {
-        let connection = self.conns.remove(server_name)?;
-        let initialize_result = self.init_results.remove(server_name).unwrap_or(Value::Null);
+        let Some(connection) = self.conns.remove(server_name) else {
+            self.init_results.remove(server_name);
+            return None;
+        };
+        let initialize_result = self.init_results.remove(server_name)?;
         Some(Session::new(
             server_name.to_string(),
             connection,
@@ -1442,7 +1513,7 @@ fn validate_streamable_http_config(
 
     validate_streamable_http_url_untrusted(policy, server_name, url_field, url)?;
 
-    for header in server_cfg.http_headers.keys() {
+    for header in server_cfg.http_headers().keys() {
         if is_untrusted_sensitive_http_header(header) {
             anyhow::bail!(
                 "refusing to send sensitive http header in untrusted mode: {server_name} header={header} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
@@ -1715,7 +1786,6 @@ fn normalize_ip(ip: IpAddr) -> IpAddr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
@@ -2143,20 +2213,7 @@ mod tests {
         let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
         assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
 
-        let server_cfg = ServerConfig {
-            transport: Transport::Stdio,
-            argv: vec!["mcp-server".to_string()],
-            inherit_env: true,
-            unix_path: None,
-            url: None,
-            sse_url: None,
-            http_url: None,
-            bearer_token_env_var: None,
-            http_headers: BTreeMap::new(),
-            env_http_headers: BTreeMap::new(),
-            env: BTreeMap::new(),
-            stdout_log: None,
-        };
+        let server_cfg = ServerConfig::stdio(vec!["mcp-server".to_string()]).unwrap();
 
         let err = manager
             .connect("srv", &server_cfg, Path::new("."))
@@ -2199,20 +2256,7 @@ mod tests {
         let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
         assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
 
-        let server_cfg = ServerConfig {
-            transport: Transport::Unix,
-            argv: Vec::new(),
-            inherit_env: true,
-            unix_path: Some(PathBuf::from("/tmp/mcp.sock")),
-            url: None,
-            sse_url: None,
-            http_url: None,
-            bearer_token_env_var: None,
-            http_headers: BTreeMap::new(),
-            env_http_headers: BTreeMap::new(),
-            env: BTreeMap::new(),
-            stdout_log: None,
-        };
+        let server_cfg = ServerConfig::unix(PathBuf::from("/tmp/mcp.sock")).unwrap();
 
         let err = manager
             .connect("srv", &server_cfg, Path::new("."))
@@ -2226,20 +2270,8 @@ mod tests {
         let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
         assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
 
-        let server_cfg = ServerConfig {
-            transport: Transport::StreamableHttp,
-            argv: Vec::new(),
-            inherit_env: true,
-            unix_path: None,
-            url: Some("https://example.com/mcp".to_string()),
-            sse_url: None,
-            http_url: None,
-            bearer_token_env_var: Some("MCP_TOKEN".to_string()),
-            http_headers: BTreeMap::new(),
-            env_http_headers: BTreeMap::new(),
-            env: BTreeMap::new(),
-            stdout_log: None,
-        };
+        let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+        server_cfg.set_bearer_token_env_var(Some("MCP_TOKEN".to_string()));
 
         let err = manager
             .connect("srv", &server_cfg, Path::new("."))
@@ -2253,20 +2285,7 @@ mod tests {
         let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
         assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
 
-        let server_cfg = ServerConfig {
-            transport: Transport::StreamableHttp,
-            argv: Vec::new(),
-            inherit_env: true,
-            unix_path: None,
-            url: Some("http://example.com/mcp".to_string()),
-            sse_url: None,
-            http_url: None,
-            bearer_token_env_var: None,
-            http_headers: BTreeMap::new(),
-            env_http_headers: BTreeMap::new(),
-            env: BTreeMap::new(),
-            stdout_log: None,
-        };
+        let server_cfg = ServerConfig::streamable_http("http://example.com/mcp").unwrap();
 
         let err = manager
             .connect("srv", &server_cfg, Path::new("."))
@@ -2280,20 +2299,7 @@ mod tests {
         let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
         assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
 
-        let server_cfg = ServerConfig {
-            transport: Transport::StreamableHttp,
-            argv: Vec::new(),
-            inherit_env: true,
-            unix_path: None,
-            url: Some("https://localhost/mcp".to_string()),
-            sse_url: None,
-            http_url: None,
-            bearer_token_env_var: None,
-            http_headers: BTreeMap::new(),
-            env_http_headers: BTreeMap::new(),
-            env: BTreeMap::new(),
-            stdout_log: None,
-        };
+        let server_cfg = ServerConfig::streamable_http("https://localhost/mcp").unwrap();
 
         let err = manager
             .connect("srv", &server_cfg, Path::new("."))
@@ -2307,20 +2313,8 @@ mod tests {
         let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
         assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
 
-        let server_cfg = ServerConfig {
-            transport: Transport::StreamableHttp,
-            argv: Vec::new(),
-            inherit_env: true,
-            unix_path: None,
-            url: Some("https://localhost.localdomain/mcp".to_string()),
-            sse_url: None,
-            http_url: None,
-            bearer_token_env_var: None,
-            http_headers: BTreeMap::new(),
-            env_http_headers: BTreeMap::new(),
-            env: BTreeMap::new(),
-            stdout_log: None,
-        };
+        let server_cfg =
+            ServerConfig::streamable_http("https://localhost.localdomain/mcp").unwrap();
 
         let err = manager
             .connect("srv", &server_cfg, Path::new("."))
@@ -2334,20 +2328,7 @@ mod tests {
         let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
         assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
 
-        let server_cfg = ServerConfig {
-            transport: Transport::StreamableHttp,
-            argv: Vec::new(),
-            inherit_env: true,
-            unix_path: None,
-            url: Some("https://example/mcp".to_string()),
-            sse_url: None,
-            http_url: None,
-            bearer_token_env_var: None,
-            http_headers: BTreeMap::new(),
-            env_http_headers: BTreeMap::new(),
-            env: BTreeMap::new(),
-            stdout_log: None,
-        };
+        let server_cfg = ServerConfig::streamable_http("https://example/mcp").unwrap();
 
         let err = manager
             .connect("srv", &server_cfg, Path::new("."))
@@ -2361,20 +2342,7 @@ mod tests {
         let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
         assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
 
-        let server_cfg = ServerConfig {
-            transport: Transport::StreamableHttp,
-            argv: Vec::new(),
-            inherit_env: true,
-            unix_path: None,
-            url: Some("https://192.168.0.10/mcp".to_string()),
-            sse_url: None,
-            http_url: None,
-            bearer_token_env_var: None,
-            http_headers: BTreeMap::new(),
-            env_http_headers: BTreeMap::new(),
-            env: BTreeMap::new(),
-            stdout_log: None,
-        };
+        let server_cfg = ServerConfig::streamable_http("https://192.168.0.10/mcp").unwrap();
 
         let err = manager
             .connect("srv", &server_cfg, Path::new("."))
@@ -2391,20 +2359,7 @@ mod tests {
         let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
         assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
 
-        let server_cfg = ServerConfig {
-            transport: Transport::StreamableHttp,
-            argv: Vec::new(),
-            inherit_env: true,
-            unix_path: None,
-            url: Some("https://[::ffff:127.0.0.1]/mcp".to_string()),
-            sse_url: None,
-            http_url: None,
-            bearer_token_env_var: None,
-            http_headers: BTreeMap::new(),
-            env_http_headers: BTreeMap::new(),
-            env: BTreeMap::new(),
-            stdout_log: None,
-        };
+        let server_cfg = ServerConfig::streamable_http("https://[::ffff:127.0.0.1]/mcp").unwrap();
 
         let err = manager
             .connect("srv", &server_cfg, Path::new("."))
@@ -2421,20 +2376,8 @@ mod tests {
         let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
         assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
 
-        let server_cfg = ServerConfig {
-            transport: Transport::StreamableHttp,
-            argv: Vec::new(),
-            inherit_env: true,
-            unix_path: None,
-            url: Some("https://user:pass@example.com/mcp".to_string()),
-            sse_url: None,
-            http_url: None,
-            bearer_token_env_var: None,
-            http_headers: BTreeMap::new(),
-            env_http_headers: BTreeMap::new(),
-            env: BTreeMap::new(),
-            stdout_log: None,
-        };
+        let server_cfg =
+            ServerConfig::streamable_http("https://user:pass@example.com/mcp").unwrap();
 
         let err = manager
             .connect("srv", &server_cfg, Path::new("."))
@@ -2448,26 +2391,11 @@ mod tests {
         let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
         assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
 
-        let mut http_headers = BTreeMap::new();
-        http_headers.insert(
+        let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+        server_cfg.http_headers_mut().insert(
             "Authorization".to_string(),
             "Bearer local-secret".to_string(),
         );
-
-        let server_cfg = ServerConfig {
-            transport: Transport::StreamableHttp,
-            argv: Vec::new(),
-            inherit_env: true,
-            unix_path: None,
-            url: Some("https://example.com/mcp".to_string()),
-            sse_url: None,
-            http_url: None,
-            bearer_token_env_var: None,
-            http_headers,
-            env_http_headers: BTreeMap::new(),
-            env: BTreeMap::new(),
-            stdout_log: None,
-        };
 
         let err = manager
             .connect("srv", &server_cfg, Path::new("."))
@@ -2613,23 +2541,11 @@ mod tests {
         let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
             .with_trust_mode(TrustMode::Trusted);
 
-        let server_cfg = ServerConfig {
-            transport: Transport::Stdio,
-            argv: vec![
-                "mcp-server-bin".to_string(),
-                "--auth=Bearer SECRET_TOKEN-${BAD-NAME}".to_string(),
-            ],
-            inherit_env: true,
-            unix_path: None,
-            url: None,
-            sse_url: None,
-            http_url: None,
-            bearer_token_env_var: None,
-            http_headers: BTreeMap::new(),
-            env_http_headers: BTreeMap::new(),
-            env: BTreeMap::new(),
-            stdout_log: None,
-        };
+        let server_cfg = ServerConfig::stdio(vec![
+            "mcp-server-bin".to_string(),
+            "--auth=Bearer SECRET_TOKEN-${BAD-NAME}".to_string(),
+        ])
+        .unwrap();
 
         let err = manager
             .connect("srv", &server_cfg, Path::new("."))
@@ -2677,20 +2593,9 @@ mod tests {
         let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
             .with_trust_mode(TrustMode::Trusted);
 
-        let server_cfg = ServerConfig {
-            transport: Transport::StreamableHttp,
-            argv: Vec::new(),
-            inherit_env: true,
-            unix_path: None,
-            url: Some("https://example.com/mcp?token=SECRET_TOKEN_${BAD-NAME}".to_string()),
-            sse_url: None,
-            http_url: None,
-            bearer_token_env_var: None,
-            http_headers: BTreeMap::new(),
-            env_http_headers: BTreeMap::new(),
-            env: BTreeMap::new(),
-            stdout_log: None,
-        };
+        let server_cfg =
+            ServerConfig::streamable_http("https://example.com/mcp?token=SECRET_TOKEN_${BAD-NAME}")
+                .unwrap();
 
         let err = manager
             .connect("srv", &server_cfg, Path::new("."))

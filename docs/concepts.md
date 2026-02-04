@@ -84,7 +84,7 @@ MCP 的 roots 能力用于让 client 告诉 server：“我允许你把哪些目
 CLI 中：
 
 - 默认等价于 `Untrusted`
-- `mcpctl --trust` 等价于 `Trusted`
+- `mcpctl --trust --yes-trust` 等价于 `Trusted`
 
 ## UntrustedStreamableHttpPolicy（不完全信任下的出站策略）
 

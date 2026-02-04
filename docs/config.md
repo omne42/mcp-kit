@@ -50,7 +50,7 @@ CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
 >
 > - 有些工具会在同一个文件中同时包含其它顶层字段（例如 `plugin.json` 里的 `"version": "1.0.0"`）。只要存在 `mcpServers`，`Config::load` 就会按该 wrapper 解析。
 > - `mcpServers` 既支持 inline object，也支持 string（指向 `./.mcp.json` 等文件路径，按 config 文件所在目录解析）。安全起见，该路径必须为相对路径、不得包含 `..`，并且会做 canonicalize 后校验“解析结果仍位于 `--root` 之下”；允许 `--root` 内部的 symlink（例如 worktree/monorepo 目录结构），但禁止通过 symlink 越界。
-> - 当启用 Trusted mode（CLI `--trust` / `TrustMode::Trusted`）时，`transport=stdio` 的 `argv/env` 以及 `transport=streamable_http` 的 `url/sse_url/http_url/http_headers` 支持 `${VAR}` 占位符（从当前进程环境变量读取）。`${CLAUDE_PLUGIN_ROOT}` / `${MCP_ROOT}` 会替换为 `cwd/--root`。
+> - 当启用 Trusted mode（CLI `--trust --yes-trust` / `TrustMode::Trusted`）时，`transport=stdio` 的 `argv/env` 以及 `transport=streamable_http` 的 `url/sse_url/http_url/http_headers` 支持 `${VAR}` 占位符（从当前进程环境变量读取）。`${CLAUDE_PLUGIN_ROOT}` / `${MCP_ROOT}` 会替换为 `cwd/--root`。
 
 ### Claude Code `.mcp.json` 直接 server map
 
@@ -130,7 +130,7 @@ CLI 可用 `--config <path>` 覆盖（绝对或相对 `--root`）。
 字段：
 
 - `argv`（必填）：非空数组；每项必须非空字符串
-- `inherit_env`（可选，默认 `true`）：是否继承当前进程环境变量。若为 `false`，会清空子进程环境，只透传少量基础变量并再注入 `env`，以降低宿主 secrets 泄露风险：
+- `inherit_env`（可选，默认 `false`）：是否继承当前进程环境变量。若为 `false`，会清空子进程环境，只透传少量基础变量并再注入 `env`，以降低宿主 secrets 泄露风险：
   - 基线 env 白名单（当前实现）：`PATH`、`HOME`、`USERPROFILE`、`TMPDIR`、`TEMP`、`TMP`、`SystemRoot`、`SYSTEMROOT`
   - 兼容性提示：如果你的 server 依赖其它变量（如 `LANG/LC_*`、`XDG_*`、证书/代理相关变量等），请显式写入 `servers.<name>.env`（或保持 `inherit_env=true`）
 - `env`（可选）：KV 字典，注入到 child process
@@ -146,7 +146,7 @@ stdout_log 的旋转文件命名/保留策略见 [`日志与观测`](logging.md)
 
 安全：
 
-- 默认 `TrustMode::Untrusted` 会拒绝 `stdio`（避免不可信仓库导致本地执行）。需要显式 `--trust` 或 `Manager::with_trust_mode(Trusted)`。
+- 默认 `TrustMode::Untrusted` 会拒绝 `stdio`（避免不可信仓库导致本地执行）。需要显式 `--trust --yes-trust` 或 `Manager::with_trust_mode(Trusted)`。
 
 ## transport=unix
 

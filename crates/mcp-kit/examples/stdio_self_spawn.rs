@@ -1,8 +1,7 @@
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use mcp_kit::{MCP_PROTOCOL_VERSION, Manager, ServerConfig, Transport, TrustMode, mcp};
+use mcp_kit::{MCP_PROTOCOL_VERSION, Manager, ServerConfig, TrustMode, mcp};
 
 fn print_help() {
     eprintln!("Usage:");
@@ -35,20 +34,7 @@ async fn client_main() -> Result<()> {
     let exe = std::env::current_exe().context("resolve current executable path")?;
     let argv = vec![exe.to_string_lossy().to_string(), "--server".to_string()];
 
-    let server_cfg = ServerConfig {
-        transport: Transport::Stdio,
-        argv,
-        inherit_env: true,
-        unix_path: None,
-        url: None,
-        sse_url: None,
-        http_url: None,
-        bearer_token_env_var: None,
-        http_headers: BTreeMap::new(),
-        env_http_headers: BTreeMap::new(),
-        env: BTreeMap::new(),
-        stdout_log: None,
-    };
+    let server_cfg = ServerConfig::stdio(argv)?;
 
     let mut manager = Manager::new(
         "stdio-self-spawn-client",

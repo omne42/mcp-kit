@@ -90,14 +90,14 @@ async fn main() -> Result<()> {
         Some(name) => name,
         None => {
             print_help();
-            if config.servers.is_empty() {
+            if config.servers().is_empty() {
                 eprintln!();
                 eprintln!("No servers found in mcp.json.");
                 return Ok(());
             }
             eprintln!();
             eprintln!("Available servers from mcp.json:");
-            for name in config.servers.keys() {
+            for name in config.servers().keys() {
                 eprintln!("  {name}");
             }
             return Ok(());

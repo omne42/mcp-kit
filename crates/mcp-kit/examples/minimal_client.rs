@@ -13,23 +13,23 @@ async fn main() -> Result<()> {
         None => {
             eprintln!("usage: cargo run -p mcp-kit --example minimal_client -- <server>");
             eprintln!("available servers:");
-            for name in config.servers.keys() {
+            for name in config.servers().keys() {
                 eprintln!("  {name}");
             }
             return Ok(());
         }
     };
 
-    let Some(server_cfg) = config.servers.get(&server_name) else {
+    let Some(server_cfg) = config.server(&server_name) else {
         eprintln!("unknown server: {server_name}");
         eprintln!("available servers:");
-        for name in config.servers.keys() {
+        for name in config.servers().keys() {
             eprintln!("  {name}");
         }
         return Ok(());
     };
 
-    if server_cfg.transport != Transport::StreamableHttp {
+    if server_cfg.transport() != Transport::StreamableHttp {
         eprintln!(
             "note: minimal_client runs in Untrusted mode by default and only supports transport=streamable_http."
         );

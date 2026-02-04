@@ -7,7 +7,7 @@
 
 ## [Unreleased]
 
-## [0.1.1] - Unreleased
+> 计划下一个版本：`0.2.0`（包含若干 breaking changes；见下文标注）。
 
 ### Added
 - `mcp-kit`：新增 `Manager::disconnect_and_wait` + `Connection::{wait, wait_with_timeout}` + `Session::{wait, wait_with_timeout}`，用于更明确的关闭/回收语义。
@@ -18,11 +18,12 @@
 - `mcp-jsonrpc`：新增 `ClientStats` / `Client::stats()` / `ClientHandle::stats()`，统计无效 JSON 行与因队列满/关闭导致的 notifications 丢弃数量。
 - `mcp-jsonrpc`：新增 `Client::connect_streamable_http_split_with_options(sse_url, http_url, ...)`，支持分离的 SSE 与 POST URL。
 - `mcp-jsonrpc`：新增 `Client::wait_with_timeout(timeout, on_timeout)` 与 `WaitOnTimeout`，支持带超时等待 child 退出（可选 kill）。
-- `mcp-jsonrpc`：新增 `Error::is_wait_timeout()`，便于在代码中判断 wait 超时错误（使用稳定 marker，不依赖具体报错文案）。
+- `mcp-jsonrpc`：新增 `Error::is_wait_timeout()`，便于在代码中判断 wait 超时错误（基于稳定 kind，不依赖具体报错文案）。
 - `mcp-kit`：`mcp.json`（v1）解析、MCP server 连接与连接缓存管理（`Config/Manager/Connection`）。
 - `mcpctl`：基于配置的 MCP CLI（list-servers/list-tools/list-resources/list-prompts/call）。
 - `mcpctl`：新增 `--dns-check`，可选启用 Untrusted 下的 hostname DNS 校验。
 - `mcpctl`：新增 `--dns-timeout-ms` 与 `--dns-fail-open`，用于调整 DNS 校验的超时与 fail-open 策略（仅在 `--dns-check` 开启时生效）。
+- `mcpctl`：新增 `--yes-trust`、`--allow-config-outside-root` 与 `--no-dns-check`（用于更显式的安全开关与边界控制）。
 - `McpRequest` / `McpNotification`：轻量 typed method trait + `Manager::{request_typed, notify_typed}`。
 - `mcp_kit::mcp`：常用 MCP methods 的轻量 typed wrapper 子集（参考 `docs/examples.md`）。
 - `transport=streamable_http`：原生支持远程 MCP server（HTTP SSE + POST），配置字段 `servers.<name>.url`。
@@ -30,7 +31,7 @@
 - `TrustMode`：安全默认不信任本地配置；需要显式切换到 Trusted 才允许从配置启动/连接 server。
 - `roots/list`：当配置了 `client.roots` 时，内建响应 server→client request，并自动声明 `capabilities.roots`。
 - `Manager::{connect_io, connect_jsonrpc}`：支持接入自定义 JSON-RPC 连接（需要 `TrustMode::Trusted`）。
-- `ServerConfig::streamable_http_split(sse_url, http_url)`：便捷构造 split URL 的 `transport=streamable_http` 配置（用于手写/测试场景）。
+- `ServerConfig::streamable_http_split(sse_url, http_url)`：便捷构造 split URL 的 `transport=streamable_http` 配置（用于手写/测试场景；现在返回 `Result`）。
 - `Manager::initialize_result`：暴露 server initialize 响应。
 - `Manager`：补齐 MCP 常用请求便捷方法（`ping`、`resources/templates/list`、`resources/read`、`resources/subscribe`、`resources/unsubscribe`、`prompts/get`、`logging/setLevel`、`completion/complete`）。
 - `Session`：单连接 MCP 会话（从 `Manager` 取出后可独立调用 `request/notify` 与便捷方法）。
@@ -42,11 +43,15 @@
 - Examples: add runnable `stdio_self_spawn` and `unix_loopback` to demonstrate self-contained stdio/unix transports.
 - Docs: add a quick example index at `example/README.md`.
 - Docs: expand runnable examples section and clarify Untrusted/Trusted usage in `docs/examples.md`.
-- `mcp-kit`：`transport=stdio` 新增 `servers.<name>.inherit_env`（默认 `true`），用于控制是否继承宿主环境变量；当为 `false` 时会清空子进程 env 并仅透传少量基础变量，再注入 `servers.<name>.env` 以降低 secrets 泄露风险。
+- `mcp-kit`：`transport=stdio` 新增 `servers.<name>.inherit_env`（默认 `false`），用于控制是否继承宿主环境变量；当为 `false` 时会清空子进程 env 并仅透传少量基础变量，再注入 `servers.<name>.env` 以降低 secrets 泄露风险。
 - `mcpctl`：新增 `--show-argv`（`list-servers` 显式输出 argv）与 `--allow-stdout-log-outside-root`（允许 stdout_log 写到 `--root` 外）。
 - `mcp-kit`：新增 `Manager::with_allow_stdout_log_outside_root(bool)`，用于显式放开 stdout_log 写入范围。
 
 ### Changed
+- `mcp-jsonrpc`（BREAKING）：`Error::Protocol` 现在返回结构化的 `ProtocolError { kind: ProtocolErrorKind, message: String }`，便于下游稳定匹配错误类型。
+- `mcp-kit`（BREAKING）：`Config` / `ServerConfig` / `Connection` 的字段现在改为私有；新增 getter/setter/构造器以便未来收紧不变量与演进 API。
+- `mcp-kit`（BREAKING）：`transport=stdio` 的 `inherit_env` 默认改为 `false`（更安全；如需继承宿主环境变量请显式设置为 `true`）。
+- `mcpctl`（BREAKING）：`--trust` 现在需要 `--yes-trust`；`--allow-host` 默认启用 DNS 校验（可用 `--no-dns-check` 关闭）；`--config` 默认要求在 `--root` 内（可用 `--allow-config-outside-root` 覆盖）。
 - `mcp-kit`（BREAKING）：`Manager::{connect_io, connect_jsonrpc}` 现在默认要求 `TrustMode::Trusted`；如需显式绕过可用 `*_unchecked` 变体（用于测试/受控环境）。
 - `mcp-kit`（BREAKING）：外部兼容格式中 `sse_url`/`http_url` 现在要求成对出现；单独设置会 fail-closed（单端点请用 `url`）。
 - `mcp-kit`：`Manager` 的 request/notify 错误上下文现在包含 `server=<name>`，便于多 server 场景排查。

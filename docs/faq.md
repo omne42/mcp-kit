@@ -9,7 +9,7 @@
 
 `mcp-kit` 默认 `TrustMode::Untrusted`，会拒绝这两类危险动作。需要显式信任：
 
-- CLI：`mcpctl --trust ...`
+- CLI：`mcpctl --trust --yes-trust ...`
 - 代码：`Manager::with_trust_mode(TrustMode::Trusted)`
 
 详见 [`安全模型`](security.md)。
@@ -20,7 +20,7 @@
 
 如果你确实要用认证 header：
 
-- 用 `--trust`（或 `TrustMode::Trusted`）
+- 用 `--trust --yes-trust`（或 `TrustMode::Trusted`）
 - 或者在你自己的上层代码里自行注入 header（但同样建议只在可信环境启用）
 
 ## Q：`mcp_kit::mcp` 的 typed wrapper 为什么不全？

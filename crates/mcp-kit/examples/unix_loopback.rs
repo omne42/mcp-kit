@@ -1,10 +1,9 @@
 #[cfg(unix)]
 mod unix {
-    use std::collections::BTreeMap;
     use std::time::Duration;
 
     use anyhow::{Context, Result};
-    use mcp_kit::{MCP_PROTOCOL_VERSION, Manager, ServerConfig, Transport, TrustMode, mcp};
+    use mcp_kit::{MCP_PROTOCOL_VERSION, Manager, ServerConfig, TrustMode, mcp};
     use tokio::net::UnixListener;
 
     fn print_help() {
@@ -44,20 +43,7 @@ mod unix {
             serve(server).await
         });
 
-        let server_cfg = ServerConfig {
-            transport: Transport::Unix,
-            argv: Vec::new(),
-            inherit_env: true,
-            unix_path: Some(socket_path),
-            url: None,
-            sse_url: None,
-            http_url: None,
-            bearer_token_env_var: None,
-            http_headers: BTreeMap::new(),
-            env_http_headers: BTreeMap::new(),
-            env: BTreeMap::new(),
-            stdout_log: None,
-        };
+        let server_cfg = ServerConfig::unix(socket_path)?;
 
         let mut manager = Manager::new(
             "unix-loopback-client",

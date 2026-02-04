@@ -35,9 +35,9 @@ let mut manager = mcp_kit::Manager::from_config(
 );
 ```
 
-它会把 `config.client.protocol_version / capabilities / roots` 自动灌入 `Manager`：
+它会把 `config.client().protocol_version / capabilities / roots` 自动灌入 `Manager`：
 
-- `protocol_version`：用于 MCP `initialize`，并在 `streamable_http` 下加到请求 header `MCP-Protocol-Version`。
+- `protocol_version`：用于 MCP `initialize`，并在 `streamable_http` 下加到请求 header `MCP-Protocol-Version`。当前实现会对 initialize 返回的 `protocolVersion` 做严格一致性校验（mismatch 会 fail-closed 报错）。
 - `capabilities`：透传到 initialize；如果启用了 roots，会确保声明 `capabilities.roots`。
 - `roots`：启用后会内建响应 server→client 的 `roots/list`（见下文“server→client handler”）。
 

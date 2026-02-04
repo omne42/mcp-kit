@@ -22,7 +22,7 @@
 CLI 对应：
 
 - `mcpctl` 默认等价于 `Untrusted`
-- `mcpctl --trust` 等价于 `Trusted`
+- `mcpctl --trust --yes-trust` 等价于 `Trusted`
 
 ## Untrusted 下的具体限制（行为精确对应代码实现）
 
@@ -65,7 +65,7 @@ CLI 对应：
 
 ### A. 完全信任（最简单）
 
-- CLI：`mcpctl --trust ...`
+- CLI：`mcpctl --trust --yes-trust ...`
 - 代码：`Manager::with_trust_mode(TrustMode::Trusted)`
 
 适用：你明确知道自己在可信仓库、可信二进制、可信网络环境中。
@@ -91,7 +91,7 @@ CLI 对应：
 
 但请注意：为了防止“不可信仓库借配置外带本机 secrets”，上述两项在 `Untrusted` 下会被拒绝读取，因此需要：
 
-- CLI：`--trust`
+- CLI：`--trust --yes-trust`
 - 或代码：`Manager::with_trust_mode(TrustMode::Trusted)`
 
 ## 重要注意点（限制与最佳实践）

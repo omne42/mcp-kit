@@ -94,7 +94,7 @@ impl Session {
     pub async fn request(&self, method: &str, params: Option<Value>) -> anyhow::Result<Value> {
         let outcome = tokio::time::timeout(
             self.request_timeout,
-            self.connection.client.request_optional(method, params),
+            self.connection.client().request_optional(method, params),
         )
         .await;
         outcome
@@ -110,7 +110,7 @@ impl Session {
     pub async fn notify(&self, method: &str, params: Option<Value>) -> anyhow::Result<()> {
         let outcome = tokio::time::timeout(
             self.request_timeout,
-            self.connection.client.notify(method, params),
+            self.connection.client().notify(method, params),
         )
         .await;
         outcome

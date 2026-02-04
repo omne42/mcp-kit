@@ -17,9 +17,9 @@
 
 ## 核心数据结构
 
-- `Config { client, servers: BTreeMap<String, ServerConfig> }`
+- `Config`：包含 `client` 与 `servers`（server name → `ServerConfig`）
 - `Manager`：连接缓存 + MCP initialize + request/notify 便捷方法
-- `Connection { child: Option<Child>, client }`（unix 连接没有 child）
+- `Connection`：封装 child/client（stdio 有 child；unix/streamable_http 无），并提供 `wait*`/`client()`/`take_child()` 等接口
 - `McpRequest` / `McpNotification`：轻量 typed method 抽象（参考 `docs/examples.md` 的用法示例）
 - `mcp_kit::mcp`：常用 MCP method 的轻量 typed wrapper 子集（可选使用）
 - `Session`：单连接 MCP 会话（已完成 initialize，可直接 request/notify 与调用便捷方法）
@@ -29,7 +29,7 @@
 
 以 `Manager::request(...)` 为例：
 
-1. 若未连接：根据 `ServerConfig.transport` 建立 JSON-RPC 连接（stdio/unix/streamable_http）
+1. 若未连接：根据 `ServerConfig::transport()` 建立 JSON-RPC 连接（stdio/unix/streamable_http）
 2. 调用 MCP `initialize`，并缓存 initialize result
 3. 发送 `notifications/initialized`
 4. 发送用户请求（例如 `tools/list`）

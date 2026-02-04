@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
 
     let cwd = std::env::current_dir()?;
 
-    let server_cfg = ServerConfig::streamable_http_split(sse_url, http_url);
+    let server_cfg = ServerConfig::streamable_http_split(sse_url, http_url)?;
 
     let mut manager = Manager::new(
         "streamable-http-split",

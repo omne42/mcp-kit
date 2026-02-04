@@ -171,15 +171,57 @@ pub enum Error {
         data: Option<Value>,
     },
     #[error("protocol error: {0}")]
-    Protocol(String),
+    Protocol(ProtocolError),
 }
 
-const WAIT_TIMEOUT_MARKER: &str = "[mcp-jsonrpc wait_timeout]";
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ProtocolErrorKind {
+    /// The client/transport was closed (explicitly or via drop).
+    Closed,
+    /// Waiting for a child process to exit timed out.
+    WaitTimeout,
+    /// The peer sent an invalid JSON / JSON-RPC message.
+    InvalidMessage,
+    /// Invalid user input (e.g. invalid header name/value).
+    InvalidInput,
+    /// Streamable HTTP transport error (SSE/POST bridge).
+    StreamableHttp,
+    /// Catch-all for internal invariants.
+    Other,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProtocolError {
+    pub kind: ProtocolErrorKind,
+    pub message: String,
+}
+
+impl ProtocolError {
+    pub fn new(kind: ProtocolErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ProtocolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.message.fmt(f)
+    }
+}
+
+impl std::error::Error for ProtocolError {}
 
 impl Error {
+    pub fn protocol(kind: ProtocolErrorKind, message: impl Into<String>) -> Self {
+        Self::Protocol(ProtocolError::new(kind, message))
+    }
+
     /// Returns true if this error was produced by `Client::wait_with_timeout`.
     pub fn is_wait_timeout(&self) -> bool {
-        matches!(self, Error::Protocol(msg) if msg.starts_with(WAIT_TIMEOUT_MARKER))
+        matches!(self, Error::Protocol(err) if err.kind == ProtocolErrorKind::WaitTimeout)
     }
 }
 
@@ -310,13 +352,16 @@ impl ClientHandle {
             .ok()
             .and_then(|guard| guard.clone())
             .unwrap_or_else(|| "client closed".to_string());
-        Err(Error::Protocol(reason))
+        Err(Error::protocol(ProtocolErrorKind::Closed, reason))
     }
 
     pub(crate) async fn close_with_reason(&self, reason: impl Into<String>) {
         let reason = reason.into();
-        self.close_with_error(reason.clone(), Error::Protocol(reason))
-            .await;
+        self.close_with_error(
+            reason.clone(),
+            Error::protocol(ProtocolErrorKind::Closed, reason),
+        )
+        .await;
     }
 
     pub(crate) async fn close_with_error(&self, reason: impl Into<String>, err: Error) {
@@ -395,7 +440,10 @@ impl ClientHandle {
                 guard.disarm();
                 result
             }
-            Err(_) => Err(Error::Protocol("response channel closed".to_string())),
+            Err(_) => Err(Error::protocol(
+                ProtocolErrorKind::Closed,
+                "response channel closed",
+            )),
         }
     }
 
@@ -563,11 +611,10 @@ impl Client {
         let stdin = child
             .stdin
             .take()
-            .ok_or_else(|| Error::Protocol("child stdin not captured".to_string()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| Error::Protocol("child stdout not captured".to_string()))?;
+            .ok_or_else(|| Error::protocol(ProtocolErrorKind::Other, "child stdin not captured"))?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            Error::protocol(ProtocolErrorKind::Other, "child stdout not captured")
+        })?;
 
         Self::create(stdout, stdin, Some(child), options).await
     }
@@ -582,8 +629,9 @@ impl Client {
         #[cfg(not(unix))]
         {
             let _ = path;
-            Err(Error::Protocol(
-                "unix socket client is only supported on unix".to_string(),
+            Err(Error::protocol(
+                ProtocolErrorKind::InvalidInput,
+                "unix socket client is only supported on unix",
             ))
         }
     }
@@ -629,18 +677,22 @@ impl Client {
                 Some(timeout) => match tokio::time::timeout(timeout, send).await {
                     Ok(resp) => resp,
                     Err(_) => {
-                        return Err(Error::Protocol(
-                            "connect streamable http failed: request timed out".to_string(),
+                        return Err(Error::protocol(
+                            ProtocolErrorKind::StreamableHttp,
+                            "connect streamable http failed: request timed out",
                         ));
                     }
                 },
                 None => send.await,
             }
             .map_err(|err| {
-                Error::Protocol(format!(
-                    "connect streamable http failed: {}",
-                    redact_reqwest_error(&err)
-                ))
+                Error::protocol(
+                    ProtocolErrorKind::StreamableHttp,
+                    format!(
+                        "connect streamable http failed: {}",
+                        redact_reqwest_error(&err)
+                    ),
+                )
             })?;
 
             if resp.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
@@ -648,10 +700,13 @@ impl Client {
             }
 
             if !resp.status().is_success() {
-                return Err(Error::Protocol(format!(
-                    "streamable http SSE connect failed: status={}",
-                    resp.status()
-                )));
+                return Err(Error::protocol(
+                    ProtocolErrorKind::StreamableHttp,
+                    format!(
+                        "streamable http SSE connect failed: status={}",
+                        resp.status()
+                    ),
+                ));
             }
 
             let content_type = resp
@@ -661,9 +716,12 @@ impl Client {
                 .unwrap_or("");
             let content_type_lower = content_type.to_ascii_lowercase();
             if !content_type_lower.starts_with("text/event-stream") {
-                return Err(Error::Protocol(format!(
-                    "streamable http SSE connect failed: expected content-type text/event-stream, got {content_type}"
-                )));
+                return Err(Error::protocol(
+                    ProtocolErrorKind::StreamableHttp,
+                    format!(
+                        "streamable http SSE connect failed: expected content-type text/event-stream, got {content_type}"
+                    ),
+                ));
             }
 
             if let Some(value) = resp.headers().get("mcp-session-id") {
@@ -684,10 +742,18 @@ impl Client {
 
         let mut headers = reqwest::header::HeaderMap::new();
         for (key, value) in http_options.headers {
-            let name = reqwest::header::HeaderName::from_bytes(key.as_bytes())
-                .map_err(|_| Error::Protocol(format!("invalid http header name: {key}")))?;
-            let value = reqwest::header::HeaderValue::from_str(&value)
-                .map_err(|_| Error::Protocol(format!("invalid http header value: {key}")))?;
+            let name = reqwest::header::HeaderName::from_bytes(key.as_bytes()).map_err(|_| {
+                Error::protocol(
+                    ProtocolErrorKind::InvalidInput,
+                    format!("invalid http header name: {key}"),
+                )
+            })?;
+            let value = reqwest::header::HeaderValue::from_str(&value).map_err(|_| {
+                Error::protocol(
+                    ProtocolErrorKind::InvalidInput,
+                    format!("invalid http header value: {key}"),
+                )
+            })?;
             headers.insert(name, value);
         }
 
@@ -703,9 +769,12 @@ impl Client {
         if let Some(timeout) = connect_timeout {
             http_builder = http_builder.connect_timeout(timeout);
         }
-        let http_client = http_builder
-            .build()
-            .map_err(|err| Error::Protocol(format!("build http client failed: {err}")))?;
+        let http_client = http_builder.build().map_err(|err| {
+            Error::protocol(
+                ProtocolErrorKind::InvalidInput,
+                format!("build http client failed: {err}"),
+            )
+        })?;
 
         let (client_stream, bridge_stream) = tokio::io::duplex(1024 * 64);
         let (client_read, client_write) = tokio::io::split(client_stream);
@@ -926,8 +995,8 @@ impl Client {
     /// `connect_streamable_http*`), this returns `Ok(None)` without waiting.
     ///
     /// On timeout:
-    /// - `WaitOnTimeout::ReturnError` returns an `Error::Protocol` timeout error and leaves the
-    ///   child running.
+    /// - `WaitOnTimeout::ReturnError` returns an `Error::Protocol` with kind
+    ///   `ProtocolErrorKind::WaitTimeout` and leaves the child running.
     /// - `WaitOnTimeout::Kill { kill_timeout }` sends a kill signal, then waits up to
     ///   `kill_timeout` for the child to exit.
     pub async fn wait_with_timeout(
@@ -948,32 +1017,42 @@ impl Client {
         match tokio::time::timeout(timeout, child.wait()).await {
             Ok(status) => Ok(Some(status?)),
             Err(_) => match on_timeout {
-                WaitOnTimeout::ReturnError => Err(Error::Protocol(format!(
-                    "{WAIT_TIMEOUT_MARKER} wait timed out after {timeout:?}"
-                ))),
+                WaitOnTimeout::ReturnError => Err(Error::protocol(
+                    ProtocolErrorKind::WaitTimeout,
+                    format!("wait timed out after {timeout:?}"),
+                )),
                 WaitOnTimeout::Kill { kill_timeout } => {
                     let child_id = child.id();
                     if let Err(err) = child.start_kill() {
                         match child.try_wait() {
                             Ok(Some(status)) => return Ok(Some(status)),
                             Ok(None) => {
-                                return Err(Error::Protocol(format!(
-                                    "{WAIT_TIMEOUT_MARKER} wait timed out after {timeout:?}; failed to kill child (id={child_id:?}): {err}"
-                                )));
+                                return Err(Error::protocol(
+                                    ProtocolErrorKind::WaitTimeout,
+                                    format!(
+                                        "wait timed out after {timeout:?}; failed to kill child (id={child_id:?}): {err}"
+                                    ),
+                                ));
                             }
                             Err(try_wait_err) => {
-                                return Err(Error::Protocol(format!(
-                                    "{WAIT_TIMEOUT_MARKER} wait timed out after {timeout:?}; failed to kill child (id={child_id:?}): {err}; try_wait failed: {try_wait_err}"
-                                )));
+                                return Err(Error::protocol(
+                                    ProtocolErrorKind::WaitTimeout,
+                                    format!(
+                                        "wait timed out after {timeout:?}; failed to kill child (id={child_id:?}): {err}; try_wait failed: {try_wait_err}"
+                                    ),
+                                ));
                             }
                         }
                     }
 
                     match tokio::time::timeout(kill_timeout, child.wait()).await {
                         Ok(status) => Ok(Some(status?)),
-                        Err(_) => Err(Error::Protocol(format!(
-                            "{WAIT_TIMEOUT_MARKER} wait timed out after {timeout:?}; killed child (id={child_id:?}) but it did not exit within {kill_timeout:?}"
-                        ))),
+                        Err(_) => Err(Error::protocol(
+                            ProtocolErrorKind::WaitTimeout,
+                            format!(
+                                "wait timed out after {timeout:?}; killed child (id={child_id:?}) but it did not exit within {kill_timeout:?}"
+                            ),
+                        )),
                     }
                 }
             },
@@ -993,7 +1072,7 @@ impl Drop for Client {
         for task in self.transport_tasks.drain(..) {
             task.abort();
         }
-        let err = Error::Protocol("client closed".to_string());
+        let err = Error::protocol(ProtocolErrorKind::Closed, "client closed");
         drain_pending(&self.handle.pending, &err);
     }
 }
@@ -1827,7 +1906,7 @@ fn drain_pending(pending: &PendingRequests, err: &Error) {
 fn clone_error_for_drain(err: &Error) -> Error {
     match err {
         Error::Io(err) => Error::Io(std::io::Error::new(err.kind(), err.to_string())),
-        Error::Json(err) => Error::Protocol(format!("json error: {err}")),
+        Error::Json(err) => Error::protocol(ProtocolErrorKind::Other, format!("json error: {err}")),
         Error::Rpc {
             code,
             message,
@@ -1837,7 +1916,7 @@ fn clone_error_for_drain(err: &Error) -> Error {
             message: message.clone(),
             data: data.clone(),
         },
-        Error::Protocol(msg) => Error::Protocol(msg.clone()),
+        Error::Protocol(err) => Error::Protocol(err.clone()),
     }
 }
 
@@ -1875,8 +1954,9 @@ fn handle_response(pending: &PendingRequests, value: Value) {
     };
 
     if map.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
-        let _ = tx.send(Err(Error::Protocol(
-            "invalid response jsonrpc version".to_string(),
+        let _ = tx.send(Err(Error::protocol(
+            ProtocolErrorKind::InvalidMessage,
+            "invalid response jsonrpc version",
         )));
         return;
     }
@@ -1886,20 +1966,32 @@ fn handle_response(pending: &PendingRequests, value: Value) {
     match (has_error, has_result) {
         (true, false) => {
             let Some(error) = map.get("error") else {
-                let _ = tx.send(Err(Error::Protocol("invalid error response".to_string())));
+                let _ = tx.send(Err(Error::protocol(
+                    ProtocolErrorKind::InvalidMessage,
+                    "invalid error response",
+                )));
                 return;
             };
             let Value::Object(error) = error else {
-                let _ = tx.send(Err(Error::Protocol("invalid error response".to_string())));
+                let _ = tx.send(Err(Error::protocol(
+                    ProtocolErrorKind::InvalidMessage,
+                    "invalid error response",
+                )));
                 return;
             };
 
             let Some(code) = error.get("code").and_then(|v| v.as_i64()) else {
-                let _ = tx.send(Err(Error::Protocol("invalid error response".to_string())));
+                let _ = tx.send(Err(Error::protocol(
+                    ProtocolErrorKind::InvalidMessage,
+                    "invalid error response",
+                )));
                 return;
             };
             let Some(message) = error.get("message").and_then(|v| v.as_str()) else {
-                let _ = tx.send(Err(Error::Protocol("invalid error response".to_string())));
+                let _ = tx.send(Err(Error::protocol(
+                    ProtocolErrorKind::InvalidMessage,
+                    "invalid error response",
+                )));
                 return;
             };
             let data = error.get("data").cloned();
@@ -1911,14 +2003,18 @@ fn handle_response(pending: &PendingRequests, value: Value) {
         }
         (false, true) => {
             let Some(result) = map.get("result").cloned() else {
-                let _ = tx.send(Err(Error::Protocol("invalid result response".to_string())));
+                let _ = tx.send(Err(Error::protocol(
+                    ProtocolErrorKind::InvalidMessage,
+                    "invalid result response",
+                )));
                 return;
             };
             let _ = tx.send(Ok(result));
         }
         _ => {
-            let _ = tx.send(Err(Error::Protocol(
-                "invalid response: must include exactly one of result/error".to_string(),
+            let _ = tx.send(Err(Error::protocol(
+                ProtocolErrorKind::InvalidMessage,
+                "invalid response: must include exactly one of result/error",
             )));
         }
     }

@@ -11,8 +11,8 @@
 - `Config::load(root, override_path)`：读取并校验 `mcp.json`（v1），并解析为 `Config`
 - `Transport`：`Stdio | Unix | StreamableHttp`
 - `ServerConfig`：按 transport 聚合后的 server 配置
-  - `ServerConfig::streamable_http_split(sse_url, http_url)`：便捷构造 split URL 的 `transport=streamable_http`
-  - `inherit_env`：仅 `transport=stdio` 生效；是否继承宿主环境变量（默认 `true`）
+  - `ServerConfig::streamable_http_split(sse_url, http_url)`：便捷构造 split URL 的 `transport=streamable_http`（返回 `Result`）
+  - `inherit_env`：仅 `transport=stdio` 生效；是否继承宿主环境变量（默认 `false`）
 - `StdoutLogConfig`：stdio server stdout 旋转日志配置
 - `Root`：MCP roots 能力（`client.roots`）
 

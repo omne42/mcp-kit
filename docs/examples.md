@@ -7,8 +7,8 @@
 - `minimal_client`（最简；**默认只适用于 `transport=streamable_http`** / Untrusted）：
   - 源码：`crates/mcp-kit/examples/minimal_client.rs`
   - 运行：`cargo run -p mcp-kit --example minimal_client -- <server>`
-  - 注意：`Untrusted` 默认只允许 `https://` 且拒绝 `localhost/私网` 目标；详见 `docs/security.md`。本地/测试环境请用 `client_with_policy` 的 `--allow-*` flags（或 `mcpctl --allow-*`），或直接 `--trust`
-  - 如果你要连 `transport=stdio|unix`，请用 `client_with_policy --trust` 或 `mcpctl --trust`
+- 注意：`Untrusted` 默认只允许 `https://` 且拒绝 `localhost/私网` 目标；详见 `docs/security.md`。本地/测试环境请用 `client_with_policy` 的 `--allow-*` flags（或 `mcpctl --allow-*`），或显式使用 Trusted mode。
+- 如果你要连 `transport=stdio|unix`，请用 `client_with_policy --trust` 或 `mcpctl --trust --yes-trust`
 - `client_with_policy`（支持 `--trust` + Untrusted 出站策略 flags；无 clap，手写 args）：
   - 源码：`crates/mcp-kit/examples/client_with_policy.rs`
   - 运行：`cargo run -p mcp-kit --example client_with_policy -- [flags] <server>`
@@ -72,7 +72,7 @@ manager = manager.with_untrusted_streamable_http_policy(UntrustedStreamableHttpP
 });
 ```
 
-## 3）本地 stdio 配置（需要 --trust）
+## 3）本地 stdio 配置（需要 Trusted）
 
 ```json
 {
@@ -93,7 +93,7 @@ manager = manager.with_untrusted_streamable_http_policy(UntrustedStreamableHttpP
 ```
 
 ```bash
-cargo run -p mcp-kit --features cli --bin mcpctl -- --trust list-tools local
+cargo run -p mcp-kit --features cli --bin mcpctl -- --trust --yes-trust list-tools local
 ```
 
 ## 4）使用 `Session`：把单连接交给其它模块
