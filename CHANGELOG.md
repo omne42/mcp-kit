@@ -52,6 +52,7 @@
 - `mcp-kit`（BREAKING）：`Config` / `ServerConfig` / `Connection` 的字段现在改为私有；新增 getter/setter/构造器以便未来收紧不变量与演进 API。
 - `mcp-kit`（BREAKING）：`transport=stdio` 的 `inherit_env` 默认改为 `false`（更安全；如需继承宿主环境变量请显式设置为 `true`）。
 - `mcpctl`（BREAKING）：`--trust` 现在需要 `--yes-trust`；`--allow-host` 默认启用 DNS 校验（可用 `--no-dns-check` 关闭）；`--config` 默认要求在 `--root` 内（可用 `--allow-config-outside-root` 覆盖）。
+- Docs: clarify lifecycle shutdown guidance for `disconnect/take_*`, and note Windows stdout_log limitations.
 - `mcp-kit`（BREAKING）：`Manager::{connect_io, connect_jsonrpc}` 现在默认要求 `TrustMode::Trusted`；如需显式绕过可用 `*_unchecked` 变体（用于测试/受控环境）。
 - `mcp-kit`（BREAKING）：外部兼容格式中 `sse_url`/`http_url` 现在要求成对出现；单独设置会 fail-closed（单端点请用 `url`）。
 - `mcp-kit`：`Manager` 的 request/notify 错误上下文现在包含 `server=<name>`，便于多 server 场景排查。

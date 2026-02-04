@@ -866,6 +866,11 @@ impl Manager {
             .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))
     }
 
+    /// Remove a cached connection (if any) without waiting for shutdown.
+    ///
+    /// This is best-effort and may leave a child process running/zombied if you drop it without
+    /// an explicit `wait*` call. Prefer `Manager::disconnect_and_wait` (or `take_connection` +
+    /// `Connection::wait_with_timeout`) when you own the lifecycle.
     pub fn disconnect(&mut self, server_name: &str) -> bool {
         self.init_results.remove(server_name);
         self.conns.remove(server_name).is_some()
@@ -886,11 +891,21 @@ impl Manager {
             .with_context(|| format!("disconnect mcp server: {server_name}"))
     }
 
+    /// Take ownership of a cached connection (if any).
+    ///
+    /// After calling this, the caller owns the connection lifecycle. In particular, if the
+    /// connection was created via `transport=stdio`, prefer an explicit `Connection::wait*` call
+    /// to avoid leaving a child process running/zombied.
     pub fn take_connection(&mut self, server_name: &str) -> Option<Connection> {
         self.init_results.remove(server_name);
         self.conns.remove(server_name)
     }
 
+    /// Take ownership of a cached session (if any).
+    ///
+    /// After calling this, the caller owns the session lifecycle. Prefer calling
+    /// `Session::wait_with_timeout` (or converting into a `Connection` and calling `wait*`) to
+    /// ensure any associated stdio child process is reaped.
     pub fn take_session(&mut self, server_name: &str) -> Option<Session> {
         let Some(connection) = self.conns.remove(server_name) else {
             self.init_results.remove(server_name);
