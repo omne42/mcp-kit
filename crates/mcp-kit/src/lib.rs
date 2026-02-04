@@ -37,8 +37,9 @@ mod session;
 
 pub use config::{ClientConfig, Config, Root, ServerConfig, StdoutLogConfig, Transport};
 pub use manager::{
-    Connection, Manager, ServerName, ServerNotificationContext, ServerNotificationHandler,
-    ServerRequestContext, ServerRequestHandler, ServerRequestOutcome,
+    Connection, Manager, ProtocolVersionCheck, ProtocolVersionMismatch, ServerName,
+    ServerNotificationContext, ServerNotificationHandler, ServerRequestContext,
+    ServerRequestHandler, ServerRequestOutcome,
 };
 pub use protocol::{MCP_PROTOCOL_VERSION, McpNotification, McpRequest};
 pub use security::{TrustMode, UntrustedStreamableHttpPolicy};

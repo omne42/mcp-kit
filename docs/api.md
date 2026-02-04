@@ -9,6 +9,7 @@
 ### 配置
 
 - `Config::load(root, override_path)`：读取并校验 `mcp.json`（v1），并解析为 `Config`
+- `Config::load_required(root, override_path)`：读取并校验 `mcp.json`；若未找到配置文件会报错（fail-fast），不会返回“空配置”
 - `Transport`：`Stdio | Unix | StreamableHttp`
 - `ServerConfig`：按 transport 聚合后的 server 配置
   - `ServerConfig::streamable_http_split(sse_url, http_url)`：便捷构造 split URL 的 `transport=streamable_http`（返回 `Result`）
@@ -26,6 +27,10 @@
   - 注意：`is_connected/connected_server_names` 与 `*_connected` 系列方法需要 `&mut self`（会做连接存活性检查，并在 I/O/协议错误时自动清理坏连接）
   - `connect_io` / `connect_jsonrpc`：接入自定义 transport
   - `with_server_request_handler` / `with_server_notification_handler`：处理 server→client
+  - `with_server_handler_concurrency` / `with_server_handler_timeout`：限制 server→client handler 的并发与超时（超时会计数，便于排查 silent drop）
+  - `server_handler_timeout_count(srv)` / `server_handler_timeout_counts()`：读取 server→client handler 超时计数
+  - `ProtocolVersionCheck` / `with_protocol_version_check`：控制 `initialize.protocolVersion` mismatch 的处理策略
+  - `protocol_version_mismatches()` / `take_protocol_version_mismatches()`：读取/取走协议版本 mismatch 告警
 - `Session`：单连接 MCP 会话（已 initialize）
   - `request` / `notify`（raw）
   - `request_typed` / `notify_typed`

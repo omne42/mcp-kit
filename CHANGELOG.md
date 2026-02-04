@@ -35,6 +35,7 @@
 - `Manager::initialize_result`：暴露 server initialize 响应。
 - `mcp-kit`：新增 `ProtocolVersionCheck` 与 `Manager::with_protocol_version_check(...)`，用于控制 `initialize.protocolVersion` mismatch 的处理策略，并可通过 `Manager::protocol_version_mismatches()` 获取告警信息。
 - `mcp-kit`：新增 `Manager::with_server_handler_concurrency(...)` 与 `Manager::with_server_handler_timeout(...)`，用于限制/保护 server→client handler 的并发与超时行为。
+- `mcp-kit`：新增 `Manager::server_handler_timeout_count(...)` / `server_handler_timeout_counts()` / `take_server_handler_timeout_counts()`，用于观测 server→client handler 超时次数（避免 silent drop 难排查）。
 - `mcp-kit`：新增 `Config::load_required(...)`，用于在缺少配置文件时 fail-fast（区别于 `Config::load` 的“缺省为空配置”语义）。
 - `Manager`：补齐 MCP 常用请求便捷方法（`ping`、`resources/templates/list`、`resources/read`、`resources/subscribe`、`resources/unsubscribe`、`prompts/get`、`logging/setLevel`、`completion/complete`）。
 - `Session`：单连接 MCP 会话（从 `Manager` 取出后可独立调用 `request/notify` 与便捷方法）。
@@ -121,6 +122,8 @@
 - `mcp-jsonrpc`：`streamable_http` 的 HTTP 200 + 空 JSON body（非 202）现在会桥接为 `-32000` error，避免 request 悬挂。
 - `mcp-kit`：对无 child 的连接（unix/streamable_http）会检查 JSON-RPC client closed 状态并清理缓存，避免复用失活连接。
 - `mcp-kit`：当 `initialize` 失败时会自动 abort 已挂载的 server→client handler tasks，避免遗留后台任务。
+- `mcp-kit`：`ProtocolVersionCheck` / `ProtocolVersionMismatch` 现已从 crate root 重新导出（可直接用 `mcp_kit::ProtocolVersionCheck`）。
+- `mcp-kit`：`protocol_version_mismatches` 在 `Warn` 模式下会按 server 去重更新，避免长期运行时无界增长。
 - `mcp-kit`：Cursor/Claude style 外部配置中 `type=http|sse` 与推断 transport 冲突时会 fail-closed 报错。
 - `mcp-kit`：当文件包含 `mcpServers` wrapper（例如 Claude plugin.json）时，`Config::load` 现在会优先按 wrapper 解析，而不是误判为 `mcp.json v1`。
 - `mcp-kit`：`mcpServers` 现在支持 string（指向 `./.mcp.json` 等文件路径），用于兼容 Claude plugin.json 的 `mcpServers` path 写法。
