@@ -505,14 +505,6 @@ impl Config {
                         }
                         (None, None) => Vec::new(),
                     };
-                    if argv.is_empty() {
-                        anyhow::bail!("mcp server {name}: argv must not be empty");
-                    }
-                    for (idx, arg) in argv.iter().enumerate() {
-                        if arg.trim().is_empty() {
-                            anyhow::bail!("mcp server {name}: argv[{idx}] must not be empty");
-                        }
-                    }
 
                     let mut env = server.env;
                     for (k, v) in server.environment {
@@ -523,7 +515,11 @@ impl Config {
                         .stdout_log
                         .map(|log| parse_stdout_log_config(thread_root, &name, log))
                         .transpose()?;
-                    let mut server_cfg = ServerConfig::stdio(argv)?;
+                    let mut server_cfg = ServerConfig::stdio(argv).map_err(|err| {
+                        let msg =
+                            format!("invalid mcp server config (server={server_name}): {err}");
+                        err.context(msg)
+                    })?;
                     server_cfg.set_inherit_env(inherit_env)?;
                     *server_cfg.env_mut()? = env;
                     server_cfg.set_stdout_log(stdout_log)?;

@@ -119,4 +119,4 @@ mcpctl --dns-check --allow-host example.com list-tools <server>
 ## 开发
 
 - 启用 hooks：`bash ./scripts/setup-githooks.sh`（或手动 `git config core.hooksPath githooks`）
-- Rust gates：`cargo fmt --all && cargo check --workspace --all-targets --all-features && cargo test --workspace --all-features && cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- 本地 gates（对齐 CI）：`cargo fmt --all && cargo check --workspace --all-targets --all-features && cargo test --workspace --all-features && cargo clippy --workspace --all-targets --all-features -- -D warnings && mdbook build docs && ./scripts/gen-llms-txt.sh --check`
