@@ -4,12 +4,65 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::Context;
 use serde_json::Value;
 
-use super::file_format::{ConfigFile, ExternalCommandConfigFile, ExternalServerConfigFile};
+use super::file_format::{
+    ConfigFile, ExternalCommandConfigFile, ExternalServerConfigFile, StdoutLogConfigFile,
+};
 use super::{ClientConfig, Config, ServerConfig, StdoutLogConfig, Transport};
 use crate::ServerName;
 
 const MCP_CONFIG_VERSION: u32 = 1;
 const DEFAULT_CONFIG_CANDIDATES: [&str; 2] = [".mcp.json", "mcp.json"];
+
+fn parse_stdout_log_config(
+    thread_root: &Path,
+    name: &str,
+    log: StdoutLogConfigFile,
+) -> anyhow::Result<StdoutLogConfig> {
+    if log.path.as_os_str().is_empty() {
+        anyhow::bail!("mcp server {name}: stdout_log.path must not be empty");
+    }
+    if log
+        .path
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        anyhow::bail!("mcp server {name}: stdout_log.path must not contain `..` segments");
+    }
+
+    let path = if log.path.is_absolute() {
+        log.path
+    } else {
+        thread_root.join(log.path)
+    };
+    let max_bytes_per_part = log
+        .max_bytes_per_part
+        .unwrap_or(super::DEFAULT_STDOUT_LOG_MAX_BYTES_PER_PART)
+        .max(1);
+    let max_parts = log.max_parts.unwrap_or(super::DEFAULT_STDOUT_LOG_MAX_PARTS);
+    let max_parts = if max_parts == 0 {
+        None
+    } else {
+        Some(max_parts.max(1))
+    };
+
+    Ok(StdoutLogConfig {
+        path,
+        max_bytes_per_part,
+        max_parts,
+    })
+}
+
+fn validate_stdio_env(name: &str, env: &BTreeMap<String, String>) -> anyhow::Result<()> {
+    for (key, value) in env.iter() {
+        if key.trim().is_empty() {
+            anyhow::bail!("mcp server {name}: env key must not be empty");
+        }
+        if value.trim().is_empty() {
+            anyhow::bail!("mcp server {name}: env[{key}] must not be empty");
+        }
+    }
+    Ok(())
+}
 
 #[cfg(unix)]
 fn describe_file_type(meta: &std::fs::Metadata) -> &'static str {
@@ -49,81 +102,13 @@ fn describe_file_type(meta: &std::fs::Metadata) -> &'static str {
     }
 }
 
-async fn read_to_string_limited(path: &Path) -> anyhow::Result<String> {
-    let meta = tokio::fs::symlink_metadata(path)
-        .await
-        .with_context(|| format!("stat {}", path.display()))?;
-    if !meta.file_type().is_file() {
-        let kind = describe_file_type(&meta);
-        anyhow::bail!(
-            "mcp config must be a regular file (got {kind}): {}",
-            path.display()
-        );
-    }
-
-    let mut buf = Vec::new();
-    let mut options = tokio::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    #[cfg(windows)]
-    {
-        // Best-effort: avoid following reparse points (including symlinks) on open.
-        // This mitigates TOCTOU risks where the config path could be replaced between checks.
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-
-    use tokio::io::AsyncReadExt;
-
-    let file = options
-        .open(path)
-        .await
-        .with_context(|| format!("read {}", path.display()))?;
-    let file_meta = file
-        .metadata()
-        .await
-        .with_context(|| format!("stat {}", path.display()))?;
-    if !file_meta.file_type().is_file() {
-        let kind = describe_file_type(&file_meta);
-        anyhow::bail!(
-            "mcp config must be a regular file (got {kind}): {}",
-            path.display()
-        );
-    }
-    if file_meta.len() > super::MAX_CONFIG_BYTES {
-        anyhow::bail!(
-            "mcp config too large: {} bytes (max {}): {}",
-            file_meta.len(),
-            super::MAX_CONFIG_BYTES,
-            path.display()
-        );
-    }
-
-    file.take(super::MAX_CONFIG_BYTES + 1)
-        .read_to_end(&mut buf)
-        .await
-        .with_context(|| format!("read {}", path.display()))?;
-    if buf.len() as u64 > super::MAX_CONFIG_BYTES {
-        anyhow::bail!(
-            "mcp config too large: {} bytes (max {}): {}",
-            buf.len(),
-            super::MAX_CONFIG_BYTES,
-            path.display()
-        );
-    }
-
-    String::from_utf8(buf)
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
-        .with_context(|| format!("read {}", path.display()))
-}
-
-async fn try_read_to_string_limited(path: &Path) -> anyhow::Result<Option<String>> {
+async fn read_to_string_limited_inner(
+    path: &Path,
+    missing_ok: bool,
+) -> anyhow::Result<Option<String>> {
     let meta = match tokio::fs::symlink_metadata(path).await {
         Ok(meta) => meta,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) if missing_ok && err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err).with_context(|| format!("stat {}", path.display())),
     };
     if !meta.file_type().is_file() {
@@ -133,6 +118,7 @@ async fn try_read_to_string_limited(path: &Path) -> anyhow::Result<Option<String
             path.display()
         );
     }
+
     let mut options = tokio::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -149,13 +135,11 @@ async fn try_read_to_string_limited(path: &Path) -> anyhow::Result<Option<String
 
     use tokio::io::AsyncReadExt;
 
-    let mut buf = Vec::new();
     let file = match options.open(path).await {
         Ok(file) => file,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) if missing_ok && err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
     };
-
     let file_meta = file
         .metadata()
         .await
@@ -176,6 +160,7 @@ async fn try_read_to_string_limited(path: &Path) -> anyhow::Result<Option<String
         );
     }
 
+    let mut buf = Vec::new();
     file.take(super::MAX_CONFIG_BYTES + 1)
         .read_to_end(&mut buf)
         .await
@@ -188,10 +173,22 @@ async fn try_read_to_string_limited(path: &Path) -> anyhow::Result<Option<String
             path.display()
         );
     }
+
     let contents = String::from_utf8(buf)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
         .with_context(|| format!("read {}", path.display()))?;
     Ok(Some(contents))
+}
+
+async fn try_read_to_string_limited(path: &Path) -> anyhow::Result<Option<String>> {
+    read_to_string_limited_inner(path, true).await
+}
+
+async fn read_to_string_limited(path: &Path) -> anyhow::Result<String> {
+    match read_to_string_limited_inner(path, false).await? {
+        Some(contents) => Ok(contents),
+        None => unreachable!("missing_ok=false should never return None"),
+    }
 }
 
 async fn canonicalize_in_root(canonical_root: &Path, path: &Path) -> anyhow::Result<PathBuf> {
@@ -398,43 +395,10 @@ impl Config {
             let server_name = ServerName::parse(&name)
                 .map_err(|err| anyhow::anyhow!("invalid mcp server name {name:?}: {err}"))?;
 
-            let stdout_log = match server.stdout_log {
-                Some(log) => {
-                    if log.path.as_os_str().is_empty() {
-                        anyhow::bail!("mcp server {name}: stdout_log.path must not be empty");
-                    }
-                    if log
-                        .path
-                        .components()
-                        .any(|c| matches!(c, Component::ParentDir))
-                    {
-                        anyhow::bail!(
-                            "mcp server {name}: stdout_log.path must not contain `..` segments"
-                        );
-                    }
-                    let path = if log.path.is_absolute() {
-                        log.path
-                    } else {
-                        thread_root.join(log.path)
-                    };
-                    let max_bytes_per_part = log
-                        .max_bytes_per_part
-                        .unwrap_or(super::DEFAULT_STDOUT_LOG_MAX_BYTES_PER_PART)
-                        .max(1);
-                    let max_parts = log.max_parts.unwrap_or(super::DEFAULT_STDOUT_LOG_MAX_PARTS);
-                    let max_parts = if max_parts == 0 {
-                        None
-                    } else {
-                        Some(max_parts.max(1))
-                    };
-                    Some(StdoutLogConfig {
-                        path,
-                        max_bytes_per_part,
-                        max_parts,
-                    })
-                }
-                None => None,
-            };
+            let stdout_log = server
+                .stdout_log
+                .map(|log| parse_stdout_log_config(thread_root, &name, log))
+                .transpose()?;
 
             let inherit_env = match server.transport {
                 Transport::Stdio => server.inherit_env.unwrap_or(false),
@@ -473,6 +437,7 @@ impl Config {
                             "mcp server {name}: http auth/headers are only valid for transport=streamable_http"
                         );
                     }
+                    validate_stdio_env(&name, &server.env)?;
                     let argv = server.argv.ok_or_else(|| {
                         anyhow::anyhow!("mcp server {name}: argv must not be empty")
                     })?;
@@ -740,43 +705,10 @@ impl Config {
                 }
             }
 
-            let stdout_log = match server.stdout_log {
-                Some(log) => {
-                    if log.path.as_os_str().is_empty() {
-                        anyhow::bail!("mcp server {name}: stdout_log.path must not be empty");
-                    }
-                    if log
-                        .path
-                        .components()
-                        .any(|c| matches!(c, Component::ParentDir))
-                    {
-                        anyhow::bail!(
-                            "mcp server {name}: stdout_log.path must not contain `..` segments"
-                        );
-                    }
-                    let path = if log.path.is_absolute() {
-                        log.path
-                    } else {
-                        thread_root.join(log.path)
-                    };
-                    let max_bytes_per_part = log
-                        .max_bytes_per_part
-                        .unwrap_or(super::DEFAULT_STDOUT_LOG_MAX_BYTES_PER_PART)
-                        .max(1);
-                    let max_parts = log.max_parts.unwrap_or(super::DEFAULT_STDOUT_LOG_MAX_PARTS);
-                    let max_parts = if max_parts == 0 {
-                        None
-                    } else {
-                        Some(max_parts.max(1))
-                    };
-                    Some(StdoutLogConfig {
-                        path,
-                        max_bytes_per_part,
-                        max_parts,
-                    })
-                }
-                None => None,
-            };
+            let stdout_log = server
+                .stdout_log
+                .map(|log| parse_stdout_log_config(thread_root, &name, log))
+                .transpose()?;
 
             let inherit_env = match transport {
                 Transport::Stdio => server.inherit_env.unwrap_or(false),
@@ -839,14 +771,7 @@ impl Config {
                     for (k, v) in server.environment {
                         env.insert(k, v);
                     }
-                    for (key, value) in env.iter() {
-                        if key.trim().is_empty() {
-                            anyhow::bail!("mcp server {name}: env key must not be empty");
-                        }
-                        if value.trim().is_empty() {
-                            anyhow::bail!("mcp server {name}: env[{key}] must not be empty");
-                        }
-                    }
+                    validate_stdio_env(&name, &env)?;
 
                     servers.insert(
                         server_name,

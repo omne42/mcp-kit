@@ -216,6 +216,40 @@ async fn load_parses_valid_file() {
 }
 
 #[tokio::test]
+async fn load_denies_stdio_env_with_empty_key() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{ "version": 1, "servers": { "a": { "transport": "stdio", "argv": ["mcp-a"], "env": { "": "1" } } } }"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    assert!(
+        err.to_string().contains("env key must not be empty"),
+        "err={err:#}"
+    );
+}
+
+#[tokio::test]
+async fn load_denies_stdio_env_with_empty_value() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{ "version": 1, "servers": { "a": { "transport": "stdio", "argv": ["mcp-a"], "env": { "X": "" } } } }"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    assert!(
+        err.to_string().contains("env[X] must not be empty"),
+        "err={err:#}"
+    );
+}
+
+#[tokio::test]
 async fn load_parses_stdio_inherit_env() {
     let dir = tempfile::tempdir().unwrap();
     tokio::fs::write(
