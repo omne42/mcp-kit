@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
+use reqwest::header::{HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -357,11 +358,21 @@ impl ServerConfig {
                             "mcp server transport=streamable_http: http_headers key must not be empty"
                         );
                     }
+                    HeaderName::from_bytes(header.as_bytes()).map_err(|_| {
+                        anyhow::anyhow!(
+                            "mcp server transport=streamable_http: invalid http_headers key: {header}"
+                        )
+                    })?;
                     if value.trim().is_empty() {
                         anyhow::bail!(
                             "mcp server transport=streamable_http: http_headers[{header}] must not be empty"
                         );
                     }
+                    HeaderValue::from_str(value).map_err(|_| {
+                        anyhow::anyhow!(
+                            "mcp server transport=streamable_http: invalid http_headers[{header}] value"
+                        )
+                    })?;
                 }
                 for (header, env_var) in self.env_http_headers.iter() {
                     if header.trim().is_empty() {
@@ -369,6 +380,11 @@ impl ServerConfig {
                             "mcp server transport=streamable_http: env_http_headers key must not be empty"
                         );
                     }
+                    HeaderName::from_bytes(header.as_bytes()).map_err(|_| {
+                        anyhow::anyhow!(
+                            "mcp server transport=streamable_http: invalid env_http_headers key: {header}"
+                        )
+                    })?;
                     if env_var.trim().is_empty() {
                         anyhow::bail!(
                             "mcp server transport=streamable_http: env_http_headers[{header}] must not be empty"

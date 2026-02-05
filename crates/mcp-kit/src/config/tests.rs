@@ -710,6 +710,59 @@ async fn load_parses_cursor_mcp_servers_wrapper() {
 }
 
 #[tokio::test]
+async fn load_denies_streamable_http_with_invalid_http_header_name() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{
+  "$schema": "https://cursor.com/mcp.schema.json",
+  "mcpServers": {
+    "litellm": {
+      "url": "http://example.com/mcp",
+      "type": "http",
+      "headers": { "Bad Header": "1" }
+    }
+  }
+}"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    assert!(
+        err.to_string().contains("invalid http_headers key"),
+        "err={err:#}"
+    );
+}
+
+#[tokio::test]
+async fn load_denies_streamable_http_with_invalid_http_header_value() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{
+  "$schema": "https://cursor.com/mcp.schema.json",
+  "mcpServers": {
+    "litellm": {
+      "url": "http://example.com/mcp",
+      "type": "http",
+      "headers": { "X-Test": "1\n2" }
+    }
+  }
+}"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("invalid http_headers[X-Test] value"),
+        "err={err:#}"
+    );
+}
+
+#[tokio::test]
 async fn load_parses_mcp_servers_wrapper_even_with_version_string() {
     let dir = tempfile::tempdir().unwrap();
     tokio::fs::write(

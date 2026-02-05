@@ -498,23 +498,27 @@ impl Config {
                         thread_root.join(unix_path)
                     };
 
-                    servers.insert(
-                        server_name,
-                        ServerConfig {
-                            transport: Transport::Unix,
-                            argv: Vec::new(),
-                            inherit_env: true,
-                            unix_path: Some(unix_path),
-                            url: None,
-                            sse_url: None,
-                            http_url: None,
-                            bearer_token_env_var: None,
-                            http_headers: BTreeMap::new(),
-                            env_http_headers: BTreeMap::new(),
-                            env: BTreeMap::new(),
-                            stdout_log: None,
-                        },
-                    );
+                    let server_cfg = ServerConfig {
+                        transport: Transport::Unix,
+                        argv: Vec::new(),
+                        inherit_env: true,
+                        unix_path: Some(unix_path),
+                        url: None,
+                        sse_url: None,
+                        http_url: None,
+                        bearer_token_env_var: None,
+                        http_headers: BTreeMap::new(),
+                        env_http_headers: BTreeMap::new(),
+                        env: BTreeMap::new(),
+                        stdout_log: None,
+                    };
+                    server_cfg.validate().map_err(|err| {
+                        let msg =
+                            format!("invalid mcp server config (server={server_name}): {err}");
+                        err.context(msg)
+                    })?;
+
+                    servers.insert(server_name, server_cfg);
                 }
                 Transport::StreamableHttp => {
                     if server.command.is_some() || server.argv.is_some() || server.args.is_some() {
@@ -611,23 +615,27 @@ impl Config {
                         }
                     }
 
-                    servers.insert(
-                        server_name,
-                        ServerConfig {
-                            transport: Transport::StreamableHttp,
-                            argv: Vec::new(),
-                            inherit_env: true,
-                            unix_path: None,
-                            url,
-                            sse_url,
-                            http_url,
-                            bearer_token_env_var: server.bearer_token_env_var,
-                            http_headers: server.http_headers,
-                            env_http_headers: server.env_http_headers,
-                            env: BTreeMap::new(),
-                            stdout_log: None,
-                        },
-                    );
+                    let server_cfg = ServerConfig {
+                        transport: Transport::StreamableHttp,
+                        argv: Vec::new(),
+                        inherit_env: true,
+                        unix_path: None,
+                        url,
+                        sse_url,
+                        http_url,
+                        bearer_token_env_var: server.bearer_token_env_var,
+                        http_headers: server.http_headers,
+                        env_http_headers: server.env_http_headers,
+                        env: BTreeMap::new(),
+                        stdout_log: None,
+                    };
+                    server_cfg.validate().map_err(|err| {
+                        let msg =
+                            format!("invalid mcp server config (server={server_name}): {err}");
+                        err.context(msg)
+                    })?;
+
+                    servers.insert(server_name, server_cfg);
                 }
             }
         }

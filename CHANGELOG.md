@@ -25,6 +25,7 @@
 - `mcp-kit`：修正文档：`Manager::take_server_handler_timeout_counts()` 会重置计数但不会移除已跟踪的 server key（实现原因：handler task 持有共享计数器）；并补充单测覆盖该语义（API 不变）。
 - `mcp-jsonrpc`：stdout_log 写入失败不再直接 `eprintln!`；改为通过 `ClientHandle::stdout_log_write_error()` 暴露（失败后会禁用 stdout_log 写入）。
 - `mcp-jsonrpc`：`ClientHandle` 的 `close_reason` / `stdout_log_write_error` 内部存储从 `Mutex<Option<String>>` 改为 `OnceLock<String>`，减少锁与 poison 分支（API 不变）。
+- `mcp-kit`：`ServerConfig::validate` 在 `streamable_http` 场景下会 fail-fast 校验 `http_headers` / `env_http_headers` 的 header name/value 合法性（避免到连接时才报错）。
 
 ### Added
 - `mcp-kit`：`ServerName` 现在实现 `Deserialize`（`serde`），便于在配置/外部数据模型中直接使用。
