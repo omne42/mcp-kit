@@ -542,87 +542,14 @@ impl Config {
                         );
                     }
 
-                    let (url, sse_url, http_url) = match (
-                        server.url,
-                        server.sse_url,
-                        server.http_url,
-                    ) {
-                        (Some(url), None, None) => {
-                            if url.trim().is_empty() {
-                                anyhow::bail!("mcp server {name}: url must not be empty");
-                            }
-                            (Some(url), None, None)
-                        }
-                        (None, Some(sse_url), Some(http_url)) => {
-                            if sse_url.trim().is_empty() {
-                                anyhow::bail!("mcp server {name}: sse_url must not be empty");
-                            }
-                            if http_url.trim().is_empty() {
-                                anyhow::bail!("mcp server {name}: http_url must not be empty");
-                            }
-                            (None, Some(sse_url), Some(http_url))
-                        }
-                        (None, Some(_), None) => {
-                            anyhow::bail!(
-                                "mcp server {name}: set either url or (sse_url + http_url), not sse_url alone"
-                            );
-                        }
-                        (None, None, Some(_)) => {
-                            anyhow::bail!(
-                                "mcp server {name}: set either url or (sse_url + http_url), not http_url alone"
-                            );
-                        }
-                        (None, None, None) => {
-                            anyhow::bail!(
-                                "mcp server {name}: url (or sse_url + http_url) is required for transport=streamable_http"
-                            );
-                        }
-                        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
-                            anyhow::bail!(
-                                "mcp server {name}: set either url or (sse_url + http_url), not both"
-                            );
-                        }
-                    };
-
-                    if let Some(env_var) = &server.bearer_token_env_var {
-                        if env_var.trim().is_empty() {
-                            anyhow::bail!(
-                                "mcp server {name}: bearer_token_env_var must not be empty"
-                            );
-                        }
-                    }
-
-                    for (header, value) in server.http_headers.iter() {
-                        if header.trim().is_empty() {
-                            anyhow::bail!("mcp server {name}: http_headers key must not be empty");
-                        }
-                        if value.trim().is_empty() {
-                            anyhow::bail!(
-                                "mcp server {name}: http_headers[{header}] must not be empty"
-                            );
-                        }
-                    }
-                    for (header, env_var) in server.env_http_headers.iter() {
-                        if header.trim().is_empty() {
-                            anyhow::bail!(
-                                "mcp server {name}: env_http_headers key must not be empty"
-                            );
-                        }
-                        if env_var.trim().is_empty() {
-                            anyhow::bail!(
-                                "mcp server {name}: env_http_headers[{header}] must not be empty"
-                            );
-                        }
-                    }
-
                     let server_cfg = ServerConfig {
                         transport: Transport::StreamableHttp,
                         argv: Vec::new(),
-                        inherit_env: true,
+                        inherit_env,
                         unix_path: None,
-                        url,
-                        sse_url,
-                        http_url,
+                        url: server.url,
+                        sse_url: server.sse_url,
+                        http_url: server.http_url,
                         bearer_token_env_var: server.bearer_token_env_var,
                         http_headers: server.http_headers,
                         env_http_headers: server.env_http_headers,

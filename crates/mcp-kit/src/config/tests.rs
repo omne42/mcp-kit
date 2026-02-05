@@ -763,6 +763,32 @@ async fn load_denies_streamable_http_with_invalid_http_header_value() {
 }
 
 #[tokio::test]
+async fn load_denies_streamable_http_with_invalid_env_http_header_name() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{
+  "$schema": "https://cursor.com/mcp.schema.json",
+  "mcpServers": {
+    "litellm": {
+      "url": "http://example.com/mcp",
+      "type": "http",
+      "env_http_headers": { "Bad Header": "TOKEN" }
+    }
+  }
+}"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    assert!(
+        err.to_string().contains("invalid env_http_headers key"),
+        "err={err:#}"
+    );
+}
+
+#[tokio::test]
 async fn load_parses_mcp_servers_wrapper_even_with_version_string() {
     let dir = tempfile::tempdir().unwrap();
     tokio::fs::write(
