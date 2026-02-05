@@ -889,6 +889,40 @@ async fn untrusted_manager_refuses_streamable_http_ipv4_mapped_ipv6_loopback() {
 }
 
 #[tokio::test]
+async fn untrusted_manager_refuses_streamable_http_nat64_well_known_prefix_private_ip() {
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
+    assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
+
+    let server_cfg = ServerConfig::streamable_http("https://[64:ff9b::c0a8:0001]/mcp").unwrap();
+
+    let err = manager
+        .connect("srv", &server_cfg, Path::new("."))
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("non-global ip"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn untrusted_manager_refuses_streamable_http_6to4_private_ip() {
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
+    assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
+
+    let server_cfg = ServerConfig::streamable_http("https://[2002:c0a8:0001::]/mcp").unwrap();
+
+    let err = manager
+        .connect("srv", &server_cfg, Path::new("."))
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("non-global ip"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
 async fn untrusted_manager_refuses_streamable_http_url_credentials() {
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
     assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
@@ -939,6 +973,27 @@ fn untrusted_policy_allows_private_ip_when_configured() {
     };
 
     validate_streamable_http_url_untrusted(&policy, "srv", "url", "https://192.168.0.10/mcp")
+        .unwrap();
+}
+
+#[test]
+fn untrusted_policy_allows_nat64_well_known_prefix_when_embedded_ipv4_is_public() {
+    let policy = UntrustedStreamableHttpPolicy::default();
+
+    validate_streamable_http_url_untrusted(
+        &policy,
+        "srv",
+        "url",
+        "https://[64:ff9b::0808:0808]/mcp",
+    )
+    .unwrap();
+}
+
+#[test]
+fn untrusted_policy_allows_6to4_when_embedded_ipv4_is_public() {
+    let policy = UntrustedStreamableHttpPolicy::default();
+
+    validate_streamable_http_url_untrusted(&policy, "srv", "url", "https://[2002:0808:0808::]/mcp")
         .unwrap();
 }
 

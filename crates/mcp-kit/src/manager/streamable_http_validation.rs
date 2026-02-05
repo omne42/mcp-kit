@@ -262,6 +262,26 @@ fn is_untrusted_non_global_ipv4(ip: Ipv4Addr) -> bool {
         return true;
     }
 
+    // 6to4 relay anycast (RFC3068; deprecated)
+    if (a, b, c) == (192, 88, 99) {
+        return true;
+    }
+
+    // AS112 (RFC7534)
+    if (a, b, c) == (192, 31, 196) {
+        return true;
+    }
+
+    // AMT (RFC7450)
+    if (a, b, c) == (192, 52, 193) {
+        return true;
+    }
+
+    // Direct Delegation AS112 (RFC7535)
+    if (a, b, c) == (192, 175, 48) {
+        return true;
+    }
+
     // 198.18.0.0/15 (benchmarking)
     if a == 198 && (18..=19).contains(&b) {
         return true;
@@ -285,9 +305,15 @@ fn is_untrusted_non_global_ipv6(ip: Ipv6Addr) -> bool {
         return true;
     }
 
+    let bytes = ip.octets();
+
+    // fec0::/10 (site-local; deprecated; treat as non-global)
+    if bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0xc0 {
+        return true;
+    }
+
     // 2001:db8::/32 (documentation)
-    let segments = ip.segments();
-    if segments[0] == 0x2001 && segments[1] == 0x0db8 {
+    if bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x0d && bytes[3] == 0xb8 {
         return true;
     }
 
@@ -296,7 +322,36 @@ fn is_untrusted_non_global_ipv6(ip: Ipv6Addr) -> bool {
 
 fn normalize_ip(ip: IpAddr) -> IpAddr {
     match ip {
-        IpAddr::V6(ip) => ip.to_ipv4().map(IpAddr::V4).unwrap_or(IpAddr::V6(ip)),
+        IpAddr::V6(ip) => {
+            if let Some(v4) = ip.to_ipv4() {
+                return IpAddr::V4(v4);
+            }
+            if let Some(v4) = ipv4_from_nat64_well_known_prefix(ip) {
+                return IpAddr::V4(v4);
+            }
+            if let Some(v4) = ipv4_from_6to4(ip) {
+                return IpAddr::V4(v4);
+            }
+            IpAddr::V6(ip)
+        }
         IpAddr::V4(ip) => IpAddr::V4(ip),
     }
+}
+
+fn ipv4_from_nat64_well_known_prefix(addr: Ipv6Addr) -> Option<Ipv4Addr> {
+    let bytes = addr.octets();
+    // NAT64 Well-Known Prefix (RFC6052): 64:ff9b::/96
+    if bytes[..12] == [0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0] {
+        return Some(Ipv4Addr::new(bytes[12], bytes[13], bytes[14], bytes[15]));
+    }
+    None
+}
+
+fn ipv4_from_6to4(addr: Ipv6Addr) -> Option<Ipv4Addr> {
+    let bytes = addr.octets();
+    // 6to4 (RFC3056; deprecated): 2002::/16 embeds an IPv4 address.
+    if bytes[0] == 0x20 && bytes[1] == 0x02 {
+        return Some(Ipv4Addr::new(bytes[2], bytes[3], bytes[4], bytes[5]));
+    }
+    None
 }

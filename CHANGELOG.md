@@ -16,6 +16,7 @@
 - `mcp-kit`：`ServerName::parse(...)` 的 rustdoc 现在明确其会对输入做 `trim()` 后再校验（行为不变，只是把语义写清楚；并修正了“ASCII whitespace”表述与实际行为不一致的问题）。
 - `mcp-kit`：`ServerName` 内部实现改为 `Arc<str>`，避免在 handler 等路径频繁 clone 时产生额外分配（API 不变）。
 - `mcp-kit`：`Config::load` 在 v1 `transport=stdio` 场景下也会校验 `env` 的 key/value 非空，避免接受不合法配置（与外部 `mcpServers` 格式行为对齐）。
+- `mcp-kit`：加固 Untrusted `streamable_http` 的“非公网 IP”判定：识别 NAT64 well-known prefix（`64:ff9b::/96`）与 6to4（`2002::/16`）中嵌入的 IPv4，避免绕过 `allow_private_ips=false` 的默认出站限制；并补齐更多 RFC6890 特殊用途 IPv4 前缀拒绝规则。
 
 ### Added
 - `mcp-kit`：`ServerName` 现在实现 `Deserialize`（`serde`），便于在配置/外部数据模型中直接使用。

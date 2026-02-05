@@ -920,7 +920,7 @@ CLI 对应：
 
 - `require_https = true`：只允许 `https://`
 - `allow_localhost = false`：拒绝 `localhost` / `*.localhost` / `*.local` / `*.localdomain`，以及**单标签 host**（不含 `.` 的 host，如 `https://example/...`；常见于本地/企业网搜索域解析）
-- `allow_private_ips = false`：拒绝 loopback/link-local/private 等非公网 IP 字面量
+- `allow_private_ips = false`：拒绝 loopback/link-local/private 等非公网 IP 字面量（包括 IPv4-mapped IPv6，以及 NAT64 well-known prefix / 6to4 中嵌入的 IPv4）
 - `dns_check = false`：默认不做 DNS 解析检查（可选开启；见下文）
 - `dns_timeout = 2s`：DNS lookup 超时（仅在 `dns_check=true` 时生效）
 - `dns_fail_open = false`：DNS lookup 失败/超时时默认拒绝连接（fail-closed；可选 fail-open）
@@ -1009,6 +1009,19 @@ Untrusted 下对 `127.0.0.1`、`10.0.0.0/8` 等 **IP 字面量** 会做拒绝/�
 当你用 `Manager::connect_jsonrpc(...)` / `connect_io(...)` 接入自建 transport 时，`Manager` 无法再对该 transport 做 `Untrusted` 下的 URL/headers 等安全校验。
 
 因此这两者默认要求 `TrustMode::Trusted`；如果你确实需要在 Untrusted 下使用（例如测试），请显式使用 `connect_jsonrpc_unchecked` / `connect_io_unchecked`，并把它视为一次“我知道我在绕过安全护栏”的选择。
+
+### stdout_log 路径边界（写盘风险）
+
+当你为 `transport=stdio` 配置 `servers.<name>.stdout_log.path` 时，客户端会把子进程 stdout 旋转落盘。
+
+默认情况下（fail-closed），`mcp-kit` 要求 `stdout_log.path` 必须位于 `--root`（或 `Config::load` 的 root）之下，以避免“不可信配置”把日志写到工作区外部。
+
+如果你确实需要写到 root 外部（例如共享日志目录），你可以显式放开：
+
+- CLI：`mcpctl --allow-stdout-log-outside-root ...`
+- 代码：`Manager::with_allow_stdout_log_outside_root(true)`
+
+这会允许写入工作区外部路径；只应该对可信配置使用。
 
 ### 仍然把 `mcp.json` 当作不可信输入
 
@@ -1629,6 +1642,7 @@ streamable_http 的具体请求形态（SSE + POST、`mcp-session-id`、回包�
 
 - `Config::load(root, override_path)`：读取并校验 `mcp.json`（v1），并解析为 `Config`
 - `Config::load_required(root, override_path)`：读取并校验 `mcp.json`；若未找到配置文件会报错（fail-fast），不会返回“空配置”
+- `ClientConfig::validate()` / `Config::validate()` / `ServerConfig::validate()` / `StdoutLogConfig::validate()`：手动构造配置时的 fail-fast 校验入口（`Config::load` 已隐式校验）
 - `Transport`：`Stdio | Unix | StreamableHttp`
 - `ServerConfig`：按 transport 聚合后的 server 配置
   - `ServerConfig::streamable_http_split(sse_url, http_url)`：便捷构造 split URL 的 `transport=streamable_http`（返回 `Result`）
@@ -1638,8 +1652,9 @@ streamable_http 的具体请求形态（SSE + POST、`mcp-session-id`、回包�
 
 ### 连接与会话
 
+- `ServerName`：server 名称的新类型（用于 `Config` 的 `servers` key、`Manager` 的连接缓存 key、以及 `ProtocolVersionMismatch.server_name` 等）。大多数 API 仍接受 `&str` 查询；只有在你手动构造/持有会话（例如 `Session::new`）时需要显式构造 `ServerName`。注意：`ServerName::parse(...)` 会对输入做 `trim()` 后再校验，因此 `" a "` 与 `"a"` 会归一化为同一个名称；若你已经持有 `ServerName`，可优先使用 `Config::server_named`、`Manager::*_named` 这类入口避免重复处理/减少传参噪音。
 - `Manager`：多 server 连接缓存 + initialize + 便捷请求
-  - `from_config` / `new`
+  - `try_from_config` / `from_config` / `new`
   - `connect` / `get_or_connect`
   - `request` / `notify` / `request_typed` / `notify_typed`
   - `list_tools` / `call_tool` / `read_resource` / `get_prompt` 等常用 MCP 方法

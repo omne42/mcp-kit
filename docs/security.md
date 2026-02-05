@@ -37,7 +37,7 @@ CLI 对应：
 
 - `require_https = true`：只允许 `https://`
 - `allow_localhost = false`：拒绝 `localhost` / `*.localhost` / `*.local` / `*.localdomain`，以及**单标签 host**（不含 `.` 的 host，如 `https://example/...`；常见于本地/企业网搜索域解析）
-- `allow_private_ips = false`：拒绝 loopback/link-local/private 等非公网 IP 字面量
+- `allow_private_ips = false`：拒绝 loopback/link-local/private 等非公网 IP 字面量（包括 IPv4-mapped IPv6，以及 NAT64 well-known prefix / 6to4 中嵌入的 IPv4）
 - `dns_check = false`：默认不做 DNS 解析检查（可选开启；见下文）
 - `dns_timeout = 2s`：DNS lookup 超时（仅在 `dns_check=true` 时生效）
 - `dns_fail_open = false`：DNS lookup 失败/超时时默认拒绝连接（fail-closed；可选 fail-open）
