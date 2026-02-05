@@ -23,7 +23,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -314,8 +314,8 @@ pub struct ClientHandle {
     stats: Arc<ClientStatsInner>,
     diagnostics: Option<Arc<DiagnosticsState>>,
     closed: Arc<AtomicBool>,
-    close_reason: Arc<Mutex<Option<String>>>,
-    stdout_log_write_error: Arc<Mutex<Option<String>>>,
+    close_reason: Arc<OnceLock<String>>,
+    stdout_log_write_error: Arc<OnceLock<String>>,
 }
 
 impl std::fmt::Debug for ClientHandle {
@@ -341,10 +341,7 @@ impl ClientHandle {
     }
 
     pub fn close_reason(&self) -> Option<String> {
-        self.close_reason
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone())
+        self.close_reason.get().cloned()
     }
 
     /// Returns the last stdout log write error, if any.
@@ -352,20 +349,11 @@ impl ClientHandle {
     /// When this is set, the client disables stdout log writes for the remainder of its
     /// lifetime. This is not treated as a fatal transport error.
     pub fn stdout_log_write_error(&self) -> Option<String> {
-        self.stdout_log_write_error
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone())
+        self.stdout_log_write_error.get().cloned()
     }
 
     fn record_stdout_log_write_error(&self, err: &std::io::Error) {
-        let mut guard = self
-            .stdout_log_write_error
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if guard.is_none() {
-            *guard = Some(err.to_string());
-        }
+        let _ = self.stdout_log_write_error.set(err.to_string());
     }
 
     fn check_closed(&self) -> Result<(), Error> {
@@ -374,9 +362,8 @@ impl ClientHandle {
         }
         let reason = self
             .close_reason
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone())
+            .get()
+            .cloned()
             .unwrap_or_else(|| "client closed".to_string());
         Err(Error::protocol(ProtocolErrorKind::Closed, reason))
     }
@@ -394,11 +381,7 @@ impl ClientHandle {
         let reason = reason.into();
 
         self.closed.store(true, Ordering::Relaxed);
-        if let Ok(mut guard) = self.close_reason.lock() {
-            if guard.is_none() {
-                *guard = Some(reason);
-            }
-        }
+        let _ = self.close_reason.set(reason);
 
         drain_pending(&self.pending, &err);
         let mut write = self.write.lock().await;
@@ -695,8 +678,8 @@ impl Client {
             stats: stats.clone(),
             diagnostics: diagnostics_state.clone(),
             closed: Arc::new(AtomicBool::new(false)),
-            close_reason: Arc::new(Mutex::new(None)),
-            stdout_log_write_error: Arc::new(Mutex::new(None)),
+            close_reason: Arc::new(OnceLock::new()),
+            stdout_log_write_error: Arc::new(OnceLock::new()),
         };
 
         let stdout_log = match stdout_log {
@@ -858,11 +841,7 @@ impl Client {
 impl Drop for Client {
     fn drop(&mut self) {
         self.handle.closed.store(true, Ordering::Relaxed);
-        if let Ok(mut guard) = self.handle.close_reason.lock() {
-            if guard.is_none() {
-                *guard = Some("client closed".to_string());
-            }
-        }
+        let _ = self.handle.close_reason.set("client closed".to_string());
         self.task.abort();
         for task in self.transport_tasks.drain(..) {
             task.abort();

@@ -94,7 +94,7 @@ impl ServerHandlerTimeoutCounts {
             .collect()
     }
 
-    fn take_and_clear(&self) -> HashMap<ServerName, u64> {
+    fn take_and_reset(&self) -> HashMap<ServerName, u64> {
         self.counters
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -395,9 +395,13 @@ impl Manager {
         self.server_handler_timeout_counts.snapshot()
     }
 
-    /// Takes (and clears) the timeout counts map.
+    /// Takes a snapshot of timeout counts and resets all counters to zero.
+    ///
+    /// Note: the set of tracked servers is retained because active handler tasks hold shared
+    /// counters. After calling this, `server_handler_timeout_counts()` can still include
+    /// servers with a count of 0.
     pub fn take_server_handler_timeout_counts(&mut self) -> HashMap<ServerName, u64> {
-        self.server_handler_timeout_counts.take_and_clear()
+        self.server_handler_timeout_counts.take_and_reset()
     }
 
     pub fn with_capabilities(mut self, capabilities: Value) -> Self {

@@ -22,7 +22,9 @@
 - `mcp-kit`：移除 `Manager::connect` 内对 `argv` 的重复校验（统一由 `ServerConfig::validate` 负责）；并小幅整理 `normalize_ip` 的实现，降低后续继续加规则时的维护成本（行为不变）。
 - `mcp-jsonrpc`：deflake 一处 EOF 相关单测（仅测试改动，不影响库行为）。
 - `mcp-kit`：收口 `Config::load` / `validate` 的重复校验，并在包裹错误时保留 `anyhow` 的 source chain（错误文案仍包含根因）；同时将 server→client handler 超时计数改为 per-server 原子计数，避免在 handler 路径上持锁更新（API 不变）。
+- `mcp-kit`：修正文档：`Manager::take_server_handler_timeout_counts()` 会重置计数但不会移除已跟踪的 server key（实现原因：handler task 持有共享计数器）；并补充单测覆盖该语义（API 不变）。
 - `mcp-jsonrpc`：stdout_log 写入失败不再直接 `eprintln!`；改为通过 `ClientHandle::stdout_log_write_error()` 暴露（失败后会禁用 stdout_log 写入）。
+- `mcp-jsonrpc`：`ClientHandle` 的 `close_reason` / `stdout_log_write_error` 内部存储从 `Mutex<Option<String>>` 改为 `OnceLock<String>`，减少锁与 poison 分支（API 不变）。
 
 ### Added
 - `mcp-kit`：`ServerName` 现在实现 `Deserialize`（`serde`），便于在配置/外部数据模型中直接使用。

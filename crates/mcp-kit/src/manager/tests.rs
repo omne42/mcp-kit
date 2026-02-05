@@ -57,6 +57,34 @@ fn try_from_config_rejects_invalid_client_config() {
 }
 
 #[test]
+fn server_handler_timeout_counts_take_resets_counters() {
+    let counts = ServerHandlerTimeoutCounts::default();
+    let a = ServerName::parse("a").unwrap();
+    let b = ServerName::parse("b").unwrap();
+
+    counts
+        .counter_for(&a)
+        .fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+    counts
+        .counter_for(&b)
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    assert_eq!(counts.count("a"), 2);
+    assert_eq!(counts.count("b"), 1);
+
+    let taken = counts.take_and_reset();
+    assert_eq!(taken.get("a"), Some(&2));
+    assert_eq!(taken.get("b"), Some(&1));
+
+    assert_eq!(counts.count("a"), 0);
+    assert_eq!(counts.count("b"), 0);
+
+    let snap = counts.snapshot();
+    assert_eq!(snap.get("a"), Some(&0));
+    assert_eq!(snap.get("b"), Some(&0));
+}
+
+#[test]
 fn expand_placeholders_supports_claude_plugin_root() {
     let cwd = Path::new("/tmp/plugin");
     let expanded = expand_placeholders_trusted("${CLAUDE_PLUGIN_ROOT}/servers/mcp", cwd).unwrap();
