@@ -669,20 +669,24 @@ impl Manager {
                     }
                 }
 
-                let mut headers: std::collections::HashMap<String, String> = server_cfg
+                let capacity = server_cfg
                     .http_headers()
-                    .iter()
-                    .map(|(k, v)| {
-                        let v = if self.trust_mode == TrustMode::Trusted {
-                            expand_placeholders_trusted(v, cwd).with_context(|| {
-                                format!("expand http_header placeholder: {server_name} header={k}")
-                            })?
-                        } else {
-                            v.to_string()
-                        };
-                        Ok((k.to_string(), v))
-                    })
-                    .collect::<anyhow::Result<_>>()?;
+                    .len()
+                    .saturating_add(1)
+                    .saturating_add(usize::from(server_cfg.bearer_token_env_var().is_some()))
+                    .saturating_add(server_cfg.env_http_headers().len());
+                let mut headers = std::collections::HashMap::with_capacity(capacity);
+
+                for (k, v) in server_cfg.http_headers() {
+                    let v = if self.trust_mode == TrustMode::Trusted {
+                        expand_placeholders_trusted(v, cwd).with_context(|| {
+                            format!("expand http_header placeholder: {server_name} header={k}")
+                        })?
+                    } else {
+                        v.to_string()
+                    };
+                    headers.insert(k.to_string(), v);
+                }
                 headers.insert(
                     "MCP-Protocol-Version".to_string(),
                     self.protocol_version.clone(),
