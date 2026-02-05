@@ -12,6 +12,40 @@ use crate::{
     Client, ClientHandle, Error, Limits, ProtocolErrorKind, SpawnOptions, StreamableHttpOptions,
 };
 
+fn ends_with_ignore_ascii_case(haystack: &str, suffix: &str) -> bool {
+    if suffix.len() > haystack.len() {
+        return false;
+    }
+    haystack
+        .get(haystack.len() - suffix.len()..)
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
+}
+
+fn media_type(content_type: &str) -> &str {
+    content_type.trim().split(';').next().unwrap_or("").trim()
+}
+
+fn is_event_stream_content_type(content_type: &str) -> bool {
+    media_type(content_type).eq_ignore_ascii_case("text/event-stream")
+}
+
+fn is_json_content_type(content_type: &str) -> bool {
+    if content_type.trim().is_empty() {
+        return true;
+    }
+    let ct = media_type(content_type);
+    let Some((ty, subty)) = ct.split_once('/') else {
+        return false;
+    };
+    if !ty.eq_ignore_ascii_case("application") {
+        return false;
+    }
+    if subty.eq_ignore_ascii_case("json") {
+        return true;
+    }
+    ends_with_ignore_ascii_case(subty, "+json")
+}
+
 impl Client {
     pub async fn connect_streamable_http(url: &str) -> Result<Self, Error> {
         Self::connect_streamable_http_with_options(
@@ -91,8 +125,7 @@ impl Client {
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
-            let content_type_lower = content_type.to_ascii_lowercase();
-            if !content_type_lower.starts_with("text/event-stream") {
+            if !is_event_stream_content_type(content_type) {
                 return Err(Error::protocol(
                     ProtocolErrorKind::StreamableHttp,
                     format!(
@@ -383,8 +416,7 @@ impl HttpPostBridge {
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("");
 
-                let content_type_lower = content_type.to_ascii_lowercase();
-                if content_type_lower.starts_with("text/event-stream") {
+                if is_event_stream_content_type(content_type) {
                     let stream = resp
                         .bytes_stream()
                         .map(|chunk| chunk.map_err(io::Error::other));
@@ -421,11 +453,7 @@ impl HttpPostBridge {
                     continue;
                 }
 
-                let is_json_content_type = content_type.is_empty()
-                    || content_type_lower.starts_with("application/json")
-                    || (content_type_lower.starts_with("application/")
-                        && content_type_lower.contains("+json"));
-                if !is_json_content_type {
+                if !is_json_content_type(content_type) {
                     if let Some(id) = id {
                         let _ = write_error_response(
                             &writer,

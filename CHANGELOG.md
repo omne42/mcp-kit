@@ -129,6 +129,7 @@
 - `mcp-jsonrpc`：补齐 `streamable_http` 的回归覆盖（`mcp-session-id` 复用/更新、POST 返回 SSE + `[DONE]`、非 JSON `Content-Type` 的错误桥接）。
 - `mcp-jsonrpc`：当入站消息包含 `method` 但类型非法时，会返回 `-32600 Invalid Request`（若有 `id`）并避免误当作 response 消费 pending。
 - `mcp-jsonrpc`：`streamable_http` 的 HTTP 200 + 空 JSON body（非 202）现在会桥接为 `-32000` error，避免 request 悬挂。
+- `mcp-jsonrpc`：`streamable_http` 的 `Content-Type` 校验不再做额外字符串分配（小幅减少 hot path 开销）。
 - `mcp-kit`：对无 child 的连接（unix/streamable_http）会检查 JSON-RPC client closed 状态并清理缓存，避免复用失活连接。
 - `mcp-kit`：当 `initialize` 失败时会自动 abort 已挂载的 server→client handler tasks，避免遗留后台任务。
 - `mcp-kit`：`ProtocolVersionCheck` / `ProtocolVersionMismatch` 现已从 crate root 重新导出（可直接用 `mcp_kit::ProtocolVersionCheck`）。
