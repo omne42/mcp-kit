@@ -36,6 +36,8 @@
 - `mcp-kit`：重构 `Config::load` 为若干小 helper 函数，降低单函数复杂度（行为不变）。
 - `mcp-kit`：进一步收口 server→client handler 的 timeout/panic 桥接逻辑，减少重复代码（行为不变）。
 - `mcp-kit`：`Manager::connect` 的 unix 分支改用 `ServerConfig` 的不变量访问器读取 `unix_path`，去除不可能发生的 `Option` 分支（行为不变）。
+- `mcp-kit`：进一步收口 v1/external transport 字段互斥校验为共享 helper，降低规则漂移风险（行为不变）。
+- `mcp-kit`：补充 server→client handler 的 panic 隔离边界说明（行为不变）。
 
 ### Added
 - `mcp-kit`：`ServerName` 现在实现 `Deserialize`（`serde`），便于在配置/外部数据模型中直接使用。

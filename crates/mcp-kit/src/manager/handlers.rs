@@ -19,6 +19,11 @@ enum HandlerOutcome<T> {
     TimedOut { timeout: std::time::Duration },
 }
 
+/// Run a user-provided handler with an optional timeout.
+///
+/// This is a deliberate panic-isolation boundary: panics are caught so a buggy handler can't tear
+/// down the background handler tasks. Do not rely on panics for control flow, and avoid mutable
+/// shared state across calls unless it remains correct after a panic.
 async fn run_handler_with_timeout<T, Fut>(
     timeout: Option<std::time::Duration>,
     timeout_counter: &Arc<std::sync::atomic::AtomicU64>,

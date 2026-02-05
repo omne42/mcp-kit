@@ -144,6 +144,97 @@ async fn parse_config_or_external(
     }
 }
 
+fn resolve_inherit_env(
+    name: &str,
+    transport: Transport,
+    inherit_env: Option<bool>,
+) -> anyhow::Result<bool> {
+    match transport {
+        Transport::Stdio => Ok(inherit_env.unwrap_or(false)),
+        _ => {
+            if inherit_env.is_some() {
+                anyhow::bail!("mcp server {name}: inherit_env is only valid for transport=stdio");
+            }
+            Ok(true)
+        }
+    }
+}
+
+fn ensure_unix_path_only_for_unix(name: &str, unix_path_present: bool) -> anyhow::Result<()> {
+    if unix_path_present {
+        anyhow::bail!("mcp server {name}: unix_path is only valid for transport=unix");
+    }
+    Ok(())
+}
+
+fn ensure_url_fields_only_for_streamable_http(
+    name: &str,
+    has_url_fields: bool,
+) -> anyhow::Result<()> {
+    if has_url_fields {
+        anyhow::bail!(
+            "mcp server {name}: url/sse_url/http_url are only valid for transport=streamable_http"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_http_headers_auth_only_for_streamable_http(
+    name: &str,
+    has_auth_fields: bool,
+) -> anyhow::Result<()> {
+    if has_auth_fields {
+        anyhow::bail!(
+            "mcp server {name}: http headers/auth are only valid for transport=streamable_http"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_env_empty(name: &str, transport: Transport, env_nonempty: bool) -> anyhow::Result<()> {
+    if !env_nonempty {
+        return Ok(());
+    }
+    match transport {
+        Transport::Unix => {
+            anyhow::bail!("mcp server {name}: env is not supported for transport=unix")
+        }
+        Transport::StreamableHttp => {
+            anyhow::bail!("mcp server {name}: env is not supported for transport=streamable_http")
+        }
+        Transport::Stdio => Ok(()),
+    }
+}
+
+fn ensure_stdout_log_supported(
+    name: &str,
+    transport: Transport,
+    stdout_log_present: bool,
+) -> anyhow::Result<()> {
+    if !stdout_log_present {
+        return Ok(());
+    }
+    match transport {
+        Transport::Unix => {
+            anyhow::bail!("mcp server {name}: stdout_log is not supported for transport=unix")
+        }
+        Transport::StreamableHttp => anyhow::bail!(
+            "mcp server {name}: stdout_log is not supported for transport=streamable_http"
+        ),
+        Transport::Stdio => Ok(()),
+    }
+}
+
+fn ensure_command_args_argv_only_for_stdio(
+    name: &str,
+    has_command_args_argv: bool,
+) -> anyhow::Result<()> {
+    if has_command_args_argv {
+        anyhow::bail!("mcp server {name}: command/args/argv are only valid for transport=stdio");
+    }
+    Ok(())
+}
+
 fn build_v1_config(
     thread_root: &Path,
     path: Option<PathBuf>,
@@ -197,34 +288,20 @@ fn build_v1_config(
                 .map(|log| parse_stdout_log_config(thread_root, &name, log))
                 .transpose()?,
             Transport::Unix => {
-                if server.stdout_log.is_some() {
-                    anyhow::bail!(
-                        "mcp server {name}: stdout_log is not supported for transport=unix"
-                    );
-                }
+                ensure_stdout_log_supported(&name, Transport::Unix, server.stdout_log.is_some())?;
                 None
             }
             Transport::StreamableHttp => {
-                if server.stdout_log.is_some() {
-                    anyhow::bail!(
-                        "mcp server {name}: stdout_log is not supported for transport=streamable_http"
-                    );
-                }
+                ensure_stdout_log_supported(
+                    &name,
+                    Transport::StreamableHttp,
+                    server.stdout_log.is_some(),
+                )?;
                 None
             }
         };
 
-        let inherit_env = match server.transport {
-            Transport::Stdio => server.inherit_env.unwrap_or(false),
-            _ => {
-                if server.inherit_env.is_some() {
-                    anyhow::bail!(
-                        "mcp server {name}: inherit_env is only valid for transport=stdio"
-                    );
-                }
-                true
-            }
-        };
+        let inherit_env = resolve_inherit_env(&name, server.transport, server.inherit_env)?;
 
         let argv = match server.transport {
             Transport::Stdio => server.argv.unwrap_or_default(),
@@ -243,22 +320,17 @@ fn build_v1_config(
 
         let server_cfg = match server.transport {
             Transport::Stdio => {
-                if unix_path.is_some() {
-                    anyhow::bail!("mcp server {name}: unix_path is only valid for transport=unix");
-                }
-                if server.url.is_some() || server.sse_url.is_some() || server.http_url.is_some() {
-                    anyhow::bail!(
-                        "mcp server {name}: url/sse_url/http_url are only valid for transport=streamable_http"
-                    );
-                }
-                if server.bearer_token_env_var.is_some()
-                    || !server.http_headers.is_empty()
-                    || !server.env_http_headers.is_empty()
-                {
-                    anyhow::bail!(
-                        "mcp server {name}: http headers/auth are only valid for transport=streamable_http"
-                    );
-                }
+                ensure_unix_path_only_for_unix(&name, unix_path.is_some())?;
+                ensure_url_fields_only_for_streamable_http(
+                    &name,
+                    server.url.is_some() || server.sse_url.is_some() || server.http_url.is_some(),
+                )?;
+                ensure_http_headers_auth_only_for_streamable_http(
+                    &name,
+                    server.bearer_token_env_var.is_some()
+                        || !server.http_headers.is_empty()
+                        || !server.env_http_headers.is_empty(),
+                )?;
 
                 let mut server_cfg = ServerConfig::stdio(argv)?;
                 server_cfg.set_inherit_env(inherit_env)?;
@@ -267,22 +339,17 @@ fn build_v1_config(
                 server_cfg
             }
             Transport::Unix => {
-                if server.url.is_some() || server.sse_url.is_some() || server.http_url.is_some() {
-                    anyhow::bail!(
-                        "mcp server {name}: url/sse_url/http_url are only valid for transport=streamable_http"
-                    );
-                }
-                if !server.env.is_empty() {
-                    anyhow::bail!("mcp server {name}: env is not supported for transport=unix");
-                }
-                if server.bearer_token_env_var.is_some()
-                    || !server.http_headers.is_empty()
-                    || !server.env_http_headers.is_empty()
-                {
-                    anyhow::bail!(
-                        "mcp server {name}: http headers/auth are only valid for transport=streamable_http"
-                    );
-                }
+                ensure_url_fields_only_for_streamable_http(
+                    &name,
+                    server.url.is_some() || server.sse_url.is_some() || server.http_url.is_some(),
+                )?;
+                ensure_env_empty(&name, Transport::Unix, !server.env.is_empty())?;
+                ensure_http_headers_auth_only_for_streamable_http(
+                    &name,
+                    server.bearer_token_env_var.is_some()
+                        || !server.http_headers.is_empty()
+                        || !server.env_http_headers.is_empty(),
+                )?;
 
                 let unix_path = unix_path.ok_or_else(|| {
                     anyhow::anyhow!("mcp server {name}: unix_path is required for transport=unix")
@@ -290,14 +357,8 @@ fn build_v1_config(
                 ServerConfig::unix(unix_path)?
             }
             Transport::StreamableHttp => {
-                if unix_path.is_some() {
-                    anyhow::bail!("mcp server {name}: unix_path is only valid for transport=unix");
-                }
-                if !server.env.is_empty() {
-                    anyhow::bail!(
-                        "mcp server {name}: env is not supported for transport=streamable_http"
-                    );
-                }
+                ensure_unix_path_only_for_unix(&name, unix_path.is_some())?;
+                ensure_env_empty(&name, Transport::StreamableHttp, !server.env.is_empty())?;
 
                 let mut server_cfg = match (server.url, server.sse_url, server.http_url) {
                     (Some(url), None, None) => ServerConfig::streamable_http(url)?,
@@ -481,38 +542,27 @@ impl Config {
             }
 
             let inherit_env = match transport {
-                Transport::Stdio => server.inherit_env.unwrap_or(false),
-                _ => {
-                    if server.inherit_env.is_some() {
-                        anyhow::bail!(
-                            "mcp server {name}: inherit_env is only valid for transport=stdio"
-                        );
-                    }
-                    true
+                Transport::Stdio => {
+                    resolve_inherit_env(&name, Transport::Stdio, server.inherit_env)?
                 }
+                _ => resolve_inherit_env(&name, transport, server.inherit_env)?,
             };
 
             match transport {
                 Transport::Stdio => {
-                    if server.unix_path.is_some() {
-                        anyhow::bail!(
-                            "mcp server {name}: unix_path is only valid for transport=unix"
-                        );
-                    }
-                    if server.url.is_some() || server.sse_url.is_some() || server.http_url.is_some()
-                    {
-                        anyhow::bail!(
-                            "mcp server {name}: url/sse_url/http_url are only valid for transport=streamable_http"
-                        );
-                    }
-                    if server.bearer_token_env_var.is_some()
-                        || !server.http_headers.is_empty()
-                        || !server.env_http_headers.is_empty()
-                    {
-                        anyhow::bail!(
-                            "mcp server {name}: http headers/auth are only valid for transport=streamable_http"
-                        );
-                    }
+                    ensure_unix_path_only_for_unix(&name, server.unix_path.is_some())?;
+                    ensure_url_fields_only_for_streamable_http(
+                        &name,
+                        server.url.is_some()
+                            || server.sse_url.is_some()
+                            || server.http_url.is_some(),
+                    )?;
+                    ensure_http_headers_auth_only_for_streamable_http(
+                        &name,
+                        server.bearer_token_env_var.is_some()
+                            || !server.http_headers.is_empty()
+                            || !server.env_http_headers.is_empty(),
+                    )?;
 
                     let argv = match (server.argv, server.command) {
                         (Some(argv), _) => argv,
@@ -555,33 +605,32 @@ impl Config {
                     servers.insert(server_name, server_cfg);
                 }
                 Transport::Unix => {
-                    if server.command.is_some() || server.argv.is_some() || server.args.is_some() {
-                        anyhow::bail!(
-                            "mcp server {name}: command/args/argv are only valid for transport=stdio"
-                        );
-                    }
-                    if server.url.is_some() || server.sse_url.is_some() || server.http_url.is_some()
-                    {
-                        anyhow::bail!(
-                            "mcp server {name}: url/sse_url/http_url are only valid for transport=streamable_http"
-                        );
-                    }
-                    if !server.env.is_empty() || !server.environment.is_empty() {
-                        anyhow::bail!("mcp server {name}: env is not supported for transport=unix");
-                    }
-                    if server.stdout_log.is_some() {
-                        anyhow::bail!(
-                            "mcp server {name}: stdout_log is not supported for transport=unix"
-                        );
-                    }
-                    if server.bearer_token_env_var.is_some()
-                        || !server.http_headers.is_empty()
-                        || !server.env_http_headers.is_empty()
-                    {
-                        anyhow::bail!(
-                            "mcp server {name}: http headers/auth are only valid for transport=streamable_http"
-                        );
-                    }
+                    ensure_command_args_argv_only_for_stdio(
+                        &name,
+                        server.command.is_some() || server.argv.is_some() || server.args.is_some(),
+                    )?;
+                    ensure_url_fields_only_for_streamable_http(
+                        &name,
+                        server.url.is_some()
+                            || server.sse_url.is_some()
+                            || server.http_url.is_some(),
+                    )?;
+                    ensure_env_empty(
+                        &name,
+                        Transport::Unix,
+                        !server.env.is_empty() || !server.environment.is_empty(),
+                    )?;
+                    ensure_stdout_log_supported(
+                        &name,
+                        Transport::Unix,
+                        server.stdout_log.is_some(),
+                    )?;
+                    ensure_http_headers_auth_only_for_streamable_http(
+                        &name,
+                        server.bearer_token_env_var.is_some()
+                            || !server.http_headers.is_empty()
+                            || !server.env_http_headers.is_empty(),
+                    )?;
 
                     let unix_path = server.unix_path.ok_or_else(|| {
                         anyhow::anyhow!(
@@ -607,26 +656,21 @@ impl Config {
                     servers.insert(server_name, server_cfg);
                 }
                 Transport::StreamableHttp => {
-                    if server.command.is_some() || server.argv.is_some() || server.args.is_some() {
-                        anyhow::bail!(
-                            "mcp server {name}: command/args/argv are only valid for transport=stdio"
-                        );
-                    }
-                    if server.unix_path.is_some() {
-                        anyhow::bail!(
-                            "mcp server {name}: unix_path is only valid for transport=unix"
-                        );
-                    }
-                    if !server.env.is_empty() || !server.environment.is_empty() {
-                        anyhow::bail!(
-                            "mcp server {name}: env is not supported for transport=streamable_http"
-                        );
-                    }
-                    if server.stdout_log.is_some() {
-                        anyhow::bail!(
-                            "mcp server {name}: stdout_log is not supported for transport=streamable_http"
-                        );
-                    }
+                    ensure_command_args_argv_only_for_stdio(
+                        &name,
+                        server.command.is_some() || server.argv.is_some() || server.args.is_some(),
+                    )?;
+                    ensure_unix_path_only_for_unix(&name, server.unix_path.is_some())?;
+                    ensure_env_empty(
+                        &name,
+                        Transport::StreamableHttp,
+                        !server.env.is_empty() || !server.environment.is_empty(),
+                    )?;
+                    ensure_stdout_log_supported(
+                        &name,
+                        Transport::StreamableHttp,
+                        server.stdout_log.is_some(),
+                    )?;
 
                     let mut server_cfg = match (server.url, server.sse_url, server.http_url) {
                         (Some(url), None, None) => ServerConfig::streamable_http(url)?,
