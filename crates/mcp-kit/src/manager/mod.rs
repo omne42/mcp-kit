@@ -903,18 +903,12 @@ impl Manager {
         server_name: ServerName,
         client: &mut mcp_jsonrpc::Client,
     ) -> Vec<tokio::task::JoinHandle<()>> {
+        use futures_util::FutureExt as _;
+
         let mut tasks = Vec::new();
         let handler_concurrency = self.server_handler_concurrency.max(1);
         let handler_timeout = self.server_handler_timeout;
         let handler_timeout_counts = self.server_handler_timeout_counts.clone();
-
-        struct AbortOnDrop(tokio::task::AbortHandle);
-
-        impl Drop for AbortOnDrop {
-            fn drop(&mut self) {
-                self.0.abort();
-            }
-        }
 
         if let Some(mut requests_rx) = client.take_requests() {
             let handler = self.server_request_handler.clone();
@@ -941,65 +935,55 @@ impl Manager {
                                     params: req.params.clone(),
                                 };
 
-                                let mut handler_task = tokio::spawn(handler(ctx));
-                                let _abort_on_drop = AbortOnDrop(handler_task.abort_handle());
-                                let mut outcome = match handler_timeout {
-                                    Some(timeout) => match tokio::time::timeout(timeout, &mut handler_task).await {
-                                        Ok(joined) => match joined {
-                                            Ok(outcome) => outcome,
-                                            Err(err) if err.is_panic() => {
-                                                ServerRequestOutcome::Error {
+                                let mut outcome = match (handler_timeout, ctx) {
+                                    (Some(timeout), ctx) => {
+                                        let handler_fut = std::panic::AssertUnwindSafe(handler(ctx))
+                                            .catch_unwind();
+                                        match tokio::time::timeout(timeout, handler_fut).await {
+                                            Ok(joined) => match joined {
+                                                Ok(outcome) => outcome,
+                                                Err(_) => ServerRequestOutcome::Error {
                                                     code: JSONRPC_SERVER_ERROR,
                                                     message: format!(
                                                         "server request handler panicked: {method}"
                                                     ),
                                                     data: None,
+                                                },
+                                            },
+                                            Err(_) => {
+                                                {
+                                                    let mut counts = handler_timeout_counts
+                                                        .lock()
+                                                        .unwrap_or_else(|poisoned| {
+                                                            poisoned.into_inner()
+                                                        });
+                                                    *counts.entry(server_name.clone()).or_insert(0) +=
+                                                        1;
+                                                }
+                                                ServerRequestOutcome::Error {
+                                                    code: JSONRPC_SERVER_ERROR,
+                                                    message: format!(
+                                                        "server request handler timed out after {timeout:?}: {method}"
+                                                    ),
+                                                    data: None,
                                                 }
                                             }
-                                            Err(_) => ServerRequestOutcome::Error {
-                                                code: JSONRPC_SERVER_ERROR,
-                                                message: format!(
-                                                    "server request handler cancelled: {method}"
-                                                ),
-                                                data: None,
-                                            },
-                                        },
-                                        Err(_) => {
-                                            handler_task.abort();
-                                            {
-                                                let mut counts = handler_timeout_counts
-                                                    .lock()
-                                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                                *counts.entry(server_name.clone()).or_insert(0) += 1;
-                                            }
-                                            ServerRequestOutcome::Error {
-                                                code: JSONRPC_SERVER_ERROR,
-                                                message: format!(
-                                                    "server request handler timed out after {timeout:?}: {method}"
-                                                ),
-                                                data: None,
-                                            }
                                         }
-                                    },
-                                    None => match handler_task.await {
-                                        Ok(outcome) => outcome,
-                                        Err(err) if err.is_panic() => {
-                                            ServerRequestOutcome::Error {
+                                    }
+                                    (None, ctx) => {
+                                        let handler_fut = std::panic::AssertUnwindSafe(handler(ctx))
+                                            .catch_unwind();
+                                        match handler_fut.await {
+                                            Ok(outcome) => outcome,
+                                            Err(_) => ServerRequestOutcome::Error {
                                                 code: JSONRPC_SERVER_ERROR,
                                                 message: format!(
                                                     "server request handler panicked: {method}"
                                                 ),
                                                 data: None,
-                                            }
+                                            },
                                         }
-                                        Err(_) => ServerRequestOutcome::Error {
-                                            code: JSONRPC_SERVER_ERROR,
-                                            message: format!(
-                                                "server request handler cancelled: {method}"
-                                            ),
-                                            data: None,
-                                        },
-                                    },
+                                    }
                                 };
 
                                 if matches!(outcome, ServerRequestOutcome::MethodNotFound) {
@@ -1070,29 +1054,26 @@ impl Manager {
                                     params: note.params,
                                 };
 
-                                let mut handler_task = tokio::spawn(handler(ctx));
-                                let _abort_on_drop = AbortOnDrop(handler_task.abort_handle());
-                                match handler_timeout {
-                                    Some(timeout) => match tokio::time::timeout(timeout, &mut handler_task).await {
-                                        Ok(joined) => match joined {
-                                            Ok(()) => {}
-                                            Err(err) if err.is_panic() => {}
-                                            Err(_) => {}
-                                        },
-                                        Err(_) => {
-                                            handler_task.abort();
-                                            let mut counts = handler_timeout_counts
-                                                .lock()
-                                                .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                            *counts.entry(server_name).or_insert(0) += 1;
+                                match (handler_timeout, ctx) {
+                                    (Some(timeout), ctx) => {
+                                        let handler_fut = std::panic::AssertUnwindSafe(handler(ctx))
+                                            .catch_unwind();
+                                        match tokio::time::timeout(timeout, handler_fut).await {
+                                            Ok(Ok(())) | Ok(Err(_)) => {}
+                                            Err(_) => {
+                                                let mut counts = handler_timeout_counts
+                                                    .lock()
+                                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                                *counts.entry(server_name).or_insert(0) += 1;
+                                            }
                                         }
-                                    },
-                                    None => match handler_task.await {
-                                        Ok(()) => {}
-                                        Err(err) if err.is_panic() => {}
-                                        Err(_) => {}
-                                    },
-                                }
+                                    }
+                                    (None, ctx) => {
+                                        let handler_fut = std::panic::AssertUnwindSafe(handler(ctx))
+                                            .catch_unwind();
+                                        let _ = handler_fut.await;
+                                    }
+                                };
                             });
                         }
                         Some(outcome) = in_flight.join_next(), if !in_flight.is_empty() => {

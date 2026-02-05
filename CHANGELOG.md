@@ -127,7 +127,7 @@
 - `mcp-jsonrpc`：streamable_http POST bridge 在收到无效 JSON 时会 fail-fast 关闭连接，避免 pending request 无限悬挂。
 - `mcp-kit`：Windows 下读取 `mcp.json` 时 open 会设置 `FILE_FLAG_OPEN_REPARSE_POINT`（best-effort），降低 TOCTOU symlink replacement 风险。
 - `mcp-kit`：server→client request handler panic 现在会桥接为 `-32000` error 并继续处理后续消息，避免后台任务 panic 导致连接被动断开。
-- `mcp-kit`：server→client handler 在超时/取消场景会被显式 abort，避免遗留 detached task；同时避免库代码向 stderr 输出噪音日志。
+- `mcp-kit`：server→client handler 在超时场景会 fail-fast 并取消 handler future（避免遗留 detached task）；同时避免库代码向 stderr 输出噪音日志。
 - `mcp-kit`/`mcp-jsonrpc`：新增 `#![forbid(unsafe_code)]`（保持零 unsafe）。
 - `mcp-jsonrpc`：当 server→client request 的 `jsonrpc` 版本非法但 `id` 合法时，`-32600 Invalid Request` 现在会回显原始 `id`（而不是 `null`），保持 JSON-RPC 2.0 相关性语义。
 - `mcp-jsonrpc`：补齐 `streamable_http` 的回归覆盖（`mcp-session-id` 复用/更新、POST 返回 SSE + `[DONE]`、非 JSON `Content-Type` 的错误桥接）。
