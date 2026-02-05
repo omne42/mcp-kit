@@ -13,6 +13,40 @@ const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
+enum HandlerOutcome<T> {
+    Ok(T),
+    Panicked,
+    TimedOut { timeout: std::time::Duration },
+}
+
+async fn run_handler_with_timeout<T, Fut>(
+    timeout: Option<std::time::Duration>,
+    timeout_counter: &Arc<std::sync::atomic::AtomicU64>,
+    fut: Fut,
+) -> HandlerOutcome<T>
+where
+    Fut: Future<Output = T> + Send,
+{
+    use futures_util::FutureExt as _;
+
+    let handler_fut = std::panic::AssertUnwindSafe(fut).catch_unwind();
+
+    match timeout {
+        Some(timeout) => match tokio::time::timeout(timeout, handler_fut).await {
+            Ok(Ok(output)) => HandlerOutcome::Ok(output),
+            Ok(Err(_)) => HandlerOutcome::Panicked,
+            Err(_) => {
+                timeout_counter.fetch_add(1, Ordering::Relaxed);
+                HandlerOutcome::TimedOut { timeout }
+            }
+        },
+        None => match handler_fut.await {
+            Ok(output) => HandlerOutcome::Ok(output),
+            Err(_) => HandlerOutcome::Panicked,
+        },
+    }
+}
+
 async fn drive_handler_tasks<T, F, Fut>(
     mut rx: tokio::sync::mpsc::Receiver<T>,
     concurrency: usize,
@@ -87,8 +121,6 @@ impl Manager {
         server_name: crate::ServerName,
         client: &mut mcp_jsonrpc::Client,
     ) -> Vec<tokio::task::JoinHandle<()>> {
-        use futures_util::FutureExt as _;
-
         let mut tasks = Vec::new();
         let handler_concurrency = self.server_handler_concurrency.max(1);
         let handler_timeout = self.server_handler_timeout;
@@ -115,45 +147,26 @@ impl Manager {
                             params: req.params.clone(),
                         };
 
-                        let mut outcome = match (handler_timeout, ctx) {
-                            (Some(timeout), ctx) => {
-                                let handler_fut =
-                                    std::panic::AssertUnwindSafe(handler(ctx)).catch_unwind();
-                                match tokio::time::timeout(timeout, handler_fut).await {
-                                    Ok(joined) => match joined {
-                                        Ok(outcome) => outcome,
-                                        Err(_) => ServerRequestOutcome::Error {
-                                            code: JSONRPC_SERVER_ERROR,
-                                            message: format!(
-                                                "server request handler panicked: {method}"
-                                            ),
-                                            data: None,
-                                        },
-                                    },
-                                    Err(_) => {
-                                        timeout_counter.fetch_add(1, Ordering::Relaxed);
-                                        ServerRequestOutcome::Error {
-                                            code: JSONRPC_SERVER_ERROR,
-                                            message: format!(
-                                                "server request handler timed out after {timeout:?}: {method}"
-                                            ),
-                                            data: None,
-                                        }
-                                    }
-                                }
-                            }
-                            (None, ctx) => {
-                                let handler_fut =
-                                    std::panic::AssertUnwindSafe(handler(ctx)).catch_unwind();
-                                match handler_fut.await {
-                                    Ok(outcome) => outcome,
-                                    Err(_) => ServerRequestOutcome::Error {
-                                        code: JSONRPC_SERVER_ERROR,
-                                        message: format!("server request handler panicked: {method}"),
-                                        data: None,
-                                    },
-                                }
-                            }
+                        let mut outcome = match run_handler_with_timeout(
+                            handler_timeout,
+                            &timeout_counter,
+                            handler(ctx),
+                        )
+                        .await
+                        {
+                            HandlerOutcome::Ok(outcome) => outcome,
+                            HandlerOutcome::Panicked => ServerRequestOutcome::Error {
+                                code: JSONRPC_SERVER_ERROR,
+                                message: format!("server request handler panicked: {method}"),
+                                data: None,
+                            },
+                            HandlerOutcome::TimedOut { timeout } => ServerRequestOutcome::Error {
+                                code: JSONRPC_SERVER_ERROR,
+                                message: format!(
+                                    "server request handler timed out after {timeout:?}: {method}"
+                                ),
+                                data: None,
+                            },
                         };
 
                         if matches!(outcome, ServerRequestOutcome::MethodNotFound) {
@@ -168,7 +181,11 @@ impl Manager {
                             ServerRequestOutcome::Ok(result) => {
                                 let _ = req.respond_ok(result).await;
                             }
-                            ServerRequestOutcome::Error { code, message, data } => {
+                            ServerRequestOutcome::Error {
+                                code,
+                                message,
+                                data,
+                            } => {
                                 let _ = req.respond_error(code, message, data).await;
                             }
                             ServerRequestOutcome::MethodNotFound => {
@@ -203,23 +220,12 @@ impl Manager {
                             params: note.params,
                         };
 
-                        match (handler_timeout, ctx) {
-                            (Some(timeout), ctx) => {
-                                let handler_fut =
-                                    std::panic::AssertUnwindSafe(handler(ctx)).catch_unwind();
-                                match tokio::time::timeout(timeout, handler_fut).await {
-                                    Ok(Ok(())) | Ok(Err(_)) => {}
-                                    Err(_) => {
-                                        timeout_counter.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                }
-                            }
-                            (None, ctx) => {
-                                let handler_fut =
-                                    std::panic::AssertUnwindSafe(handler(ctx)).catch_unwind();
-                                let _ = handler_fut.await;
-                            }
-                        };
+                        let _ = run_handler_with_timeout(
+                            handler_timeout,
+                            &timeout_counter,
+                            handler(ctx),
+                        )
+                        .await;
                     }
                 })
                 .await;

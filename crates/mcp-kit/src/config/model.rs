@@ -317,6 +317,13 @@ impl ServerConfig {
         }
     }
 
+    pub(crate) fn unix_path_required(&self) -> &Path {
+        match self {
+            Self::Unix(cfg) => cfg.unix_path.as_path(),
+            _ => unreachable!("unix_path_required called for non-unix transport"),
+        }
+    }
+
     pub fn url(&self) -> Option<&str> {
         match self {
             Self::StreamableHttp(cfg) => match &cfg.urls {

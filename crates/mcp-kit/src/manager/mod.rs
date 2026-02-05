@@ -580,9 +580,7 @@ impl Manager {
                         "refusing to connect unix mcp server in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
                     );
                 }
-                let unix_path = server_cfg
-                    .unix_path()
-                    .ok_or_else(|| anyhow::anyhow!("mcp server unix_path must be set"))?;
+                let unix_path = server_cfg.unix_path_required();
                 let client = mcp_jsonrpc::Client::connect_unix(unix_path)
                     .await
                     .with_context(|| {

@@ -33,6 +33,9 @@
 - `mcp-kit`：`ServerConfig::validate` 在 `streamable_http` 场景下会 fail-fast 校验 `http_headers` / `env_http_headers` 的 header name/value 合法性；并将外部 `mcpServers` 格式的 streamable_http 校验收口到 `ServerConfig::validate`，避免重复规则漂移。
 - `mcp-kit`：配置加载时，`stdout_log` 只在 `transport=stdio` 分支解析（v1 `mcp.json` 与外部 `mcpServers` 格式一致）；对 `unix/streamable_http` 优先报“不支持 stdout_log”，避免先报 stdout_log 配置格式错误（更一致）。
 - `mcp-kit`：`stdout_log.max_bytes_per_part=0` 现在会 fail-fast 拒绝（不再被钳到 1）。
+- `mcp-kit`：重构 `Config::load` 为若干小 helper 函数，降低单函数复杂度（行为不变）。
+- `mcp-kit`：进一步收口 server→client handler 的 timeout/panic 桥接逻辑，减少重复代码（行为不变）。
+- `mcp-kit`：`Manager::connect` 的 unix 分支改用 `ServerConfig` 的不变量访问器读取 `unix_path`，去除不可能发生的 `Option` 分支（行为不变）。
 
 ### Added
 - `mcp-kit`：`ServerName` 现在实现 `Deserialize`（`serde`），便于在配置/外部数据模型中直接使用。
