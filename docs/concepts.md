@@ -70,7 +70,7 @@ MCP 的 roots 能力用于让 client 告诉 server：“我允许你把哪些目
 常见使用路径：
 
 1. `Config::load` 读取配置
-2. `Manager::from_config` 创建 manager
+2. `Manager::from_config` 创建 manager（`Config::load` 已隐式校验；手动构造 config 可用 `Manager::try_from_config` 做 fail-fast 校验）
 3. `Manager::request/list_tools/call_tool/...` 发请求（内部会按需 connect + initialize）
 4. （可选）`Manager::get_or_connect_session` 取出某个 server 的 `Session`，交给别的组件用
 

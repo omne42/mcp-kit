@@ -13,7 +13,7 @@
 - 文档入口：`docs/README.md`
 - GitBook 目录：`docs/SUMMARY.md`
 - 推荐阅读顺序：`docs/quickstart.md` → `docs/config.md` → `docs/library.md` → `docs/security.md`
-- 本地预览（可选）：`cargo install mdbook && mdbook serve docs --open`
+- 本地预览（可选）：`cargo install mdbook --locked && mdbook serve docs --open`
 - 给 LLM 用的单文件文档：`llms.txt` / `docs/llms.txt`（生成脚本：`./scripts/gen-llms-txt.sh`）
 
 ## 快速开始
@@ -69,6 +69,8 @@ async fn main() -> anyhow::Result<()> {
     // 如确需启用本地 transport 或 env secrets，显式开启：`.with_trust_mode(TrustMode::Trusted)`
     // 如需在不完全信任的前提下，收紧/放开远程出站规则，可配置 policy：
     // `.with_untrusted_streamable_http_policy(UntrustedStreamableHttpPolicy { allowed_hosts: vec!["example.com".into()], ..Default::default() })`
+    //
+    // `Config::load` 已隐式校验 `config.client()`；手动构造 config 时可用 `Manager::try_from_config`。
     let mut mcp = Manager::from_config(&config, "my-app", "0.1.0", Duration::from_secs(30))
         .with_untrusted_streamable_http_policy(UntrustedStreamableHttpPolicy {
             allowed_hosts: vec!["example.com".to_string()],
@@ -116,5 +118,5 @@ mcpctl --dns-check --allow-host example.com list-tools <server>
 
 ## 开发
 
-- 启用 hooks：`git config core.hooksPath githooks`
+- 启用 hooks：`bash ./scripts/setup-githooks.sh`（或手动 `git config core.hooksPath githooks`）
 - Rust gates：`cargo fmt --all && cargo check --workspace --all-targets --all-features && cargo test --workspace --all-features && cargo clippy --workspace --all-targets --all-features -- -D warnings`

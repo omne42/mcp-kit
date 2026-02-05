@@ -22,7 +22,7 @@ let config = mcp_kit::Config::load(&root, None).await?;
 
 详情见 [`配置`](config.md)。
 
-## 创建 client：`Manager::from_config`
+## 创建 client：`Manager::from_config` / `Manager::try_from_config`
 
 ```rust
 use std::time::Duration;
@@ -34,6 +34,11 @@ let mut manager = mcp_kit::Manager::from_config(
     Duration::from_secs(30),
 );
 ```
+
+说明：
+
+- `Config::load` 已隐式校验 `config.client()`；因此从 `Config::load` 得到的 `Config` 用 `Manager::from_config` 即可。
+- 如果你**手动构造** `Config`（尤其是 `client.*` 字段），用 `Manager::try_from_config` 做 fail-fast 校验更安全（会返回 `Result`，而不是在后续 initialize/请求路径里才暴露问题）。
 
 它会把 `config.client().protocol_version / capabilities / roots` 自动灌入 `Manager`：
 

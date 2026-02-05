@@ -9,7 +9,7 @@
 
 ```bash
 cd mcp-kit
-git config core.hooksPath githooks
+bash ./scripts/setup-githooks.sh
 ```
 
 ## 本地验证（gates）
@@ -28,7 +28,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 本地预览（可选）：
 
 ```bash
-cargo install mdbook
+cargo install mdbook --locked
 mdbook serve docs --open
 ```
 

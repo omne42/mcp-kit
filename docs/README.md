@@ -49,6 +49,7 @@ async fn main() -> anyhow::Result<()> {
     let root = std::env::current_dir()?;
     let config = Config::load(&root, None).await?;
 
+    // `Config::load` 已隐式校验 `config.client()`；手动构造 config 时可用 `Manager::try_from_config`。
     let mut manager = Manager::from_config(&config, "my-client", "0.1.0", Duration::from_secs(30));
     let tools = manager
         .request_typed::<mcp::ListToolsRequest>(&config, "remote", None, &root)
@@ -90,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
 本仓库的文档结构兼容 mdbook（目录由 `docs/SUMMARY.md` 驱动；配置见 `docs/book.toml`）。
 
 ```bash
-cargo install mdbook
+cargo install mdbook --locked
 mdbook serve docs --open
 ```
 

@@ -73,7 +73,7 @@ cargo run -p mcp-kit --features cli --bin mcpctl -- --trust --yes-trust list-too
 `mcp-kit` 的典型流程是：
 
 1. `Config::load` 读取并校验 `mcp.json`。
-2. `Manager::from_config` 创建 client（可设置 protocol/capabilities/roots/超时/信任策略）。
+2. `Manager::from_config` 创建 client（可设置 protocol/capabilities/roots/超时/信任策略；若你手动构造 config，可改用 `Manager::try_from_config` 做 fail-fast 校验）。
 3. `Manager::request` / `request_typed` 发请求（内部会按需 connect + initialize）。
 
 示例（以 `tools/list` 为例）：
@@ -88,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
     let root = std::env::current_dir()?;
     let config = Config::load(&root, None).await?;
 
+    // `Config::load` 已隐式校验 `config.client()`；手动构造 config 时可用 `Manager::try_from_config`。
     let mut mcp = Manager::from_config(&config, "my-app", "0.1.0", Duration::from_secs(30))
         .with_untrusted_streamable_http_policy(UntrustedStreamableHttpPolicy {
             allowed_hosts: vec!["example.com".to_string()],
