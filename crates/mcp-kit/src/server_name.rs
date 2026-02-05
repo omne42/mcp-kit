@@ -2,7 +2,8 @@ use std::borrow::Borrow;
 use std::fmt;
 use std::ops::Deref;
 
-use serde::Serialize;
+use serde::de::Error as _;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ServerName(Box<str>);
@@ -17,6 +18,10 @@ pub enum ServerNameError {
 }
 
 impl ServerName {
+    /// Parse and validate an MCP server name.
+    ///
+    /// Note: this trims leading/trailing ASCII whitespace before validation. In other words,
+    /// `" a "` and `"a"` normalize to the same `ServerName`.
     pub fn parse(name: impl AsRef<str>) -> Result<Self, ServerNameError> {
         let name = name.as_ref().trim();
         if name.is_empty() {
@@ -65,6 +70,13 @@ impl fmt::Display for ServerName {
 impl Serialize for ServerName {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ServerName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Self::parse(name).map_err(D::Error::custom)
     }
 }
 

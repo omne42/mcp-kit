@@ -13,8 +13,11 @@
 - `mcp-kit`（BREAKING）：引入 `ServerName` 新类型，并将其用于 `Config/Manager` 的 server key；`Session::new(...)` 现在要求传入 `ServerName`（避免把任意 `String` 当作已校验的 server 名称）。
 - `mcp-kit`：重构内部模块边界：`config` 拆分为 `file_format/model/load`，`manager` 抽出 `placeholders` 与 `streamable_http_validation`，并将大型 `tests` 外置，降低单文件复杂度与后续维护成本。
 - `mcp-kit`：新增 `ServerNameError`（`thiserror`，`#[non_exhaustive]`），为后续把 `anyhow` 逐步替换为结构化错误打基础。
+- `mcp-kit`：`ServerName::parse(...)` 的 rustdoc 现在明确其会对输入做 `trim()` 后再校验（行为不变，只是把语义写清楚）。
 
 ### Added
+- `mcp-kit`：`ServerName` 现在实现 `Deserialize`（`serde`），便于在配置/外部数据模型中直接使用。
+- `mcp-kit`：新增一组接受 `&ServerName` 的便捷入口（非 breaking）：`Config::server_named`、`Manager::*_named`。
 - `mcp-kit`：新增 `Manager::disconnect_and_wait` + `Connection::{wait, wait_with_timeout}` + `Session::{wait, wait_with_timeout}`，用于更明确的关闭/回收语义。
 - `mcp-kit`：新增 `Manager::{connect_io_unchecked, connect_jsonrpc_unchecked}`，用于测试/显式接入自定义 transport（会绕过 `Untrusted` 安全护栏）。
 - `mcp-jsonrpc`：`SpawnOptions` 新增 `kill_on_drop`（默认 `true`）、`stdout_log_redactor` 与 `diagnostics.invalid_json_sample_lines`（用于脱敏与诊断采样）。

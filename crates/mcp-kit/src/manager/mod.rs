@@ -412,6 +412,10 @@ impl Manager {
         self.is_connected_and_alive(server_name)
     }
 
+    pub fn is_connected_named(&mut self, server_name: &ServerName) -> bool {
+        self.is_connected(server_name.as_str())
+    }
+
     pub fn connected_server_names(&mut self) -> Vec<ServerName> {
         let names = self.conns.keys().cloned().collect::<Vec<_>>();
         names
@@ -422,6 +426,10 @@ impl Manager {
 
     pub fn initialize_result(&self, server_name: &str) -> Option<&Value> {
         self.init_results.get(server_name)
+    }
+
+    pub fn initialize_result_named(&self, server_name: &ServerName) -> Option<&Value> {
+        self.initialize_result(server_name.as_str())
     }
 
     pub async fn connect(
@@ -1035,6 +1043,18 @@ impl Manager {
         self.connect(server_name, server_cfg, cwd).await
     }
 
+    pub async fn get_or_connect_named(
+        &mut self,
+        config: &Config,
+        server_name: &ServerName,
+        cwd: &Path,
+    ) -> anyhow::Result<()> {
+        let server_cfg = config
+            .server_named(server_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
+        self.connect_named(server_name, server_cfg, cwd).await
+    }
+
     pub async fn get_or_connect_session(
         &mut self,
         config: &Config,
@@ -1046,6 +1066,26 @@ impl Manager {
             .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))
     }
 
+    pub async fn get_or_connect_session_named(
+        &mut self,
+        config: &Config,
+        server_name: &ServerName,
+        cwd: &Path,
+    ) -> anyhow::Result<Session> {
+        self.get_or_connect_named(config, server_name, cwd).await?;
+        self.take_session_named(server_name)
+            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))
+    }
+
+    pub async fn connect_named(
+        &mut self,
+        server_name: &ServerName,
+        server_cfg: &ServerConfig,
+        cwd: &Path,
+    ) -> anyhow::Result<()> {
+        self.connect(server_name.as_str(), server_cfg, cwd).await
+    }
+
     /// Remove a cached connection (if any) without waiting for shutdown.
     ///
     /// This is best-effort and may leave a child process running/zombied if you drop it without
@@ -1054,6 +1094,10 @@ impl Manager {
     pub fn disconnect(&mut self, server_name: &str) -> bool {
         self.init_results.remove(server_name);
         self.conns.remove(server_name).is_some()
+    }
+
+    pub fn disconnect_named(&mut self, server_name: &ServerName) -> bool {
+        self.disconnect(server_name.as_str())
     }
 
     pub async fn disconnect_and_wait(
@@ -1071,6 +1115,16 @@ impl Manager {
             .with_context(|| format!("disconnect mcp server: {server_name}"))
     }
 
+    pub async fn disconnect_and_wait_named(
+        &mut self,
+        server_name: &ServerName,
+        timeout: Duration,
+        on_timeout: mcp_jsonrpc::WaitOnTimeout,
+    ) -> anyhow::Result<Option<std::process::ExitStatus>> {
+        self.disconnect_and_wait(server_name.as_str(), timeout, on_timeout)
+            .await
+    }
+
     /// Take ownership of a cached connection (if any).
     ///
     /// After calling this, the caller owns the connection lifecycle. In particular, if the
@@ -1079,6 +1133,10 @@ impl Manager {
     pub fn take_connection(&mut self, server_name: &str) -> Option<Connection> {
         self.init_results.remove(server_name);
         self.conns.remove(server_name)
+    }
+
+    pub fn take_connection_named(&mut self, server_name: &ServerName) -> Option<Connection> {
+        self.take_connection(server_name.as_str())
     }
 
     /// Take ownership of a cached session (if any).
@@ -1100,6 +1158,10 @@ impl Manager {
         ))
     }
 
+    pub fn take_session_named(&mut self, server_name: &ServerName) -> Option<Session> {
+        self.take_session(server_name.as_str())
+    }
+
     pub async fn connect_session(
         &mut self,
         server_name: &str,
@@ -1111,6 +1173,17 @@ impl Manager {
             .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))
     }
 
+    pub async fn connect_session_named(
+        &mut self,
+        server_name: &ServerName,
+        server_cfg: &ServerConfig,
+        cwd: &Path,
+    ) -> anyhow::Result<Session> {
+        self.connect_named(server_name, server_cfg, cwd).await?;
+        self.take_session_named(server_name)
+            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))
+    }
+
     pub async fn connect_jsonrpc_session(
         &mut self,
         server_name: &str,
@@ -1118,6 +1191,16 @@ impl Manager {
     ) -> anyhow::Result<Session> {
         self.connect_jsonrpc(server_name, client).await?;
         self.take_session(server_name)
+            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))
+    }
+
+    pub async fn connect_jsonrpc_session_named(
+        &mut self,
+        server_name: &ServerName,
+        client: mcp_jsonrpc::Client,
+    ) -> anyhow::Result<Session> {
+        self.connect_jsonrpc(server_name.as_str(), client).await?;
+        self.take_session_named(server_name)
             .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))
     }
 
@@ -1133,6 +1216,21 @@ impl Manager {
     {
         self.connect_io(server_name, read, write).await?;
         self.take_session(server_name)
+            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))
+    }
+
+    pub async fn connect_io_session_named<R, W>(
+        &mut self,
+        server_name: &ServerName,
+        read: R,
+        write: W,
+    ) -> anyhow::Result<Session>
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        self.connect_io(server_name.as_str(), read, write).await?;
+        self.take_session_named(server_name)
             .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))
     }
 
@@ -1152,6 +1250,18 @@ impl Manager {
             }
         }
         result
+    }
+
+    pub async fn request_named(
+        &mut self,
+        config: &Config,
+        server_name: &ServerName,
+        method: &str,
+        params: Option<Value>,
+        cwd: &Path,
+    ) -> anyhow::Result<Value> {
+        self.request(config, server_name.as_str(), method, params, cwd)
+            .await
     }
 
     pub async fn request_server(
@@ -1561,6 +1671,16 @@ impl Manager {
         result
     }
 
+    pub async fn request_connected_named(
+        &mut self,
+        server_name: &ServerName,
+        method: &str,
+        params: Option<Value>,
+    ) -> anyhow::Result<Value> {
+        self.request_connected(server_name.as_str(), method, params)
+            .await
+    }
+
     pub async fn notify_connected(
         &mut self,
         server_name: &str,
@@ -1587,6 +1707,16 @@ impl Manager {
         }
 
         result
+    }
+
+    pub async fn notify_connected_named(
+        &mut self,
+        server_name: &ServerName,
+        method: &str,
+        params: Option<Value>,
+    ) -> anyhow::Result<()> {
+        self.notify_connected(server_name.as_str(), method, params)
+            .await
     }
 
     async fn initialize(
