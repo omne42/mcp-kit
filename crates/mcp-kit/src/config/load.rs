@@ -2,391 +2,14 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::Context;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::file_format::{ConfigFile, ExternalCommandConfigFile, ExternalServerConfigFile};
+use super::{ClientConfig, Config, ServerConfig, StdoutLogConfig, Transport};
+use crate::ServerName;
+
 const MCP_CONFIG_VERSION: u32 = 1;
-const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
-const DEFAULT_STDOUT_LOG_MAX_BYTES_PER_PART: u64 = 1024 * 1024;
-const DEFAULT_STDOUT_LOG_MAX_PARTS: u32 = 32;
 const DEFAULT_CONFIG_CANDIDATES: [&str; 2] = [".mcp.json", "mcp.json"];
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ConfigFile {
-    version: u32,
-    #[serde(default)]
-    client: Option<ClientConfigFile>,
-    servers: BTreeMap<String, ServerConfigFile>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ClientConfigFile {
-    #[serde(default)]
-    protocol_version: Option<String>,
-    #[serde(default)]
-    capabilities: Option<Value>,
-    #[serde(default)]
-    roots: Option<Vec<Root>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ServerConfigFile {
-    transport: Transport,
-    #[serde(default)]
-    argv: Option<Vec<String>>,
-    #[serde(default)]
-    inherit_env: Option<bool>,
-    #[serde(default)]
-    unix_path: Option<PathBuf>,
-    #[serde(default)]
-    url: Option<String>,
-    #[serde(default)]
-    sse_url: Option<String>,
-    #[serde(default)]
-    http_url: Option<String>,
-    #[serde(default)]
-    bearer_token_env_var: Option<String>,
-    #[serde(default, alias = "headers")]
-    http_headers: BTreeMap<String, String>,
-    #[serde(default)]
-    env_http_headers: BTreeMap<String, String>,
-    #[serde(default)]
-    env: BTreeMap<String, String>,
-    #[serde(default)]
-    stdout_log: Option<StdoutLogConfigFile>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum ExternalCommandConfigFile {
-    String(String),
-    Array(Vec<String>),
-}
-
-#[derive(Debug, Deserialize)]
-struct ExternalServerConfigFile {
-    #[serde(default)]
-    transport: Option<Transport>,
-    #[serde(rename = "type", default)]
-    server_type: Option<String>,
-    #[serde(default)]
-    command: Option<ExternalCommandConfigFile>,
-    #[serde(default)]
-    args: Option<Vec<String>>,
-    #[serde(default)]
-    argv: Option<Vec<String>>,
-    #[serde(default)]
-    inherit_env: Option<bool>,
-    #[serde(default)]
-    unix_path: Option<PathBuf>,
-    #[serde(default)]
-    url: Option<String>,
-    #[serde(default)]
-    sse_url: Option<String>,
-    #[serde(default)]
-    http_url: Option<String>,
-    #[serde(default)]
-    bearer_token_env_var: Option<String>,
-    #[serde(default, alias = "headers")]
-    http_headers: BTreeMap<String, String>,
-    #[serde(default)]
-    env_http_headers: BTreeMap<String, String>,
-    #[serde(default)]
-    env: BTreeMap<String, String>,
-    #[serde(default)]
-    environment: BTreeMap<String, String>,
-    #[serde(default)]
-    stdout_log: Option<StdoutLogConfigFile>,
-    #[serde(default)]
-    enabled: Option<bool>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    description: Option<String>,
-    #[serde(flatten)]
-    #[allow(dead_code)]
-    extra: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StdoutLogConfigFile {
-    path: PathBuf,
-    #[serde(default)]
-    max_bytes_per_part: Option<u64>,
-    #[serde(default)]
-    max_parts: Option<u32>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Transport {
-    Stdio,
-    Unix,
-    StreamableHttp,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ClientConfig {
-    pub protocol_version: Option<String>,
-    pub capabilities: Option<Value>,
-    pub roots: Option<Vec<Root>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Root {
-    pub uri: String,
-    #[serde(default)]
-    pub name: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct StdoutLogConfig {
-    pub path: PathBuf,
-    pub max_bytes_per_part: u64,
-    pub max_parts: Option<u32>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Config {
-    path: Option<PathBuf>,
-    client: ClientConfig,
-    servers: BTreeMap<String, ServerConfig>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ServerConfig {
-    transport: Transport,
-    argv: Vec<String>,
-    /// When true, inherit the current process environment when spawning a
-    /// `transport=stdio` server.
-    ///
-    /// Default: `false` for `transport=stdio` (safer-by-default).
-    ///
-    /// When false, the child environment is cleared and only a small set of
-    /// non-secret baseline variables are propagated (plus any `env` entries).
-    inherit_env: bool,
-    unix_path: Option<PathBuf>,
-    url: Option<String>,
-    sse_url: Option<String>,
-    http_url: Option<String>,
-    bearer_token_env_var: Option<String>,
-    http_headers: BTreeMap<String, String>,
-    env_http_headers: BTreeMap<String, String>,
-    env: BTreeMap<String, String>,
-    stdout_log: Option<StdoutLogConfig>,
-}
-
-impl ServerConfig {
-    pub fn stdio(argv: Vec<String>) -> anyhow::Result<Self> {
-        if argv.is_empty() {
-            anyhow::bail!("mcp stdio argv must not be empty");
-        }
-        for (idx, arg) in argv.iter().enumerate() {
-            if arg.trim().is_empty() {
-                anyhow::bail!("mcp stdio argv[{idx}] must not be empty");
-            }
-        }
-        Ok(Self {
-            transport: Transport::Stdio,
-            argv,
-            inherit_env: false,
-            unix_path: None,
-            url: None,
-            sse_url: None,
-            http_url: None,
-            bearer_token_env_var: None,
-            http_headers: BTreeMap::new(),
-            env_http_headers: BTreeMap::new(),
-            env: BTreeMap::new(),
-            stdout_log: None,
-        })
-    }
-
-    pub fn unix(unix_path: PathBuf) -> anyhow::Result<Self> {
-        if unix_path.as_os_str().is_empty() {
-            anyhow::bail!("mcp unix_path must not be empty");
-        }
-        Ok(Self {
-            transport: Transport::Unix,
-            argv: Vec::new(),
-            inherit_env: true,
-            unix_path: Some(unix_path),
-            url: None,
-            sse_url: None,
-            http_url: None,
-            bearer_token_env_var: None,
-            http_headers: BTreeMap::new(),
-            env_http_headers: BTreeMap::new(),
-            env: BTreeMap::new(),
-            stdout_log: None,
-        })
-    }
-
-    pub fn streamable_http(url: impl Into<String>) -> anyhow::Result<Self> {
-        let url = url.into();
-        if url.trim().is_empty() {
-            anyhow::bail!("mcp streamable_http url must not be empty");
-        }
-        Ok(Self {
-            transport: Transport::StreamableHttp,
-            argv: Vec::new(),
-            inherit_env: true,
-            unix_path: None,
-            url: Some(url),
-            sse_url: None,
-            http_url: None,
-            bearer_token_env_var: None,
-            http_headers: BTreeMap::new(),
-            env_http_headers: BTreeMap::new(),
-            env: BTreeMap::new(),
-            stdout_log: None,
-        })
-    }
-
-    pub fn streamable_http_split(
-        sse_url: impl Into<String>,
-        http_url: impl Into<String>,
-    ) -> anyhow::Result<Self> {
-        let sse_url = sse_url.into();
-        let http_url = http_url.into();
-        if sse_url.trim().is_empty() {
-            anyhow::bail!("mcp streamable_http sse_url must not be empty");
-        }
-        if http_url.trim().is_empty() {
-            anyhow::bail!("mcp streamable_http http_url must not be empty");
-        }
-        Ok(Self {
-            transport: Transport::StreamableHttp,
-            argv: Vec::new(),
-            inherit_env: true,
-            unix_path: None,
-            url: None,
-            sse_url: Some(sse_url),
-            http_url: Some(http_url),
-            bearer_token_env_var: None,
-            http_headers: BTreeMap::new(),
-            env_http_headers: BTreeMap::new(),
-            env: BTreeMap::new(),
-            stdout_log: None,
-        })
-    }
-
-    pub fn transport(&self) -> Transport {
-        self.transport
-    }
-
-    pub fn argv(&self) -> &[String] {
-        &self.argv
-    }
-
-    pub fn inherit_env(&self) -> bool {
-        self.inherit_env
-    }
-
-    pub fn unix_path(&self) -> Option<&Path> {
-        self.unix_path.as_deref()
-    }
-
-    pub fn url(&self) -> Option<&str> {
-        self.url.as_deref()
-    }
-
-    pub fn sse_url(&self) -> Option<&str> {
-        self.sse_url.as_deref()
-    }
-
-    pub fn http_url(&self) -> Option<&str> {
-        self.http_url.as_deref()
-    }
-
-    pub fn bearer_token_env_var(&self) -> Option<&str> {
-        self.bearer_token_env_var.as_deref()
-    }
-
-    pub fn http_headers(&self) -> &BTreeMap<String, String> {
-        &self.http_headers
-    }
-
-    pub fn env_http_headers(&self) -> &BTreeMap<String, String> {
-        &self.env_http_headers
-    }
-
-    pub fn env(&self) -> &BTreeMap<String, String> {
-        &self.env
-    }
-
-    pub fn stdout_log(&self) -> Option<&StdoutLogConfig> {
-        self.stdout_log.as_ref()
-    }
-
-    pub fn set_inherit_env(&mut self, inherit_env: bool) {
-        self.inherit_env = inherit_env;
-    }
-
-    pub fn set_bearer_token_env_var(&mut self, bearer_token_env_var: Option<String>) {
-        self.bearer_token_env_var = bearer_token_env_var;
-    }
-
-    pub fn env_mut(&mut self) -> &mut BTreeMap<String, String> {
-        &mut self.env
-    }
-
-    pub fn http_headers_mut(&mut self) -> &mut BTreeMap<String, String> {
-        &mut self.http_headers
-    }
-
-    pub fn env_http_headers_mut(&mut self) -> &mut BTreeMap<String, String> {
-        &mut self.env_http_headers
-    }
-
-    pub fn set_stdout_log(&mut self, stdout_log: Option<StdoutLogConfig>) {
-        self.stdout_log = stdout_log;
-    }
-}
-
-impl Config {
-    pub fn new(client: ClientConfig, servers: BTreeMap<String, ServerConfig>) -> Self {
-        Self {
-            path: None,
-            client,
-            servers,
-        }
-    }
-
-    pub fn with_path(mut self, path: PathBuf) -> Self {
-        self.path = Some(path);
-        self
-    }
-
-    pub fn path(&self) -> Option<&Path> {
-        self.path.as_deref()
-    }
-
-    pub fn client(&self) -> &ClientConfig {
-        &self.client
-    }
-
-    pub fn servers(&self) -> &BTreeMap<String, ServerConfig> {
-        &self.servers
-    }
-
-    pub fn server(&self, name: &str) -> Option<&ServerConfig> {
-        self.servers.get(name)
-    }
-}
-
-fn is_valid_server_name(name: &str) -> bool {
-    let name = name.trim();
-    if name.is_empty() {
-        return false;
-    }
-    name.chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
-}
 
 #[cfg(unix)]
 fn describe_file_type(meta: &std::fs::Metadata) -> &'static str {
@@ -463,22 +86,24 @@ async fn read_to_string_limited(path: &Path) -> anyhow::Result<String> {
             path.display()
         );
     }
-    if file_meta.len() > MAX_CONFIG_BYTES {
+    if file_meta.len() > super::MAX_CONFIG_BYTES {
         anyhow::bail!(
-            "mcp config too large: {} bytes (max {MAX_CONFIG_BYTES}): {}",
+            "mcp config too large: {} bytes (max {}): {}",
             file_meta.len(),
+            super::MAX_CONFIG_BYTES,
             path.display()
         );
     }
 
-    file.take(MAX_CONFIG_BYTES + 1)
+    file.take(super::MAX_CONFIG_BYTES + 1)
         .read_to_end(&mut buf)
         .await
         .with_context(|| format!("read {}", path.display()))?;
-    if buf.len() as u64 > MAX_CONFIG_BYTES {
+    if buf.len() as u64 > super::MAX_CONFIG_BYTES {
         anyhow::bail!(
-            "mcp config too large: {} bytes (max {MAX_CONFIG_BYTES}): {}",
+            "mcp config too large: {} bytes (max {}): {}",
             buf.len(),
+            super::MAX_CONFIG_BYTES,
             path.display()
         );
     }
@@ -528,22 +153,24 @@ async fn try_read_to_string_limited(path: &Path) -> anyhow::Result<Option<String
             path.display()
         );
     }
-    if file_meta.len() > MAX_CONFIG_BYTES {
+    if file_meta.len() > super::MAX_CONFIG_BYTES {
         anyhow::bail!(
-            "mcp config too large: {} bytes (max {MAX_CONFIG_BYTES}): {}",
+            "mcp config too large: {} bytes (max {}): {}",
             file_meta.len(),
+            super::MAX_CONFIG_BYTES,
             path.display()
         );
     }
 
-    file.take(MAX_CONFIG_BYTES + 1)
+    file.take(super::MAX_CONFIG_BYTES + 1)
         .read_to_end(&mut buf)
         .await
         .with_context(|| format!("read {}", path.display()))?;
-    if buf.len() as u64 > MAX_CONFIG_BYTES {
+    if buf.len() as u64 > super::MAX_CONFIG_BYTES {
         anyhow::bail!(
-            "mcp config too large: {} bytes (max {MAX_CONFIG_BYTES}): {}",
+            "mcp config too large: {} bytes (max {}): {}",
             buf.len(),
+            super::MAX_CONFIG_BYTES,
             path.display()
         );
     }
@@ -752,11 +379,10 @@ impl Config {
             None => ClientConfig::default(),
         };
 
-        let mut servers = BTreeMap::<String, ServerConfig>::new();
+        let mut servers = BTreeMap::<ServerName, ServerConfig>::new();
         for (name, server) in cfg.servers {
-            if !is_valid_server_name(&name) {
-                anyhow::bail!("invalid mcp server name: {name}");
-            }
+            let server_name = ServerName::parse(&name)
+                .map_err(|_| anyhow::anyhow!("invalid mcp server name: {name}"))?;
 
             let stdout_log = match server.stdout_log {
                 Some(log) => {
@@ -779,9 +405,9 @@ impl Config {
                     };
                     let max_bytes_per_part = log
                         .max_bytes_per_part
-                        .unwrap_or(DEFAULT_STDOUT_LOG_MAX_BYTES_PER_PART)
+                        .unwrap_or(super::DEFAULT_STDOUT_LOG_MAX_BYTES_PER_PART)
                         .max(1);
-                    let max_parts = log.max_parts.unwrap_or(DEFAULT_STDOUT_LOG_MAX_PARTS);
+                    let max_parts = log.max_parts.unwrap_or(super::DEFAULT_STDOUT_LOG_MAX_PARTS);
                     let max_parts = if max_parts == 0 {
                         None
                     } else {
@@ -981,7 +607,7 @@ impl Config {
                     }
 
                     servers.insert(
-                        name,
+                        server_name,
                         ServerConfig {
                             transport: Transport::StreamableHttp,
                             argv: Vec::new(),
@@ -1002,7 +628,7 @@ impl Config {
             };
 
             servers.insert(
-                name,
+                server_name,
                 ServerConfig {
                     transport: server.transport,
                     argv,
@@ -1033,15 +659,14 @@ impl Config {
         servers_value: serde_json::Map<String, Value>,
     ) -> anyhow::Result<Self> {
         let client = ClientConfig::default();
-        let mut servers = BTreeMap::<String, ServerConfig>::new();
+        let mut servers = BTreeMap::<ServerName, ServerConfig>::new();
 
         for (name, server_value) in servers_value {
             if name == "$schema" {
                 continue;
             }
-            if !is_valid_server_name(&name) {
-                anyhow::bail!("invalid mcp server name: {name}");
-            }
+            let server_name = ServerName::parse(&name)
+                .map_err(|_| anyhow::anyhow!("invalid mcp server name: {name}"))?;
 
             let server: ExternalServerConfigFile = serde_json::from_value(server_value)
                 .with_context(|| {
@@ -1120,9 +745,9 @@ impl Config {
                     };
                     let max_bytes_per_part = log
                         .max_bytes_per_part
-                        .unwrap_or(DEFAULT_STDOUT_LOG_MAX_BYTES_PER_PART)
+                        .unwrap_or(super::DEFAULT_STDOUT_LOG_MAX_BYTES_PER_PART)
                         .max(1);
-                    let max_parts = log.max_parts.unwrap_or(DEFAULT_STDOUT_LOG_MAX_PARTS);
+                    let max_parts = log.max_parts.unwrap_or(super::DEFAULT_STDOUT_LOG_MAX_PARTS);
                     let max_parts = if max_parts == 0 {
                         None
                     } else {
@@ -1208,7 +833,7 @@ impl Config {
                     }
 
                     servers.insert(
-                        name,
+                        server_name,
                         ServerConfig {
                             transport: Transport::Stdio,
                             argv,
@@ -1269,7 +894,7 @@ impl Config {
                     };
 
                     servers.insert(
-                        name,
+                        server_name,
                         ServerConfig {
                             transport: Transport::Unix,
                             argv: Vec::new(),
@@ -1382,7 +1007,7 @@ impl Config {
                     }
 
                     servers.insert(
-                        name,
+                        server_name,
                         ServerConfig {
                             transport: Transport::StreamableHttp,
                             argv: Vec::new(),
@@ -1407,767 +1032,5 @@ impl Config {
             client,
             servers,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn load_denies_mcpservers_indirection_via_symlink_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            outside.path().join("servers.json"),
-            r#"{ "mcpServers": { "a": { "command": "echo", "args": ["hi"] } } }"#,
-        )
-        .await
-        .unwrap();
-
-        let link = dir.path().join("servers.json");
-        std::os::unix::fs::symlink(outside.path().join("servers.json"), &link).unwrap();
-
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "mcpServers": "servers.json" }"#,
-        )
-        .await
-        .unwrap();
-
-        let err = Config::load(dir.path(), None).await.unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("escapes root"), "err={msg}");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn load_denies_mcpservers_indirection_via_symlink_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            outside.path().join("servers.json"),
-            r#"{ "mcpServers": { "a": { "command": "echo", "args": ["hi"] } } }"#,
-        )
-        .await
-        .unwrap();
-
-        let link_dir = dir.path().join("linkdir");
-        std::os::unix::fs::symlink(outside.path(), &link_dir).unwrap();
-
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "mcpServers": "linkdir/servers.json" }"#,
-        )
-        .await
-        .unwrap();
-
-        let err = Config::load(dir.path(), None).await.unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("escapes root"), "err={msg}");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn load_allows_mcpservers_indirection_via_symlink_dir_within_root() {
-        let dir = tempfile::tempdir().unwrap();
-
-        let real_dir = dir.path().join("real_dir");
-        tokio::fs::create_dir_all(&real_dir).await.unwrap();
-        tokio::fs::write(
-            real_dir.join("servers.json"),
-            r#"{ "mcpServers": { "a": { "command": "echo", "args": ["hi"] } } }"#,
-        )
-        .await
-        .unwrap();
-
-        let link_dir = dir.path().join("linkdir");
-        std::os::unix::fs::symlink(&real_dir, &link_dir).unwrap();
-
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "mcpServers": "linkdir/servers.json" }"#,
-        )
-        .await
-        .unwrap();
-
-        let cfg = Config::load(dir.path(), None).await.unwrap();
-        assert!(cfg.servers.contains_key("a"));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn load_denies_config_via_symlink_file() {
-        let dir = tempfile::tempdir().unwrap();
-
-        tokio::fs::write(
-            dir.path().join("real.json"),
-            r#"{ "version": 1, "servers": { "a": { "transport": "stdio", "argv": ["mcp-a"] } } }"#,
-        )
-        .await
-        .unwrap();
-
-        let link = dir.path().join("mcp.json");
-        std::os::unix::fs::symlink(dir.path().join("real.json"), &link).unwrap();
-
-        let err = Config::load(dir.path(), None).await.unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("symlink"), "err={msg}");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn load_denies_config_via_symlink_dir() {
-        let dir = tempfile::tempdir().unwrap();
-
-        let real_dir = dir.path().join("real_dir");
-        tokio::fs::create_dir(&real_dir).await.unwrap();
-
-        let link = dir.path().join("mcp.json");
-        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
-
-        let err = Config::load(dir.path(), None).await.unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("symlink"), "err={msg}");
-    }
-
-    #[tokio::test]
-    async fn load_defaults_to_empty_when_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = Config::load(dir.path(), None).await.unwrap();
-        assert!(cfg.path.is_none());
-        assert!(cfg.client.protocol_version.is_none());
-        assert!(cfg.client.capabilities.is_none());
-        assert!(cfg.client.roots.is_none());
-        assert!(cfg.servers.is_empty());
-    }
-
-    #[tokio::test]
-    async fn load_required_errors_when_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = Config::load_required(dir.path(), None).await.unwrap_err();
-        assert!(err.to_string().contains("not found"), "err={err:#}");
-    }
-
-    #[tokio::test]
-    async fn load_fails_closed_when_config_is_too_large() {
-        let dir = tempfile::tempdir().unwrap();
-        let big = "a".repeat((MAX_CONFIG_BYTES + 1) as usize);
-        tokio::fs::write(dir.path().join("mcp.json"), big)
-            .await
-            .unwrap();
-
-        let err = Config::load(dir.path(), None).await.unwrap_err();
-        assert!(
-            err.to_string().contains("too large"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn load_discovers_dot_mcp_json_before_mcp_json() {
-        let dir = tempfile::tempdir().unwrap();
-
-        tokio::fs::write(
-            dir.path().join(".mcp.json"),
-            r#"{ "version": 1, "servers": { "a": { "transport": "stdio", "argv": ["mcp-a"] } } }"#,
-        )
-        .await
-        .unwrap();
-
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "servers": { "b": { "transport": "stdio", "argv": ["mcp-b"] } } }"#,
-        )
-        .await
-        .unwrap();
-
-        let cfg = Config::load(dir.path(), None).await.unwrap();
-        assert_eq!(cfg.path.as_ref().unwrap(), &dir.path().join(".mcp.json"));
-        assert!(cfg.servers.contains_key("a"));
-        assert!(!cfg.servers.contains_key("b"));
-    }
-
-    #[tokio::test]
-    async fn load_discovers_mcp_json_when_dot_mcp_json_missing() {
-        let dir = tempfile::tempdir().unwrap();
-
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "servers": { "a": { "transport": "stdio", "argv": ["mcp-a"] } } }"#,
-        )
-        .await
-        .unwrap();
-
-        let cfg = Config::load(dir.path(), None).await.unwrap();
-        assert_eq!(cfg.path.as_ref().unwrap(), &dir.path().join("mcp.json"));
-        assert!(cfg.servers.contains_key("a"));
-    }
-
-    #[tokio::test]
-    async fn load_parses_valid_file() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "servers": { "rg": { "transport": "stdio", "argv": ["mcp-rg", "--stdio"], "env": { "NO_COLOR": "1" } } } }"#,
-        )
-        .await
-        .unwrap();
-
-        let cfg = Config::load(dir.path(), None).await.unwrap();
-        assert!(cfg.path.is_some());
-        assert_eq!(cfg.servers.len(), 1);
-        let server = cfg.servers.get("rg").unwrap();
-        assert_eq!(
-            server.argv,
-            vec!["mcp-rg".to_string(), "--stdio".to_string()]
-        );
-        assert!(server.env.contains_key("NO_COLOR"));
-        assert!(server.stdout_log.is_none());
-        assert!(server.unix_path.is_none());
-    }
-
-    #[tokio::test]
-    async fn load_parses_stdio_inherit_env() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "servers": { "a": { "transport": "stdio", "argv": ["mcp-a"], "inherit_env": false } } }"#,
-        )
-        .await
-        .unwrap();
-
-        let cfg = Config::load(dir.path(), None).await.unwrap();
-        let server = cfg.servers.get("a").unwrap();
-        assert!(!server.inherit_env);
-    }
-
-    #[tokio::test]
-    async fn load_denies_stdout_log_path_with_parent_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "servers": { "a": { "transport": "stdio", "argv": ["mcp-a"], "stdout_log": { "path": "../oops.log" } } } }"#,
-        )
-        .await
-        .unwrap();
-
-        let err = Config::load(dir.path(), None).await.unwrap_err();
-        assert!(
-            err.to_string().contains("stdout_log.path") && err.to_string().contains(".."),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn load_parses_client_section() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "client": { "protocol_version": "2025-06-18", "capabilities": { "roots": { "list_changed": true } } }, "servers": {} }"#,
-        )
-        .await
-        .unwrap();
-
-        let cfg = Config::load(dir.path(), None).await.unwrap();
-        assert_eq!(cfg.client.protocol_version.as_deref(), Some("2025-06-18"));
-        assert!(
-            cfg.client
-                .capabilities
-                .as_ref()
-                .expect("capabilities")
-                .is_object()
-        );
-        assert!(cfg.client.roots.is_none());
-    }
-
-    #[tokio::test]
-    async fn load_parses_client_roots() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "client": { "roots": [ { "uri": "file:///tmp", "name": "tmp" } ] }, "servers": {} }"#,
-        )
-        .await
-        .unwrap();
-
-        let cfg = Config::load(dir.path(), None).await.unwrap();
-        let roots = cfg.client.roots.as_ref().expect("roots");
-        assert_eq!(
-            roots,
-            &vec![Root {
-                uri: "file:///tmp".to_string(),
-                name: Some("tmp".to_string()),
-            }]
-        );
-    }
-
-    #[tokio::test]
-    async fn load_denies_empty_root_uri() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "client": { "roots": [ { "uri": "   " } ] }, "servers": {} }"#,
-        )
-        .await
-        .unwrap();
-
-        let err = Config::load(dir.path(), None).await.unwrap_err();
-        assert!(err.to_string().contains("client.roots"));
-    }
-
-    #[tokio::test]
-    async fn load_denies_invalid_client_capabilities() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "client": { "capabilities": 123 }, "servers": {} }"#,
-        )
-        .await
-        .unwrap();
-
-        let err = Config::load(dir.path(), None).await.unwrap_err();
-        assert!(err.to_string().contains("client.capabilities"));
-    }
-
-    #[tokio::test]
-    async fn load_parses_stdout_log_and_resolves_relative_path() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "servers": { "rg": { "transport": "stdio", "argv": ["mcp-rg"], "stdout_log": { "path": "./logs/rg.stdout.log" } } } }"#,
-        )
-        .await
-        .unwrap();
-
-        let cfg = Config::load(dir.path(), None).await.unwrap();
-        let server = cfg.servers.get("rg").unwrap();
-        let stdout_log = server.stdout_log.as_ref().expect("stdout_log");
-        assert_eq!(stdout_log.path, dir.path().join("./logs/rg.stdout.log"));
-        assert_eq!(
-            stdout_log.max_bytes_per_part,
-            DEFAULT_STDOUT_LOG_MAX_BYTES_PER_PART
-        );
-        assert_eq!(stdout_log.max_parts, Some(DEFAULT_STDOUT_LOG_MAX_PARTS));
-    }
-
-    #[tokio::test]
-    async fn load_stdout_log_max_parts_zero_means_unlimited() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "servers": { "rg": { "transport": "stdio", "argv": ["mcp-rg"], "stdout_log": { "path": "./logs/rg.stdout.log", "max_parts": 0 } } } }"#,
-        )
-        .await
-        .unwrap();
-
-        let cfg = Config::load(dir.path(), None).await.unwrap();
-        let server = cfg.servers.get("rg").unwrap();
-        let stdout_log = server.stdout_log.as_ref().expect("stdout_log");
-        assert_eq!(stdout_log.max_parts, None);
-    }
-
-    #[tokio::test]
-    async fn load_parses_unix_transport_and_resolves_relative_path() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "servers": { "sock": { "transport": "unix", "unix_path": "./sock/mcp.sock" } } }"#,
-        )
-        .await
-        .unwrap();
-
-        let cfg = Config::load(dir.path(), None).await.unwrap();
-        let server = cfg.servers.get("sock").unwrap();
-        assert_eq!(server.transport, Transport::Unix);
-        assert!(server.argv.is_empty());
-        assert_eq!(
-            server.unix_path.as_ref().unwrap(),
-            &dir.path().join("./sock/mcp.sock")
-        );
-    }
-
-    #[tokio::test]
-    async fn load_parses_streamable_http_transport() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "url": "https://example.com/mcp" } } }"#,
-        )
-        .await
-        .unwrap();
-
-        let cfg = Config::load(dir.path(), None).await.unwrap();
-        let server = cfg.servers.get("remote").unwrap();
-        assert_eq!(server.transport, Transport::StreamableHttp);
-        assert!(server.argv.is_empty());
-        assert!(server.unix_path.is_none());
-        assert_eq!(server.url.as_deref(), Some("https://example.com/mcp"));
-        assert!(server.sse_url.is_none());
-        assert!(server.http_url.is_none());
-        assert!(server.bearer_token_env_var.is_none());
-        assert!(server.http_headers.is_empty());
-        assert!(server.env_http_headers.is_empty());
-        assert!(server.env.is_empty());
-        assert!(server.stdout_log.is_none());
-    }
-
-    #[tokio::test]
-    async fn load_parses_streamable_http_transport_with_split_urls() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "sse_url": "https://example.com/sse", "http_url": "https://example.com/mcp" } } }"#,
-        )
-        .await
-        .unwrap();
-
-        let cfg = Config::load(dir.path(), None).await.unwrap();
-        let server = cfg.servers.get("remote").unwrap();
-        assert_eq!(server.transport, Transport::StreamableHttp);
-        assert!(server.argv.is_empty());
-        assert!(server.unix_path.is_none());
-        assert!(server.url.is_none());
-        assert_eq!(server.sse_url.as_deref(), Some("https://example.com/sse"));
-        assert_eq!(server.http_url.as_deref(), Some("https://example.com/mcp"));
-    }
-
-    #[tokio::test]
-    async fn load_denies_streamable_http_with_url_and_split_urls() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "url": "https://example.com/mcp", "sse_url": "https://example.com/sse", "http_url": "https://example.com/mcp" } } }"#,
-        )
-        .await
-        .unwrap();
-
-        let err = Config::load(dir.path(), None).await.unwrap_err();
-        assert!(err.to_string().contains("set either url or"));
-    }
-
-    #[tokio::test]
-    async fn load_denies_streamable_http_with_partial_split_urls() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "sse_url": "https://example.com/sse" } } }"#,
-        )
-        .await
-        .unwrap();
-
-        let err = Config::load(dir.path(), None).await.unwrap_err();
-        assert!(err.to_string().contains("sse_url and http_url"));
-    }
-
-    #[tokio::test]
-    async fn load_denies_streamable_http_without_url() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http" } } }"#,
-        )
-        .await
-        .unwrap();
-
-        let err = Config::load(dir.path(), None).await.unwrap_err();
-        assert!(err.to_string().contains("streamable_http"));
-    }
-
-    #[tokio::test]
-    async fn load_denies_streamable_http_with_env() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "url": "https://example.com/mcp", "env": { "X": "1" } } } }"#,
-        )
-        .await
-        .unwrap();
-
-        let err = Config::load(dir.path(), None).await.unwrap_err();
-        assert!(err.to_string().contains("transport=streamable_http"));
-    }
-
-    #[tokio::test]
-    async fn load_denies_unix_transport_with_argv() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "servers": { "sock": { "transport": "unix", "argv": ["x"], "unix_path": "/tmp/mcp.sock" } } }"#,
-        )
-        .await
-        .unwrap();
-
-        let err = Config::load(dir.path(), None).await.unwrap_err();
-        assert!(err.to_string().contains("transport=unix"));
-    }
-
-    #[tokio::test]
-    async fn load_denies_unix_transport_with_empty_argv() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "servers": { "sock": { "transport": "unix", "argv": [], "unix_path": "/tmp/mcp.sock" } } }"#,
-        )
-        .await
-        .unwrap();
-
-        let err = Config::load(dir.path(), None).await.unwrap_err();
-        assert!(err.to_string().contains("transport=unix"));
-    }
-
-    #[tokio::test]
-    async fn load_parses_claude_code_style_dot_mcp_json() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join(".mcp.json"),
-            r#"{
-  "filesystem": {
-    "command": "npx",
-    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-    "env": { "LOG_LEVEL": "debug" }
-  }
-}"#,
-        )
-        .await
-        .unwrap();
-
-        let cfg = Config::load(dir.path(), None).await.unwrap();
-        let server = cfg.servers.get("filesystem").unwrap();
-        assert_eq!(cfg.path.as_ref().unwrap(), &dir.path().join(".mcp.json"));
-        assert_eq!(server.transport, Transport::Stdio);
-        assert_eq!(
-            server.argv,
-            vec![
-                "npx".to_string(),
-                "-y".to_string(),
-                "@modelcontextprotocol/server-filesystem".to_string(),
-                "/tmp".to_string()
-            ]
-        );
-        assert_eq!(
-            server.env.get("LOG_LEVEL").map(String::as_str),
-            Some("debug")
-        );
-    }
-
-    #[tokio::test]
-    async fn load_parses_cursor_mcp_servers_wrapper() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{
-  "$schema": "https://cursor.com/mcp.schema.json",
-  "mcpServers": {
-    "litellm": {
-      "url": "http://example.com/mcp",
-      "type": "http",
-      "headers": { "X-Test": "1" }
-    }
-  }
-}"#,
-        )
-        .await
-        .unwrap();
-
-        let cfg = Config::load(dir.path(), None).await.unwrap();
-        let server = cfg.servers.get("litellm").unwrap();
-        assert_eq!(server.transport, Transport::StreamableHttp);
-        assert_eq!(server.url.as_deref(), Some("http://example.com/mcp"));
-        assert_eq!(
-            server.http_headers.get("X-Test").map(String::as_str),
-            Some("1")
-        );
-    }
-
-    #[tokio::test]
-    async fn load_parses_mcp_servers_wrapper_even_with_version_string() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("plugin.json"),
-            r#"{
-  "name": "my-plugin",
-  "version": "1.0.0",
-  "mcpServers": {
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "echo", "hi"]
-    }
-  }
-}"#,
-        )
-        .await
-        .unwrap();
-
-        let cfg = Config::load(dir.path(), Some(PathBuf::from("plugin.json")))
-            .await
-            .unwrap();
-        assert_eq!(cfg.path.as_ref().unwrap(), &dir.path().join("plugin.json"));
-        let server = cfg.servers.get("filesystem").unwrap();
-        assert_eq!(server.transport, Transport::Stdio);
-        assert_eq!(
-            server.argv,
-            vec![
-                "npx".to_string(),
-                "-y".to_string(),
-                "echo".to_string(),
-                "hi".to_string()
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn load_parses_mcp_servers_wrapper_even_with_version_number() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("plugin.json"),
-            r#"{
-  "name": "my-plugin",
-  "version": 1,
-  "mcpServers": {
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "echo", "hi"]
-    }
-  }
-}"#,
-        )
-        .await
-        .unwrap();
-
-        let cfg = Config::load(dir.path(), Some(PathBuf::from("plugin.json")))
-            .await
-            .unwrap();
-        assert_eq!(cfg.path.as_ref().unwrap(), &dir.path().join("plugin.json"));
-        let server = cfg.servers.get("filesystem").unwrap();
-        assert_eq!(server.transport, Transport::Stdio);
-        assert_eq!(
-            server.argv,
-            vec![
-                "npx".to_string(),
-                "-y".to_string(),
-                "echo".to_string(),
-                "hi".to_string()
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn load_parses_mcp_servers_path_to_dot_mcp_json() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("plugin.json"),
-            r#"{
-  "name": "my-plugin",
-  "version": "1.0.0",
-  "mcpServers": "./.mcp.json"
-}"#,
-        )
-        .await
-        .unwrap();
-        tokio::fs::write(
-            dir.path().join(".mcp.json"),
-            r#"{
-  "filesystem": {
-    "command": "npx",
-    "args": ["-y", "echo", "hi"]
-  }
-}"#,
-        )
-        .await
-        .unwrap();
-
-        let cfg = Config::load(dir.path(), Some(PathBuf::from("plugin.json")))
-            .await
-            .unwrap();
-        assert_eq!(cfg.path.as_ref().unwrap(), &dir.path().join(".mcp.json"));
-        let server = cfg.servers.get("filesystem").unwrap();
-        assert_eq!(server.transport, Transport::Stdio);
-        assert_eq!(
-            server.argv,
-            vec![
-                "npx".to_string(),
-                "-y".to_string(),
-                "echo".to_string(),
-                "hi".to_string()
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn load_denies_cursor_mcp_servers_type_transport_conflict() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{
-  "$schema": "https://cursor.com/mcp.schema.json",
-  "mcpServers": {
-    "bad": {
-      "type": "http",
-      "command": "npx",
-      "args": ["-y", "echo", "hi"]
-    }
-  }
-}"#,
-        )
-        .await
-        .unwrap();
-
-        let err = Config::load(dir.path(), None).await.unwrap_err();
-        assert!(err.to_string().contains("conflicts"));
-    }
-
-    #[tokio::test]
-    async fn load_denies_streamable_http_with_empty_argv() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "argv": [], "url": "https://example.com/mcp" } } }"#,
-        )
-        .await
-        .unwrap();
-
-        let err = Config::load(dir.path(), None).await.unwrap_err();
-        assert!(err.to_string().contains("transport=streamable_http"));
-    }
-
-    #[tokio::test]
-    async fn load_denies_unknown_fields() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "servers": {}, "extra": 123 }"#,
-        )
-        .await
-        .unwrap();
-
-        let err = Config::load(dir.path(), None).await.unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("parse"), "err={msg}");
-    }
-
-    #[tokio::test]
-    async fn load_denies_invalid_server_names() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(
-            dir.path().join("mcp.json"),
-            r#"{ "version": 1, "servers": { "bad name": { "transport": "stdio", "argv": ["x"] } } }"#,
-        )
-        .await
-        .unwrap();
-
-        let err = Config::load(dir.path(), None).await.unwrap_err();
-        assert!(err.to_string().contains("invalid mcp server name"));
-    }
-
-    #[tokio::test]
-    async fn load_override_path_is_fail_closed() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = Config::load(dir.path(), Some(PathBuf::from("missing.json")))
-            .await
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("stat") || msg.contains("read"), "err={msg}");
     }
 }

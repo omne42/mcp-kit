@@ -127,6 +127,19 @@ Untrusted 下对 `127.0.0.1`、`10.0.0.0/8` 等 **IP 字面量** 会做拒绝/�
 
 因此这两者默认要求 `TrustMode::Trusted`；如果你确实需要在 Untrusted 下使用（例如测试），请显式使用 `connect_jsonrpc_unchecked` / `connect_io_unchecked`，并把它视为一次“我知道我在绕过安全护栏”的选择。
 
+### stdout_log 路径边界（写盘风险）
+
+当你为 `transport=stdio` 配置 `servers.<name>.stdout_log.path` 时，客户端会把子进程 stdout 旋转落盘。
+
+默认情况下（fail-closed），`mcp-kit` 要求 `stdout_log.path` 必须位于 `--root`（或 `Config::load` 的 root）之下，以避免“不可信配置”把日志写到工作区外部。
+
+如果你确实需要写到 root 外部（例如共享日志目录），你可以显式放开：
+
+- CLI：`mcpctl --allow-stdout-log-outside-root ...`
+- 代码：`Manager::with_allow_stdout_log_outside_root(true)`
+
+这会允许写入工作区外部路径；只应该对可信配置使用。
+
 ### 仍然把 `mcp.json` 当作不可信输入
 
 即使你愿意在某些场景使用 `--trust`，也建议把它当作一次“显式的安全决策”：

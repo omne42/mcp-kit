@@ -14,13 +14,13 @@ pub struct Session {
 
 impl Session {
     pub fn new(
-        server_name: impl Into<ServerName>,
+        server_name: ServerName,
         connection: Connection,
         initialize_result: Value,
         request_timeout: Duration,
     ) -> Self {
         Self {
-            server_name: server_name.into(),
+            server_name,
             initialize_result,
             connection,
             request_timeout,
@@ -28,7 +28,7 @@ impl Session {
     }
 
     pub fn server_name(&self) -> &str {
-        &self.server_name
+        self.server_name.as_str()
     }
 
     pub fn initialize_result(&self) -> &Value {

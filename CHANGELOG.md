@@ -7,7 +7,12 @@
 
 ## [Unreleased]
 
-> 计划下一个版本：`0.2.0`（包含若干 breaking changes；见下文标注）。
+> 计划下一个版本：`0.3.0`（包含若干 breaking changes；见下文标注）。
+
+### Changed
+- `mcp-kit`（BREAKING）：引入 `ServerName` 新类型，并将其用于 `Config/Manager` 的 server key；`Session::new(...)` 现在要求传入 `ServerName`（避免把任意 `String` 当作已校验的 server 名称）。
+- `mcp-kit`：重构内部模块边界：`config` 拆分为 `file_format/model/load`，`manager` 抽出 `placeholders` 与 `streamable_http_validation`，并将大型 `tests` 外置，降低单文件复杂度与后续维护成本。
+- `mcp-kit`：新增 `ServerNameError`（`thiserror`），为后续把 `anyhow` 逐步替换为结构化错误打基础。
 
 ### Added
 - `mcp-kit`：新增 `Manager::disconnect_and_wait` + `Connection::{wait, wait_with_timeout}` + `Session::{wait, wait_with_timeout}`，用于更明确的关闭/回收语义。

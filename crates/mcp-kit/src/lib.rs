@@ -33,14 +33,15 @@ mod manager;
 pub mod mcp;
 mod protocol;
 mod security;
+mod server_name;
 mod session;
 
 pub use config::{ClientConfig, Config, Root, ServerConfig, StdoutLogConfig, Transport};
 pub use manager::{
-    Connection, Manager, ProtocolVersionCheck, ProtocolVersionMismatch, ServerName,
-    ServerNotificationContext, ServerNotificationHandler, ServerRequestContext,
-    ServerRequestHandler, ServerRequestOutcome,
+    Connection, Manager, ProtocolVersionCheck, ProtocolVersionMismatch, ServerNotificationContext,
+    ServerNotificationHandler, ServerRequestContext, ServerRequestHandler, ServerRequestOutcome,
 };
 pub use protocol::{MCP_PROTOCOL_VERSION, McpNotification, McpRequest};
 pub use security::{TrustMode, UntrustedStreamableHttpPolicy};
+pub use server_name::{ServerName, ServerNameError};
 pub use session::Session;
