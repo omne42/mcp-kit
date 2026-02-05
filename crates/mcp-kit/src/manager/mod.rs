@@ -908,6 +908,14 @@ impl Manager {
         let handler_timeout = self.server_handler_timeout;
         let handler_timeout_counts = self.server_handler_timeout_counts.clone();
 
+        struct AbortOnDrop(tokio::task::AbortHandle);
+
+        impl Drop for AbortOnDrop {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+
         if let Some(mut requests_rx) = client.take_requests() {
             let handler = self.server_request_handler.clone();
             let roots = self.roots.clone();
@@ -934,14 +942,12 @@ impl Manager {
                                 };
 
                                 let mut handler_task = tokio::spawn(handler(ctx));
+                                let _abort_on_drop = AbortOnDrop(handler_task.abort_handle());
                                 let mut outcome = match handler_timeout {
                                     Some(timeout) => match tokio::time::timeout(timeout, &mut handler_task).await {
                                         Ok(joined) => match joined {
                                             Ok(outcome) => outcome,
                                             Err(err) if err.is_panic() => {
-                                                eprintln!(
-                                                    "mcp-kit: server request handler panicked (server={server_name} method={method})"
-                                                );
                                                 ServerRequestOutcome::Error {
                                                     code: JSONRPC_SERVER_ERROR,
                                                     message: format!(
@@ -978,9 +984,6 @@ impl Manager {
                                     None => match handler_task.await {
                                         Ok(outcome) => outcome,
                                         Err(err) if err.is_panic() => {
-                                            eprintln!(
-                                                "mcp-kit: server request handler panicked (server={server_name} method={method})"
-                                            );
                                             ServerRequestOutcome::Error {
                                                 code: JSONRPC_SERVER_ERROR,
                                                 message: format!(
@@ -1029,10 +1032,7 @@ impl Manager {
                         Some(outcome) = in_flight.join_next(), if !in_flight.is_empty() => {
                             match outcome {
                                 Ok(()) => {}
-                                Err(err) if err.is_panic() => {
-                                    eprintln!("mcp-kit: server request handler task panicked (server={server_name})");
-                                    return;
-                                }
+                                Err(err) if err.is_panic() => return,
                                 Err(_) => {}
                             }
                         }
@@ -1043,10 +1043,7 @@ impl Manager {
                 while let Some(outcome) = in_flight.join_next().await {
                     match outcome {
                         Ok(()) => {}
-                        Err(err) if err.is_panic() => {
-                            eprintln!("mcp-kit: server request handler task panicked (server={server_name})");
-                            return;
-                        }
+                        Err(err) if err.is_panic() => return,
                         Err(_) => {}
                     }
                 }
@@ -1074,15 +1071,12 @@ impl Manager {
                                 };
 
                                 let mut handler_task = tokio::spawn(handler(ctx));
+                                let _abort_on_drop = AbortOnDrop(handler_task.abort_handle());
                                 match handler_timeout {
                                     Some(timeout) => match tokio::time::timeout(timeout, &mut handler_task).await {
                                         Ok(joined) => match joined {
                                             Ok(()) => {}
-                                            Err(err) if err.is_panic() => {
-                                                eprintln!(
-                                                    "mcp-kit: server notification handler panicked (server={server_name})"
-                                                );
-                                            }
+                                            Err(err) if err.is_panic() => {}
                                             Err(_) => {}
                                         },
                                         Err(_) => {
@@ -1095,11 +1089,7 @@ impl Manager {
                                     },
                                     None => match handler_task.await {
                                         Ok(()) => {}
-                                        Err(err) if err.is_panic() => {
-                                            eprintln!(
-                                                "mcp-kit: server notification handler panicked (server={server_name})"
-                                            );
-                                        }
+                                        Err(err) if err.is_panic() => {}
                                         Err(_) => {}
                                     },
                                 }
@@ -1108,10 +1098,7 @@ impl Manager {
                         Some(outcome) = in_flight.join_next(), if !in_flight.is_empty() => {
                             match outcome {
                                 Ok(()) => {}
-                                Err(err) if err.is_panic() => {
-                                    eprintln!("mcp-kit: server notification handler task panicked (server={server_name})");
-                                    return;
-                                }
+                                Err(err) if err.is_panic() => return,
                                 Err(_) => {}
                             }
                         }
@@ -1122,10 +1109,7 @@ impl Manager {
                 while let Some(outcome) = in_flight.join_next().await {
                     match outcome {
                         Ok(()) => {}
-                        Err(err) if err.is_panic() => {
-                            eprintln!("mcp-kit: server notification handler task panicked (server={server_name})");
-                            return;
-                        }
+                        Err(err) if err.is_panic() => return,
                         Err(_) => {}
                     }
                 }
@@ -1187,7 +1171,11 @@ impl Manager {
         server_cfg: &ServerConfig,
         cwd: &Path,
     ) -> anyhow::Result<()> {
-        self.connect(server_name.as_str(), server_cfg, cwd).await
+        let server_name_key = server_name.clone();
+        self.connect_with_builder(server_name.as_str(), server_cfg, cwd, || {
+            Ok(server_name_key)
+        })
+        .await
     }
 
     /// Remove a cached connection (if any) without waiting for shutdown.

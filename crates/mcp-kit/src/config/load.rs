@@ -70,8 +70,6 @@ async fn read_to_string_limited(path: &Path) -> anyhow::Result<String> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::OpenOptionsExt;
-
         // Best-effort: avoid following reparse points (including symlinks) on open.
         // This mitigates TOCTOU risks where the config path could be replaced between checks.
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
@@ -143,8 +141,6 @@ async fn try_read_to_string_limited(path: &Path) -> anyhow::Result<Option<String
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::OpenOptionsExt;
-
         // Best-effort: avoid following reparse points (including symlinks) on open.
         // This mitigates TOCTOU risks where the config path could be replaced between checks.
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
