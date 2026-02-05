@@ -677,8 +677,10 @@ impl Config {
                     }
                 })?;
 
-            let _ = server.description.as_deref();
-            let _ = &server.extra;
+            // Intentionally ignored: kept for compatibility with external MCP config formats.
+            // Bind them to satisfy dead-code analysis without `allow`.
+            let _ignored_description = server.description.as_deref();
+            let _ignored_extra = &server.extra;
 
             if matches!(server.enabled, Some(false)) {
                 continue;
@@ -708,20 +710,18 @@ impl Config {
                 }
             };
 
-            let server_type = server
-                .server_type
-                .as_deref()
-                .map(|v| v.trim().to_ascii_lowercase());
-            if let Some(server_type) = server_type.as_deref() {
-                match server_type {
-                    "http" | "sse" | "streamable_http" => {
+            if let Some(server_type) = server.server_type.as_deref().map(str::trim) {
+                if !server_type.is_empty() {
+                    if server_type.eq_ignore_ascii_case("http")
+                        || server_type.eq_ignore_ascii_case("sse")
+                        || server_type.eq_ignore_ascii_case("streamable_http")
+                    {
                         if transport != Transport::StreamableHttp {
                             anyhow::bail!(
                                 "mcp server {name}: type={server_type} conflicts with transport={transport:?}"
                             );
                         }
-                    }
-                    _ => {
+                    } else {
                         anyhow::bail!("mcp server {name}: unsupported type: {server_type}");
                     }
                 }
