@@ -12,6 +12,7 @@
 ### Changed
 - `mcp-kit`（BREAKING）：引入 `ServerName` 新类型，并将其用于 `Config/Manager` 的 server key；`Session::new(...)` 现在要求传入 `ServerName`（避免把任意 `String` 当作已校验的 server 名称）。
 - `mcp-kit`：重构内部模块边界：`config` 拆分为 `file_format/model/load`（并抽出 `load::fs`），`manager` 抽出 `placeholders/streamable_http_validation/handlers`，并将大型 `tests` 外置，降低单文件复杂度与后续维护成本。
+- `mcp-kit`（BREAKING）：`ServerConfig` 现在按 transport 分层为 enum（`Stdio/Unix/StreamableHttp`），减少“非法字段组合”；部分仅对特定 transport 有意义的 setter 现在返回 `Result`（fail-fast）。
 - `mcp-kit`：新增 `ServerNameError`（`thiserror`，`#[non_exhaustive]`），为后续把 `anyhow` 逐步替换为结构化错误打基础。
 - `mcp-kit`：`ServerName::parse(...)` 的 rustdoc 现在明确其会对输入做 `trim()` 后再校验（行为不变，只是把语义写清楚；并修正了“ASCII whitespace”表述与实际行为不一致的问题）。
 - `mcp-kit`：`ServerName` 内部实现改为 `Arc<str>`，避免在 handler 等路径频繁 clone 时产生额外分配（API 不变）。
@@ -26,7 +27,8 @@
 - `mcp-jsonrpc`：stdout_log 写入失败不再直接 `eprintln!`；改为通过 `ClientHandle::stdout_log_write_error()` 暴露（失败后会禁用 stdout_log 写入）。
 - `mcp-jsonrpc`：`ClientHandle` 的 `close_reason` / `stdout_log_write_error` 内部存储从 `Mutex<Option<String>>` 改为 `OnceLock<String>`，减少锁与 poison 分支（API 不变）。
 - `mcp-kit`：`ServerConfig::validate` 在 `streamable_http` 场景下会 fail-fast 校验 `http_headers` / `env_http_headers` 的 header name/value 合法性；并将外部 `mcpServers` 格式的 streamable_http 校验收口到 `ServerConfig::validate`，避免重复规则漂移。
-- `mcp-kit`：外部 `mcpServers` 格式加载时，`stdout_log` 只在 `transport=stdio` 分支解析；对 `unix/streamable_http` 统一优先报“不支持 stdout_log”，避免先报 stdout_log 配置格式错误（更一致）。
+- `mcp-kit`：配置加载时，`stdout_log` 只在 `transport=stdio` 分支解析（v1 `mcp.json` 与外部 `mcpServers` 格式一致）；对 `unix/streamable_http` 优先报“不支持 stdout_log”，避免先报 stdout_log 配置格式错误（更一致）。
+- `mcp-kit`：`stdout_log.max_bytes_per_part=0` 现在会 fail-fast 拒绝（不再被钳到 1）。
 
 ### Added
 - `mcp-kit`：`ServerName` 现在实现 `Deserialize`（`serde`），便于在配置/外部数据模型中直接使用。

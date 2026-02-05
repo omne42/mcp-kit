@@ -817,7 +817,9 @@ async fn untrusted_manager_refuses_streamable_http_env_secrets() {
     assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
 
     let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
-    server_cfg.set_bearer_token_env_var(Some("MCP_TOKEN".to_string()));
+    server_cfg
+        .set_bearer_token_env_var(Some("MCP_TOKEN".to_string()))
+        .unwrap();
 
     let err = manager
         .connect("srv", &server_cfg, Path::new("."))
@@ -970,7 +972,7 @@ async fn untrusted_manager_refuses_streamable_http_sensitive_headers() {
     assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
 
     let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
-    server_cfg.http_headers_mut().insert(
+    server_cfg.http_headers_mut().unwrap().insert(
         "Authorization".to_string(),
         "Bearer local-secret".to_string(),
     );

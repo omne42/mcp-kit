@@ -22,8 +22,7 @@ fn parse_stdout_log_config(
 ) -> anyhow::Result<StdoutLogConfig> {
     let max_bytes_per_part = log
         .max_bytes_per_part
-        .unwrap_or(super::DEFAULT_STDOUT_LOG_MAX_BYTES_PER_PART)
-        .max(1);
+        .unwrap_or(super::DEFAULT_STDOUT_LOG_MAX_BYTES_PER_PART);
     let max_parts = log.max_parts.unwrap_or(super::DEFAULT_STDOUT_LOG_MAX_PARTS);
     let max_parts = if max_parts == 0 {
         None
@@ -233,10 +232,28 @@ impl Config {
                 }
             }
 
-            let stdout_log = server
-                .stdout_log
-                .map(|log| parse_stdout_log_config(thread_root, &name, log))
-                .transpose()?;
+            let stdout_log = match server.transport {
+                Transport::Stdio => server
+                    .stdout_log
+                    .map(|log| parse_stdout_log_config(thread_root, &name, log))
+                    .transpose()?,
+                Transport::Unix => {
+                    if server.stdout_log.is_some() {
+                        anyhow::bail!(
+                            "mcp server {name}: stdout_log is not supported for transport=unix"
+                        );
+                    }
+                    None
+                }
+                Transport::StreamableHttp => {
+                    if server.stdout_log.is_some() {
+                        anyhow::bail!(
+                            "mcp server {name}: stdout_log is not supported for transport=streamable_http"
+                        );
+                    }
+                    None
+                }
+            };
 
             let inherit_env = match server.transport {
                 Transport::Stdio => server.inherit_env.unwrap_or(false),
@@ -265,19 +282,92 @@ impl Config {
                 _ => server.unix_path,
             };
 
-            let server_cfg = ServerConfig {
-                transport: server.transport,
-                argv,
-                inherit_env,
-                unix_path,
-                url: server.url,
-                sse_url: server.sse_url,
-                http_url: server.http_url,
-                bearer_token_env_var: server.bearer_token_env_var,
-                http_headers: server.http_headers,
-                env_http_headers: server.env_http_headers,
-                env: server.env,
-                stdout_log,
+            let server_cfg = match server.transport {
+                Transport::Stdio => {
+                    if unix_path.is_some() {
+                        anyhow::bail!(
+                            "mcp server {name}: unix_path is only valid for transport=unix"
+                        );
+                    }
+                    if server.url.is_some() || server.sse_url.is_some() || server.http_url.is_some()
+                    {
+                        anyhow::bail!(
+                            "mcp server {name}: url/sse_url/http_url are only valid for transport=streamable_http"
+                        );
+                    }
+                    if server.bearer_token_env_var.is_some()
+                        || !server.http_headers.is_empty()
+                        || !server.env_http_headers.is_empty()
+                    {
+                        anyhow::bail!(
+                            "mcp server {name}: http headers/auth are only valid for transport=streamable_http"
+                        );
+                    }
+
+                    let mut server_cfg = ServerConfig::stdio(argv)?;
+                    server_cfg.set_inherit_env(inherit_env)?;
+                    *server_cfg.env_mut()? = server.env;
+                    server_cfg.set_stdout_log(stdout_log)?;
+                    server_cfg
+                }
+                Transport::Unix => {
+                    if server.url.is_some() || server.sse_url.is_some() || server.http_url.is_some()
+                    {
+                        anyhow::bail!(
+                            "mcp server {name}: url/sse_url/http_url are only valid for transport=streamable_http"
+                        );
+                    }
+                    if !server.env.is_empty() {
+                        anyhow::bail!("mcp server {name}: env is not supported for transport=unix");
+                    }
+                    if server.bearer_token_env_var.is_some()
+                        || !server.http_headers.is_empty()
+                        || !server.env_http_headers.is_empty()
+                    {
+                        anyhow::bail!(
+                            "mcp server {name}: http headers/auth are only valid for transport=streamable_http"
+                        );
+                    }
+
+                    let unix_path = unix_path.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "mcp server {name}: unix_path is required for transport=unix"
+                        )
+                    })?;
+                    ServerConfig::unix(unix_path)?
+                }
+                Transport::StreamableHttp => {
+                    if unix_path.is_some() {
+                        anyhow::bail!(
+                            "mcp server {name}: unix_path is only valid for transport=unix"
+                        );
+                    }
+                    if !server.env.is_empty() {
+                        anyhow::bail!(
+                            "mcp server {name}: env is not supported for transport=streamable_http"
+                        );
+                    }
+
+                    let mut server_cfg = match (server.url, server.sse_url, server.http_url) {
+                        (Some(url), None, None) => ServerConfig::streamable_http(url)?,
+                        (None, Some(sse_url), Some(http_url)) => {
+                            ServerConfig::streamable_http_split(sse_url, http_url)?
+                        }
+                        (None, None, None) => anyhow::bail!(
+                            "mcp server {name}: url (or sse_url + http_url) is required for transport=streamable_http"
+                        ),
+                        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => anyhow::bail!(
+                            "mcp server {name}: set either url or (sse_url + http_url), not both"
+                        ),
+                        (None, Some(_), None) | (None, None, Some(_)) => anyhow::bail!(
+                            "mcp server {name}: sse_url and http_url must both be set"
+                        ),
+                    };
+                    server_cfg.set_bearer_token_env_var(server.bearer_token_env_var)?;
+                    *server_cfg.http_headers_mut()? = server.http_headers;
+                    *server_cfg.env_http_headers_mut()? = server.env_http_headers;
+                    server_cfg
+                }
             };
             server_cfg.validate().map_err(|err| {
                 let msg = format!("invalid mcp server config (server={server_name_key}): {err}");
@@ -433,20 +523,10 @@ impl Config {
                         .stdout_log
                         .map(|log| parse_stdout_log_config(thread_root, &name, log))
                         .transpose()?;
-                    let server_cfg = ServerConfig {
-                        transport: Transport::Stdio,
-                        argv,
-                        inherit_env,
-                        unix_path: None,
-                        url: None,
-                        sse_url: None,
-                        http_url: None,
-                        bearer_token_env_var: None,
-                        http_headers: BTreeMap::new(),
-                        env_http_headers: BTreeMap::new(),
-                        env,
-                        stdout_log,
-                    };
+                    let mut server_cfg = ServerConfig::stdio(argv)?;
+                    server_cfg.set_inherit_env(inherit_env)?;
+                    *server_cfg.env_mut()? = env;
+                    server_cfg.set_stdout_log(stdout_log)?;
                     server_cfg.validate().map_err(|err| {
                         let msg =
                             format!("invalid mcp server config (server={server_name}): {err}");
@@ -498,20 +578,7 @@ impl Config {
                         thread_root.join(unix_path)
                     };
 
-                    let server_cfg = ServerConfig {
-                        transport: Transport::Unix,
-                        argv: Vec::new(),
-                        inherit_env: true,
-                        unix_path: Some(unix_path),
-                        url: None,
-                        sse_url: None,
-                        http_url: None,
-                        bearer_token_env_var: None,
-                        http_headers: BTreeMap::new(),
-                        env_http_headers: BTreeMap::new(),
-                        env: BTreeMap::new(),
-                        stdout_log: None,
-                    };
+                    let server_cfg = ServerConfig::unix(unix_path)?;
                     server_cfg.validate().map_err(|err| {
                         let msg =
                             format!("invalid mcp server config (server={server_name}): {err}");
@@ -542,20 +609,24 @@ impl Config {
                         );
                     }
 
-                    let server_cfg = ServerConfig {
-                        transport: Transport::StreamableHttp,
-                        argv: Vec::new(),
-                        inherit_env,
-                        unix_path: None,
-                        url: server.url,
-                        sse_url: server.sse_url,
-                        http_url: server.http_url,
-                        bearer_token_env_var: server.bearer_token_env_var,
-                        http_headers: server.http_headers,
-                        env_http_headers: server.env_http_headers,
-                        env: BTreeMap::new(),
-                        stdout_log: None,
+                    let mut server_cfg = match (server.url, server.sse_url, server.http_url) {
+                        (Some(url), None, None) => ServerConfig::streamable_http(url)?,
+                        (None, Some(sse_url), Some(http_url)) => {
+                            ServerConfig::streamable_http_split(sse_url, http_url)?
+                        }
+                        (None, None, None) => anyhow::bail!(
+                            "mcp server {name}: url (or sse_url + http_url) is required for transport=streamable_http"
+                        ),
+                        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => anyhow::bail!(
+                            "mcp server {name}: set either url or (sse_url + http_url), not both"
+                        ),
+                        (None, Some(_), None) | (None, None, Some(_)) => anyhow::bail!(
+                            "mcp server {name}: sse_url and http_url must both be set"
+                        ),
                     };
+                    server_cfg.set_bearer_token_env_var(server.bearer_token_env_var)?;
+                    *server_cfg.http_headers_mut()? = server.http_headers;
+                    *server_cfg.env_http_headers_mut()? = server.env_http_headers;
                     server_cfg.validate().map_err(|err| {
                         let msg =
                             format!("invalid mcp server config (server={server_name}): {err}");

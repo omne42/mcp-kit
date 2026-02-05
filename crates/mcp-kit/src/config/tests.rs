@@ -252,26 +252,29 @@ async fn load_denies_stdio_env_with_empty_value() {
 #[test]
 fn server_config_validate_rejects_stdio_http_auth_fields() {
     let mut cfg = ServerConfig::stdio(vec!["mcp-a".to_string()]).unwrap();
-    cfg.set_bearer_token_env_var(Some("MCP_TOKEN".to_string()));
-    assert!(cfg.validate().is_err());
+    assert!(
+        cfg.set_bearer_token_env_var(Some("MCP_TOKEN".to_string()))
+            .is_err()
+    );
 }
 
 #[test]
 fn server_config_validate_rejects_unix_env_fields() {
     let mut cfg = ServerConfig::unix(PathBuf::from("/tmp/mcp.sock")).unwrap();
-    cfg.env_mut().insert("X".to_string(), "1".to_string());
-    assert!(cfg.validate().is_err());
+    assert!(cfg.env_mut().is_err());
 }
 
 #[test]
 fn server_config_validate_rejects_streamable_http_stdout_log() {
     let mut cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
-    cfg.set_stdout_log(Some(StdoutLogConfig {
-        path: PathBuf::from("logs/stdout.log"),
-        max_bytes_per_part: 1,
-        max_parts: None,
-    }));
-    assert!(cfg.validate().is_err());
+    assert!(
+        cfg.set_stdout_log(Some(StdoutLogConfig {
+            path: PathBuf::from("logs/stdout.log"),
+            max_bytes_per_part: 1,
+            max_parts: None,
+        }))
+        .is_err()
+    );
 }
 
 #[test]
@@ -312,7 +315,8 @@ fn server_config_validate_rejects_stdio_stdout_log_with_parent_dir() {
         path: PathBuf::from("../oops.log"),
         max_bytes_per_part: 1,
         max_parts: Some(1),
-    }));
+    }))
+    .unwrap();
     assert!(cfg.validate().is_err());
 }
 
@@ -323,7 +327,8 @@ fn server_config_validate_rejects_stdio_stdout_log_with_zero_max_bytes() {
         path: PathBuf::from("logs/stdout.log"),
         max_bytes_per_part: 0,
         max_parts: Some(1),
-    }));
+    }))
+    .unwrap();
     assert!(cfg.validate().is_err());
 }
 
@@ -334,7 +339,8 @@ fn server_config_validate_rejects_stdio_stdout_log_with_zero_max_parts() {
         path: PathBuf::from("logs/stdout.log"),
         max_bytes_per_part: 1,
         max_parts: Some(0),
-    }));
+    }))
+    .unwrap();
     assert!(cfg.validate().is_err());
 }
 
@@ -368,6 +374,22 @@ async fn load_denies_stdout_log_path_with_parent_dir() {
         err.to_string().contains("stdout_log.path") && err.to_string().contains(".."),
         "unexpected error: {err}"
     );
+}
+
+#[tokio::test]
+async fn load_denies_stdout_log_with_zero_max_bytes_per_part() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{ "version": 1, "servers": { "a": { "transport": "stdio", "argv": ["mcp-a"], "stdout_log": { "path": "./logs/a.stdout.log", "max_bytes_per_part": 0 } } } }"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("invalid stdout_log config"), "err={err:#}");
+    assert!(msg.contains("max_bytes_per_part"), "err={err:#}");
 }
 
 #[tokio::test]
@@ -786,6 +808,44 @@ async fn load_denies_streamable_http_with_invalid_env_http_header_name() {
         err.to_string().contains("invalid env_http_headers key"),
         "err={err:#}"
     );
+}
+
+#[tokio::test]
+async fn load_denies_unix_transport_with_stdout_log_in_v1_format() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{ "version": 1, "servers": { "sock": { "transport": "unix", "unix_path": "/tmp/mcp.sock", "stdout_log": { "path": "" } } } }"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("stdout_log is not supported for transport=unix"),
+        "err={err:#}"
+    );
+    assert!(!msg.contains("invalid stdout_log config"), "err={err:#}");
+}
+
+#[tokio::test]
+async fn load_denies_streamable_http_with_stdout_log_in_v1_format() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{ "version": 1, "servers": { "remote": { "transport": "streamable_http", "url": "https://example.com/mcp", "stdout_log": { "path": "" } } } }"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("stdout_log is not supported for transport=streamable_http"),
+        "err={err:#}"
+    );
+    assert!(!msg.contains("invalid stdout_log config"), "err={err:#}");
 }
 
 #[tokio::test]
