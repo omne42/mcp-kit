@@ -265,6 +265,6 @@ impl Config {
     }
 
     pub fn server_named(&self, name: &ServerName) -> Option<&ServerConfig> {
-        self.server(name.as_str())
+        self.servers.get(name)
     }
 }

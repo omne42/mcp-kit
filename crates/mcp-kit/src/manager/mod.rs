@@ -34,6 +34,11 @@ const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
+fn parse_server_name_anyhow(server_name: &str) -> anyhow::Result<ServerName> {
+    ServerName::parse(server_name)
+        .map_err(|err| anyhow::anyhow!("invalid mcp server name {server_name:?}: {err}"))
+}
+
 pub enum ServerRequestOutcome {
     Ok(Value),
     Error {
@@ -438,9 +443,27 @@ impl Manager {
         server_cfg: &ServerConfig,
         cwd: &Path,
     ) -> anyhow::Result<()> {
+        self.connect_with_builder(server_name, server_cfg, cwd, || {
+            parse_server_name_anyhow(server_name)
+        })
+        .await
+    }
+
+    async fn connect_with_builder<F>(
+        &mut self,
+        server_name: &str,
+        server_cfg: &ServerConfig,
+        cwd: &Path,
+        build_server_name: F,
+    ) -> anyhow::Result<()>
+    where
+        F: FnOnce() -> anyhow::Result<ServerName>,
+    {
         if self.is_connected_and_alive(server_name) {
             return Ok(());
         }
+
+        let server_name_key = build_server_name()?;
 
         let (client, child) = match server_cfg.transport() {
             Transport::Stdio => {
@@ -680,7 +703,8 @@ impl Manager {
             }
         };
 
-        self.install_connection(server_name, client, child).await?;
+        self.install_connection_parsed(server_name_key, client, child)
+            .await?;
         Ok(())
     }
 
@@ -710,14 +734,33 @@ impl Manager {
     pub async fn connect_jsonrpc_unchecked(
         &mut self,
         server_name: &str,
-        mut client: mcp_jsonrpc::Client,
+        client: mcp_jsonrpc::Client,
     ) -> anyhow::Result<()> {
+        self.connect_jsonrpc_with_builder(
+            server_name,
+            || parse_server_name_anyhow(server_name),
+            client,
+        )
+        .await
+    }
+
+    async fn connect_jsonrpc_with_builder<F>(
+        &mut self,
+        server_name: &str,
+        build_server_name: F,
+        mut client: mcp_jsonrpc::Client,
+    ) -> anyhow::Result<()>
+    where
+        F: FnOnce() -> anyhow::Result<ServerName>,
+    {
         if self.is_connected_and_alive(server_name) {
             return Ok(());
         }
 
+        let server_name_key = build_server_name()?;
         let child = client.take_child();
-        self.install_connection(server_name, client, child).await?;
+        self.install_connection_parsed(server_name_key, client, child)
+            .await?;
         Ok(())
     }
 
@@ -805,9 +848,9 @@ impl Manager {
         Some(false)
     }
 
-    async fn install_connection(
+    async fn install_connection_parsed(
         &mut self,
-        server_name: &str,
+        server_name: ServerName,
         mut client: mcp_jsonrpc::Client,
         child: Option<Child>,
     ) -> anyhow::Result<()> {
@@ -837,9 +880,6 @@ impl Manager {
                 }
             }
         }
-
-        let server_name = ServerName::parse(server_name)
-            .map_err(|_| anyhow::anyhow!("invalid mcp server name: {server_name}"))?;
 
         let handler_tasks = self.attach_client_handlers(server_name.clone(), &mut client);
         let handler_tasks_guard = HandlerTasksGuard::new(handler_tasks);
@@ -893,10 +933,33 @@ impl Manager {
                                     params: req.params.clone(),
                                 };
 
+                                let mut handler_task = tokio::spawn(handler(ctx));
                                 let mut outcome = match handler_timeout {
-                                    Some(timeout) => match tokio::time::timeout(timeout, handler(ctx)).await {
-                                        Ok(outcome) => outcome,
+                                    Some(timeout) => match tokio::time::timeout(timeout, &mut handler_task).await {
+                                        Ok(joined) => match joined {
+                                            Ok(outcome) => outcome,
+                                            Err(err) if err.is_panic() => {
+                                                eprintln!(
+                                                    "mcp-kit: server request handler panicked (server={server_name} method={method})"
+                                                );
+                                                ServerRequestOutcome::Error {
+                                                    code: JSONRPC_SERVER_ERROR,
+                                                    message: format!(
+                                                        "server request handler panicked: {method}"
+                                                    ),
+                                                    data: None,
+                                                }
+                                            }
+                                            Err(_) => ServerRequestOutcome::Error {
+                                                code: JSONRPC_SERVER_ERROR,
+                                                message: format!(
+                                                    "server request handler cancelled: {method}"
+                                                ),
+                                                data: None,
+                                            },
+                                        },
                                         Err(_) => {
+                                            handler_task.abort();
                                             {
                                                 let mut counts = handler_timeout_counts
                                                     .lock()
@@ -912,7 +975,28 @@ impl Manager {
                                             }
                                         }
                                     },
-                                    None => handler(ctx).await,
+                                    None => match handler_task.await {
+                                        Ok(outcome) => outcome,
+                                        Err(err) if err.is_panic() => {
+                                            eprintln!(
+                                                "mcp-kit: server request handler panicked (server={server_name} method={method})"
+                                            );
+                                            ServerRequestOutcome::Error {
+                                                code: JSONRPC_SERVER_ERROR,
+                                                message: format!(
+                                                    "server request handler panicked: {method}"
+                                                ),
+                                                data: None,
+                                            }
+                                        }
+                                        Err(_) => ServerRequestOutcome::Error {
+                                            code: JSONRPC_SERVER_ERROR,
+                                            message: format!(
+                                                "server request handler cancelled: {method}"
+                                            ),
+                                            data: None,
+                                        },
+                                    },
                                 };
 
                                 if matches!(outcome, ServerRequestOutcome::MethodNotFound) {
@@ -946,7 +1030,8 @@ impl Manager {
                             match outcome {
                                 Ok(()) => {}
                                 Err(err) if err.is_panic() => {
-                                    panic!("server request handler panicked");
+                                    eprintln!("mcp-kit: server request handler task panicked (server={server_name})");
+                                    return;
                                 }
                                 Err(_) => {}
                             }
@@ -959,7 +1044,8 @@ impl Manager {
                     match outcome {
                         Ok(()) => {}
                         Err(err) if err.is_panic() => {
-                            panic!("server request handler panicked");
+                            eprintln!("mcp-kit: server request handler task panicked (server={server_name})");
+                            return;
                         }
                         Err(_) => {}
                     }
@@ -987,19 +1073,35 @@ impl Manager {
                                     params: note.params,
                                 };
 
+                                let mut handler_task = tokio::spawn(handler(ctx));
                                 match handler_timeout {
-                                    Some(timeout) => {
-                                        if tokio::time::timeout(timeout, handler(ctx))
-                                            .await
-                                            .is_err()
-                                        {
+                                    Some(timeout) => match tokio::time::timeout(timeout, &mut handler_task).await {
+                                        Ok(joined) => match joined {
+                                            Ok(()) => {}
+                                            Err(err) if err.is_panic() => {
+                                                eprintln!(
+                                                    "mcp-kit: server notification handler panicked (server={server_name})"
+                                                );
+                                            }
+                                            Err(_) => {}
+                                        },
+                                        Err(_) => {
+                                            handler_task.abort();
                                             let mut counts = handler_timeout_counts
                                                 .lock()
                                                 .unwrap_or_else(|poisoned| poisoned.into_inner());
                                             *counts.entry(server_name).or_insert(0) += 1;
                                         }
-                                    }
-                                    None => handler(ctx).await,
+                                    },
+                                    None => match handler_task.await {
+                                        Ok(()) => {}
+                                        Err(err) if err.is_panic() => {
+                                            eprintln!(
+                                                "mcp-kit: server notification handler panicked (server={server_name})"
+                                            );
+                                        }
+                                        Err(_) => {}
+                                    },
                                 }
                             });
                         }
@@ -1007,7 +1109,8 @@ impl Manager {
                             match outcome {
                                 Ok(()) => {}
                                 Err(err) if err.is_panic() => {
-                                    panic!("server notification handler panicked");
+                                    eprintln!("mcp-kit: server notification handler task panicked (server={server_name})");
+                                    return;
                                 }
                                 Err(_) => {}
                             }
@@ -1020,7 +1123,8 @@ impl Manager {
                     match outcome {
                         Ok(()) => {}
                         Err(err) if err.is_panic() => {
-                            panic!("server notification handler panicked");
+                            eprintln!("mcp-kit: server notification handler task panicked (server={server_name})");
+                            return;
                         }
                         Err(_) => {}
                     }

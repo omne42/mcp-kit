@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! `mcp-kit` is a small, reusable MCP client toolkit.
 //!
 //! It provides:

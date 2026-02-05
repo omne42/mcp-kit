@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! `mcp-jsonrpc` is a small JSON-RPC 2.0 client with a few MCP-friendly transports.
 //!
 //! Transports:

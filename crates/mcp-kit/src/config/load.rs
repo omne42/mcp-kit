@@ -68,6 +68,15 @@ async fn read_to_string_limited(path: &Path) -> anyhow::Result<String> {
     {
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        // Best-effort: avoid following reparse points (including symlinks) on open.
+        // This mitigates TOCTOU risks where the config path could be replaced between checks.
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
 
     use tokio::io::AsyncReadExt;
 
@@ -131,6 +140,15 @@ async fn try_read_to_string_limited(path: &Path) -> anyhow::Result<Option<String
     #[cfg(unix)]
     {
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        // Best-effort: avoid following reparse points (including symlinks) on open.
+        // This mitigates TOCTOU risks where the config path could be replaced between checks.
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
 
     use tokio::io::AsyncReadExt;
@@ -382,7 +400,7 @@ impl Config {
         let mut servers = BTreeMap::<ServerName, ServerConfig>::new();
         for (name, server) in cfg.servers {
             let server_name = ServerName::parse(&name)
-                .map_err(|_| anyhow::anyhow!("invalid mcp server name: {name}"))?;
+                .map_err(|err| anyhow::anyhow!("invalid mcp server name {name:?}: {err}"))?;
 
             let stdout_log = match server.stdout_log {
                 Some(log) => {
@@ -666,7 +684,7 @@ impl Config {
                 continue;
             }
             let server_name = ServerName::parse(&name)
-                .map_err(|_| anyhow::anyhow!("invalid mcp server name: {name}"))?;
+                .map_err(|err| anyhow::anyhow!("invalid mcp server name {name:?}: {err}"))?;
 
             let server: ExternalServerConfigFile = serde_json::from_value(server_value)
                 .with_context(|| {
