@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use serde_json::Value;
 
@@ -51,13 +52,13 @@ impl Manager {
         let mut tasks = Vec::new();
         let handler_concurrency = self.server_handler_concurrency.max(1);
         let handler_timeout = self.server_handler_timeout;
-        let handler_timeout_counts = self.server_handler_timeout_counts.clone();
+        let timeout_counter = self.server_handler_timeout_counts.counter_for(&server_name);
 
         if let Some(mut requests_rx) = client.take_requests() {
             let handler = self.server_request_handler.clone();
             let roots = self.roots.clone();
             let server_name = server_name.clone();
-            let handler_timeout_counts = handler_timeout_counts.clone();
+            let timeout_counter = timeout_counter.clone();
             tasks.push(tokio::spawn(async move {
                 let mut in_flight = tokio::task::JoinSet::new();
 
@@ -67,7 +68,7 @@ impl Manager {
                             let handler = handler.clone();
                             let roots = roots.clone();
                             let server_name = server_name.clone();
-                            let handler_timeout_counts = handler_timeout_counts.clone();
+                            let timeout_counter = timeout_counter.clone();
                             in_flight.spawn(async move {
                                 const JSONRPC_SERVER_ERROR: i64 = -32000;
 
@@ -94,15 +95,7 @@ impl Manager {
                                                 },
                                             },
                                             Err(_) => {
-                                                {
-                                                    let mut counts = handler_timeout_counts
-                                                        .write()
-                                                        .unwrap_or_else(|poisoned| {
-                                                            poisoned.into_inner()
-                                                        });
-                                                    *counts.entry(server_name.clone()).or_insert(0) +=
-                                                        1;
-                                                }
+                                                timeout_counter.fetch_add(1, Ordering::Relaxed);
                                                 ServerRequestOutcome::Error {
                                                     code: JSONRPC_SERVER_ERROR,
                                                     message: format!(
@@ -180,7 +173,7 @@ impl Manager {
         if let Some(mut notifications_rx) = client.take_notifications() {
             let handler = self.server_notification_handler.clone();
             let server_name = server_name.clone();
-            let handler_timeout_counts = handler_timeout_counts.clone();
+            let timeout_counter = timeout_counter.clone();
             tasks.push(tokio::spawn(async move {
                 let mut in_flight = tokio::task::JoinSet::new();
 
@@ -189,7 +182,7 @@ impl Manager {
                         Some(note) = notifications_rx.recv(), if in_flight.len() < handler_concurrency => {
                             let handler = handler.clone();
                             let server_name = server_name.clone();
-                            let handler_timeout_counts = handler_timeout_counts.clone();
+                            let timeout_counter = timeout_counter.clone();
                             in_flight.spawn(async move {
                                 let ctx = ServerNotificationContext {
                                     server_name: server_name.clone(),
@@ -204,10 +197,7 @@ impl Manager {
                                         match tokio::time::timeout(timeout, handler_fut).await {
                                             Ok(Ok(())) | Ok(Err(_)) => {}
                                             Err(_) => {
-                                                let mut counts = handler_timeout_counts
-                                                    .write()
-                                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                                *counts.entry(server_name).or_insert(0) += 1;
+                                                timeout_counter.fetch_add(1, Ordering::Relaxed);
                                             }
                                         }
                                     }

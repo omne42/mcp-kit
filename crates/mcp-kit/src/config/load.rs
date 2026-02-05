@@ -36,26 +36,16 @@ fn parse_stdout_log_config(
         max_bytes_per_part,
         max_parts,
     };
-    cfg.validate()
-        .map_err(|err| anyhow::anyhow!("mcp server {name}: {err}"))?;
+    cfg.validate().map_err(|err| {
+        let msg = format!("mcp server {name}: invalid stdout_log config: {err}");
+        err.context(msg)
+    })?;
 
     if !cfg.path.is_absolute() {
         cfg.path = thread_root.join(&cfg.path);
     }
 
     Ok(cfg)
-}
-
-fn validate_stdio_env(name: &str, env: &BTreeMap<String, String>) -> anyhow::Result<()> {
-    for (key, value) in env.iter() {
-        if key.trim().is_empty() {
-            anyhow::bail!("mcp server {name}: env key must not be empty");
-        }
-        if value.trim().is_empty() {
-            anyhow::bail!("mcp server {name}: env[{key}] must not be empty");
-        }
-    }
-    Ok(())
 }
 
 impl Config {
@@ -210,44 +200,38 @@ impl Config {
         }
 
         let client = match cfg.client {
-            Some(client) => {
-                if let Some(protocol_version) = &client.protocol_version {
-                    if protocol_version.trim().is_empty() {
-                        anyhow::bail!("mcp.json client.protocol_version must not be empty");
-                    }
-                }
-                if let Some(capabilities) = &client.capabilities {
-                    if !capabilities.is_object() {
-                        anyhow::bail!("mcp.json client.capabilities must be a JSON object");
-                    }
-                }
-                if let Some(roots) = &client.roots {
-                    for (idx, root) in roots.iter().enumerate() {
-                        if root.uri.trim().is_empty() {
-                            anyhow::bail!("mcp.json client.roots[{idx}].uri must not be empty");
-                        }
-                        if let Some(name) = &root.name {
-                            if name.trim().is_empty() {
-                                anyhow::bail!(
-                                    "mcp.json client.roots[{idx}].name must not be empty"
-                                );
-                            }
-                        }
-                    }
-                }
-                ClientConfig {
-                    protocol_version: client.protocol_version,
-                    capabilities: client.capabilities,
-                    roots: client.roots,
-                }
-            }
+            Some(client) => ClientConfig {
+                protocol_version: client.protocol_version,
+                capabilities: client.capabilities,
+                roots: client.roots,
+            },
             None => ClientConfig::default(),
         };
+        client.validate().map_err(|err| {
+            let msg = format!("invalid mcp.json client config: {err}");
+            err.context(msg)
+        })?;
 
         let mut servers = BTreeMap::<ServerName, ServerConfig>::new();
         for (name, server) in cfg.servers {
-            let server_name = ServerName::parse(&name)
-                .map_err(|err| anyhow::anyhow!("invalid mcp server name {name:?}: {err}"))?;
+            let server_name_key = ServerName::parse(&name)
+                .with_context(|| format!("invalid mcp server name {name:?}"))?;
+
+            if matches!(
+                server.transport,
+                Transport::Unix | Transport::StreamableHttp
+            ) && server.argv.is_some()
+            {
+                match server.transport {
+                    Transport::Unix => {
+                        anyhow::bail!("mcp server {name}: argv is not allowed for transport=unix")
+                    }
+                    Transport::StreamableHttp => anyhow::bail!(
+                        "mcp server {name}: argv is not allowed for transport=streamable_http"
+                    ),
+                    Transport::Stdio => unreachable!("matches! guard excludes stdio"),
+                }
+            }
 
             let stdout_log = server
                 .stdout_log
@@ -266,217 +250,41 @@ impl Config {
                 }
             };
 
-            let (argv, unix_path) = match server.transport {
-                Transport::Stdio => {
-                    if server.unix_path.is_some() {
-                        anyhow::bail!(
-                            "mcp server {name}: unix_path is only valid for transport=unix"
-                        );
-                    }
-                    if server.url.is_some() {
-                        anyhow::bail!(
-                            "mcp server {name}: url is only valid for transport=streamable_http"
-                        );
-                    }
-                    if server.sse_url.is_some() || server.http_url.is_some() {
-                        anyhow::bail!(
-                            "mcp server {name}: sse_url/http_url are only valid for transport=streamable_http"
-                        );
-                    }
-                    if server.bearer_token_env_var.is_some()
-                        || !server.http_headers.is_empty()
-                        || !server.env_http_headers.is_empty()
-                    {
-                        anyhow::bail!(
-                            "mcp server {name}: http auth/headers are only valid for transport=streamable_http"
-                        );
-                    }
-                    validate_stdio_env(&name, &server.env)?;
-                    let argv = server.argv.ok_or_else(|| {
-                        anyhow::anyhow!("mcp server {name}: argv must not be empty")
-                    })?;
-                    if argv.is_empty() {
-                        anyhow::bail!("mcp server {name}: argv must not be empty");
-                    }
-                    for (idx, arg) in argv.iter().enumerate() {
-                        if arg.trim().is_empty() {
-                            anyhow::bail!("mcp server {name}: argv[{idx}] must not be empty");
-                        }
-                    }
-                    (argv, None)
-                }
-                Transport::Unix => {
-                    if server.argv.is_some() {
-                        anyhow::bail!("mcp server {name}: argv is not allowed for transport=unix");
-                    }
-                    if server.url.is_some() {
-                        anyhow::bail!(
-                            "mcp server {name}: url is only valid for transport=streamable_http"
-                        );
-                    }
-                    if server.sse_url.is_some() || server.http_url.is_some() {
-                        anyhow::bail!(
-                            "mcp server {name}: sse_url/http_url are only valid for transport=streamable_http"
-                        );
-                    }
-                    if server.bearer_token_env_var.is_some()
-                        || !server.http_headers.is_empty()
-                        || !server.env_http_headers.is_empty()
-                    {
-                        anyhow::bail!(
-                            "mcp server {name}: http auth/headers are only valid for transport=streamable_http"
-                        );
-                    }
-                    if !server.env.is_empty() {
-                        anyhow::bail!("mcp server {name}: env is not supported for transport=unix");
-                    }
-                    if stdout_log.is_some() {
-                        anyhow::bail!(
-                            "mcp server {name}: stdout_log is not supported for transport=unix"
-                        );
-                    }
-                    let unix_path = server.unix_path.ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "mcp server {name}: unix_path is required for transport=unix"
-                        )
-                    })?;
-                    if unix_path.as_os_str().is_empty() {
-                        anyhow::bail!("mcp server {name}: unix_path must not be empty");
-                    }
-                    let unix_path = if unix_path.is_absolute() {
+            let argv = match server.transport {
+                Transport::Stdio => server.argv.unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let unix_path = match server.transport {
+                Transport::Unix => server.unix_path.map(|unix_path| {
+                    if unix_path.is_absolute() {
                         unix_path
                     } else {
                         thread_root.join(unix_path)
-                    };
-                    (Vec::new(), Some(unix_path))
-                }
-                Transport::StreamableHttp => {
-                    if server.argv.is_some() {
-                        anyhow::bail!(
-                            "mcp server {name}: argv is not allowed for transport=streamable_http"
-                        );
                     }
-                    if server.unix_path.is_some() {
-                        anyhow::bail!(
-                            "mcp server {name}: unix_path is not allowed for transport=streamable_http"
-                        );
-                    }
-                    if !server.env.is_empty() {
-                        anyhow::bail!(
-                            "mcp server {name}: env is not supported for transport=streamable_http"
-                        );
-                    }
-                    if stdout_log.is_some() {
-                        anyhow::bail!(
-                            "mcp server {name}: stdout_log is not supported for transport=streamable_http"
-                        );
-                    }
-                    let (url, sse_url, http_url) = match (
-                        server.url,
-                        server.sse_url,
-                        server.http_url,
-                    ) {
-                        (Some(url), None, None) => {
-                            if url.trim().is_empty() {
-                                anyhow::bail!("mcp server {name}: url must not be empty");
-                            }
-                            (Some(url), None, None)
-                        }
-                        (None, Some(sse_url), Some(http_url)) => {
-                            if sse_url.trim().is_empty() {
-                                anyhow::bail!("mcp server {name}: sse_url must not be empty");
-                            }
-                            if http_url.trim().is_empty() {
-                                anyhow::bail!("mcp server {name}: http_url must not be empty");
-                            }
-                            (None, Some(sse_url), Some(http_url))
-                        }
-                        (None, None, None) => {
-                            anyhow::bail!(
-                                "mcp server {name}: url (or sse_url + http_url) is required for transport=streamable_http"
-                            );
-                        }
-                        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
-                            anyhow::bail!(
-                                "mcp server {name}: set either url or (sse_url + http_url), not both"
-                            );
-                        }
-                        (None, Some(_), None) | (None, None, Some(_)) => {
-                            anyhow::bail!(
-                                "mcp server {name}: sse_url and http_url must both be set for transport=streamable_http"
-                            );
-                        }
-                    };
-
-                    if let Some(env_var) = &server.bearer_token_env_var {
-                        if env_var.trim().is_empty() {
-                            anyhow::bail!(
-                                "mcp server {name}: bearer_token_env_var must not be empty"
-                            );
-                        }
-                    }
-
-                    for (header, value) in server.http_headers.iter() {
-                        if header.trim().is_empty() {
-                            anyhow::bail!("mcp server {name}: http_headers key must not be empty");
-                        }
-                        if value.trim().is_empty() {
-                            anyhow::bail!(
-                                "mcp server {name}: http_headers[{header}] must not be empty"
-                            );
-                        }
-                    }
-                    for (header, env_var) in server.env_http_headers.iter() {
-                        if header.trim().is_empty() {
-                            anyhow::bail!(
-                                "mcp server {name}: env_http_headers key must not be empty"
-                            );
-                        }
-                        if env_var.trim().is_empty() {
-                            anyhow::bail!(
-                                "mcp server {name}: env_http_headers[{header}] must not be empty"
-                            );
-                        }
-                    }
-
-                    servers.insert(
-                        server_name,
-                        ServerConfig {
-                            transport: Transport::StreamableHttp,
-                            argv: Vec::new(),
-                            inherit_env: true,
-                            unix_path: None,
-                            url,
-                            sse_url,
-                            http_url,
-                            bearer_token_env_var: server.bearer_token_env_var,
-                            http_headers: server.http_headers,
-                            env_http_headers: server.env_http_headers,
-                            env: BTreeMap::new(),
-                            stdout_log: None,
-                        },
-                    );
-                    continue;
-                }
+                }),
+                _ => server.unix_path,
             };
 
-            servers.insert(
-                server_name,
-                ServerConfig {
-                    transport: server.transport,
-                    argv,
-                    inherit_env,
-                    unix_path,
-                    url: None,
-                    sse_url: None,
-                    http_url: None,
-                    bearer_token_env_var: None,
-                    http_headers: BTreeMap::new(),
-                    env_http_headers: BTreeMap::new(),
-                    env: server.env,
-                    stdout_log,
-                },
-            );
+            let server_cfg = ServerConfig {
+                transport: server.transport,
+                argv,
+                inherit_env,
+                unix_path,
+                url: server.url,
+                sse_url: server.sse_url,
+                http_url: server.http_url,
+                bearer_token_env_var: server.bearer_token_env_var,
+                http_headers: server.http_headers,
+                env_http_headers: server.env_http_headers,
+                env: server.env,
+                stdout_log,
+            };
+            server_cfg.validate().map_err(|err| {
+                let msg = format!("invalid mcp server config (server={server_name_key}): {err}");
+                err.context(msg)
+            })?;
+
+            servers.insert(server_name_key, server_cfg);
         }
 
         Ok(Self {
@@ -499,7 +307,7 @@ impl Config {
                 continue;
             }
             let server_name = ServerName::parse(&name)
-                .map_err(|err| anyhow::anyhow!("invalid mcp server name {name:?}: {err}"))?;
+                .with_context(|| format!("invalid mcp server name {name:?}"))?;
 
             let server: ExternalServerConfigFile = serde_json::from_value(server_value)
                 .with_context(|| {
@@ -625,25 +433,27 @@ impl Config {
                     for (k, v) in server.environment {
                         env.insert(k, v);
                     }
-                    validate_stdio_env(&name, &env)?;
+                    let server_cfg = ServerConfig {
+                        transport: Transport::Stdio,
+                        argv,
+                        inherit_env,
+                        unix_path: None,
+                        url: None,
+                        sse_url: None,
+                        http_url: None,
+                        bearer_token_env_var: None,
+                        http_headers: BTreeMap::new(),
+                        env_http_headers: BTreeMap::new(),
+                        env,
+                        stdout_log,
+                    };
+                    server_cfg.validate().map_err(|err| {
+                        let msg =
+                            format!("invalid mcp server config (server={server_name}): {err}");
+                        err.context(msg)
+                    })?;
 
-                    servers.insert(
-                        server_name,
-                        ServerConfig {
-                            transport: Transport::Stdio,
-                            argv,
-                            inherit_env,
-                            unix_path: None,
-                            url: None,
-                            sse_url: None,
-                            http_url: None,
-                            bearer_token_env_var: None,
-                            http_headers: BTreeMap::new(),
-                            env_http_headers: BTreeMap::new(),
-                            env,
-                            stdout_log,
-                        },
-                    );
+                    servers.insert(server_name, server_cfg);
                 }
                 Transport::Unix => {
                     if server.command.is_some() || server.argv.is_some() || server.args.is_some() {

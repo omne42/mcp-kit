@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -36,7 +37,7 @@ use streamable_http_validation::validate_streamable_http_url_untrusted;
 
 fn parse_server_name_anyhow(server_name: &str) -> anyhow::Result<ServerName> {
     ServerName::parse(server_name)
-        .map_err(|err| anyhow::anyhow!("invalid mcp server name {server_name:?}: {err}"))
+        .with_context(|| format!("invalid mcp server name {server_name:?}"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -58,6 +59,51 @@ pub struct ProtocolVersionMismatch {
     pub server_protocol_version: String,
 }
 
+#[derive(Debug, Default)]
+struct ServerHandlerTimeoutCounts {
+    counters: Mutex<HashMap<ServerName, Arc<AtomicU64>>>,
+}
+
+impl ServerHandlerTimeoutCounts {
+    fn counter_for(&self, server_name: &ServerName) -> Arc<AtomicU64> {
+        let mut counters = self
+            .counters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        counters
+            .entry(server_name.clone())
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+            .clone()
+    }
+
+    fn count(&self, server_name: &str) -> u64 {
+        self.counters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(server_name)
+            .map(|counter| counter.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    fn snapshot(&self) -> HashMap<ServerName, u64> {
+        self.counters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .map(|(name, counter)| (name.clone(), counter.load(Ordering::Relaxed)))
+            .collect()
+    }
+
+    fn take_and_clear(&self) -> HashMap<ServerName, u64> {
+        self.counters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .map(|(name, counter)| (name.clone(), counter.swap(0, Ordering::Relaxed)))
+            .collect()
+    }
+}
+
 pub struct Manager {
     conns: HashMap<ServerName, Connection>,
     init_results: HashMap<ServerName, Value>,
@@ -66,7 +112,7 @@ pub struct Manager {
     protocol_version: String,
     protocol_version_check: ProtocolVersionCheck,
     protocol_version_mismatches: Vec<ProtocolVersionMismatch>,
-    server_handler_timeout_counts: Arc<RwLock<HashMap<ServerName, u64>>>,
+    server_handler_timeout_counts: ServerHandlerTimeoutCounts,
     capabilities: Value,
     roots: Option<Arc<Vec<Root>>>,
     trust_mode: TrustMode,
@@ -220,10 +266,10 @@ impl Manager {
         client_version: impl Into<String>,
         timeout: Duration,
     ) -> anyhow::Result<Self> {
-        config
-            .client()
-            .validate()
-            .map_err(|err| anyhow::anyhow!("invalid mcp client config: {err}"))?;
+        config.client().validate().map_err(|err| {
+            let msg = format!("invalid mcp client config: {err}");
+            err.context(msg)
+        })?;
         Ok(Self::from_config(
             config,
             client_name,
@@ -277,7 +323,7 @@ impl Manager {
             protocol_version: MCP_PROTOCOL_VERSION.to_string(),
             protocol_version_check: ProtocolVersionCheck::Strict,
             protocol_version_mismatches: Vec::new(),
-            server_handler_timeout_counts: Arc::new(RwLock::new(HashMap::new())),
+            server_handler_timeout_counts: ServerHandlerTimeoutCounts::default(),
             capabilities: Value::Object(serde_json::Map::new()),
             roots: None,
             trust_mode: TrustMode::Untrusted,
@@ -341,29 +387,17 @@ impl Manager {
     /// This increments when a server→client request/notification handler exceeds
     /// `Manager::with_server_handler_timeout(...)`.
     pub fn server_handler_timeout_count(&self, server_name: &str) -> u64 {
-        let counts = self
-            .server_handler_timeout_counts
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        counts.get(server_name).copied().unwrap_or(0)
+        self.server_handler_timeout_counts.count(server_name)
     }
 
     /// Returns a snapshot of timeout counts for all servers.
     pub fn server_handler_timeout_counts(&self) -> HashMap<ServerName, u64> {
-        let counts = self
-            .server_handler_timeout_counts
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        counts.clone()
+        self.server_handler_timeout_counts.snapshot()
     }
 
     /// Takes (and clears) the timeout counts map.
     pub fn take_server_handler_timeout_counts(&mut self) -> HashMap<ServerName, u64> {
-        let mut counts = self
-            .server_handler_timeout_counts
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        std::mem::take(&mut *counts)
+        self.server_handler_timeout_counts.take_and_clear()
     }
 
     pub fn with_capabilities(mut self, capabilities: Value) -> Self {

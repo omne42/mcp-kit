@@ -315,6 +315,7 @@ pub struct ClientHandle {
     diagnostics: Option<Arc<DiagnosticsState>>,
     closed: Arc<AtomicBool>,
     close_reason: Arc<Mutex<Option<String>>>,
+    stdout_log_write_error: Arc<Mutex<Option<String>>>,
 }
 
 impl std::fmt::Debug for ClientHandle {
@@ -344,6 +345,27 @@ impl ClientHandle {
             .lock()
             .ok()
             .and_then(|guard| guard.clone())
+    }
+
+    /// Returns the last stdout log write error, if any.
+    ///
+    /// When this is set, the client disables stdout log writes for the remainder of its
+    /// lifetime. This is not treated as a fatal transport error.
+    pub fn stdout_log_write_error(&self) -> Option<String> {
+        self.stdout_log_write_error
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    fn record_stdout_log_write_error(&self, err: &std::io::Error) {
+        let mut guard = self
+            .stdout_log_write_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if guard.is_none() {
+            *guard = Some(err.to_string());
+        }
     }
 
     fn check_closed(&self) -> Result<(), Error> {
@@ -674,6 +696,7 @@ impl Client {
             diagnostics: diagnostics_state.clone(),
             closed: Arc::new(AtomicBool::new(false)),
             close_reason: Arc::new(Mutex::new(None)),
+            stdout_log_write_error: Arc::new(Mutex::new(None)),
         };
 
         let stdout_log = match stdout_log {
@@ -956,7 +979,7 @@ where
                             None => state.write_line_bytes(&line).await,
                         };
                         if let Err(err) = write_result {
-                            eprintln!("jsonrpc: stdout log write failed: {err}");
+                            responder.record_stdout_log_write_error(&err);
                             log_state = None;
                         }
                     }

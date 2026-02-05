@@ -25,22 +25,22 @@ impl ClientConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         if let Some(protocol_version) = self.protocol_version.as_deref() {
             if protocol_version.trim().is_empty() {
-                anyhow::bail!("mcp client protocol_version must not be empty");
+                anyhow::bail!("mcp client.protocol_version must not be empty");
             }
         }
         if let Some(capabilities) = self.capabilities.as_ref() {
             if !capabilities.is_object() {
-                anyhow::bail!("mcp client capabilities must be a JSON object");
+                anyhow::bail!("mcp client.capabilities must be a JSON object");
             }
         }
         if let Some(roots) = self.roots.as_ref() {
             for (idx, root) in roots.iter().enumerate() {
                 if root.uri.trim().is_empty() {
-                    anyhow::bail!("mcp client roots[{idx}].uri must not be empty");
+                    anyhow::bail!("mcp client.roots[{idx}].uri must not be empty");
                 }
                 if let Some(name) = root.name.as_deref() {
                     if name.trim().is_empty() {
-                        anyhow::bail!("mcp client roots[{idx}].name must not be empty");
+                        anyhow::bail!("mcp client.roots[{idx}].name must not be empty");
                     }
                 }
             }
@@ -119,11 +119,11 @@ pub struct ServerConfig {
 impl ServerConfig {
     pub fn stdio(argv: Vec<String>) -> anyhow::Result<Self> {
         if argv.is_empty() {
-            anyhow::bail!("mcp stdio argv must not be empty");
+            anyhow::bail!("mcp server transport=stdio: argv must not be empty");
         }
         for (idx, arg) in argv.iter().enumerate() {
             if arg.trim().is_empty() {
-                anyhow::bail!("mcp stdio argv[{idx}] must not be empty");
+                anyhow::bail!("mcp server transport=stdio: argv[{idx}] must not be empty");
             }
         }
         Ok(Self {
@@ -144,7 +144,7 @@ impl ServerConfig {
 
     pub fn unix(unix_path: PathBuf) -> anyhow::Result<Self> {
         if unix_path.as_os_str().is_empty() {
-            anyhow::bail!("mcp unix_path must not be empty");
+            anyhow::bail!("mcp server transport=unix: unix_path must not be empty");
         }
         Ok(Self {
             transport: Transport::Unix,
@@ -165,7 +165,7 @@ impl ServerConfig {
     pub fn streamable_http(url: impl Into<String>) -> anyhow::Result<Self> {
         let url = url.into();
         if url.trim().is_empty() {
-            anyhow::bail!("mcp streamable_http url must not be empty");
+            anyhow::bail!("mcp server transport=streamable_http: url must not be empty");
         }
         Ok(Self {
             transport: Transport::StreamableHttp,
@@ -190,10 +190,10 @@ impl ServerConfig {
         let sse_url = sse_url.into();
         let http_url = http_url.into();
         if sse_url.trim().is_empty() {
-            anyhow::bail!("mcp streamable_http sse_url must not be empty");
+            anyhow::bail!("mcp server transport=streamable_http: sse_url must not be empty");
         }
         if http_url.trim().is_empty() {
-            anyhow::bail!("mcp streamable_http http_url must not be empty");
+            anyhow::bail!("mcp server transport=streamable_http: http_url must not be empty");
         }
         Ok(Self {
             transport: Transport::StreamableHttp,
@@ -219,31 +219,33 @@ impl ServerConfig {
         match self.transport {
             Transport::Stdio => {
                 if self.argv.is_empty() {
-                    anyhow::bail!("mcp stdio argv must not be empty");
+                    anyhow::bail!("mcp server transport=stdio: argv must not be empty");
                 }
                 for (idx, arg) in self.argv.iter().enumerate() {
                     if arg.trim().is_empty() {
-                        anyhow::bail!("mcp stdio argv[{idx}] must not be empty");
+                        anyhow::bail!("mcp server transport=stdio: argv[{idx}] must not be empty");
                     }
                 }
                 if self.unix_path.is_some() {
-                    anyhow::bail!("mcp stdio unix_path is not allowed");
+                    anyhow::bail!("mcp server transport=stdio: unix_path is not allowed");
                 }
                 if self.url.is_some() || self.sse_url.is_some() || self.http_url.is_some() {
-                    anyhow::bail!("mcp stdio url/sse_url/http_url are not allowed");
+                    anyhow::bail!(
+                        "mcp server transport=stdio: url/sse_url/http_url are not allowed"
+                    );
                 }
                 if self.bearer_token_env_var.is_some()
                     || !self.http_headers.is_empty()
                     || !self.env_http_headers.is_empty()
                 {
-                    anyhow::bail!("mcp stdio http auth/headers are not allowed");
+                    anyhow::bail!("mcp server transport=stdio: http auth/headers are not allowed");
                 }
                 for (key, value) in self.env.iter() {
                     if key.trim().is_empty() {
-                        anyhow::bail!("mcp stdio env key must not be empty");
+                        anyhow::bail!("mcp server transport=stdio: env key must not be empty");
                     }
                     if value.trim().is_empty() {
-                        anyhow::bail!("mcp stdio env[{key}] must not be empty");
+                        anyhow::bail!("mcp server transport=stdio: env[{key}] must not be empty");
                     }
                 }
                 if let Some(log) = self.stdout_log.as_ref() {
@@ -252,48 +254,52 @@ impl ServerConfig {
             }
             Transport::Unix => {
                 if !self.argv.is_empty() {
-                    anyhow::bail!("mcp unix argv is not allowed");
+                    anyhow::bail!("mcp server transport=unix: argv is not allowed");
                 }
                 if !self.inherit_env {
-                    anyhow::bail!("mcp unix inherit_env is not allowed");
+                    anyhow::bail!("mcp server transport=unix: inherit_env must be true");
                 }
                 let Some(unix_path) = self.unix_path.as_deref() else {
-                    anyhow::bail!("mcp unix unix_path must be set");
+                    anyhow::bail!("mcp server transport=unix: unix_path must be set");
                 };
                 if unix_path.as_os_str().is_empty() {
-                    anyhow::bail!("mcp unix unix_path must not be empty");
+                    anyhow::bail!("mcp server transport=unix: unix_path must not be empty");
                 }
                 if self.url.is_some() || self.sse_url.is_some() || self.http_url.is_some() {
-                    anyhow::bail!("mcp unix url/sse_url/http_url are not allowed");
+                    anyhow::bail!(
+                        "mcp server transport=unix: url/sse_url/http_url are not allowed"
+                    );
                 }
                 if !self.env.is_empty() {
-                    anyhow::bail!("mcp unix env is not allowed");
+                    anyhow::bail!("mcp server transport=unix: env is not allowed");
                 }
                 if self.stdout_log.is_some() {
-                    anyhow::bail!("mcp unix stdout_log is not allowed");
+                    anyhow::bail!("mcp server transport=unix: stdout_log is not allowed");
                 }
                 if self.bearer_token_env_var.is_some()
                     || !self.http_headers.is_empty()
                     || !self.env_http_headers.is_empty()
                 {
-                    anyhow::bail!("mcp unix http auth/headers are not allowed");
+                    anyhow::bail!("mcp server transport=unix: http auth/headers are not allowed");
                 }
             }
             Transport::StreamableHttp => {
                 if !self.argv.is_empty() {
-                    anyhow::bail!("mcp streamable_http argv is not allowed");
+                    anyhow::bail!("mcp server transport=streamable_http: argv is not allowed");
                 }
                 if !self.inherit_env {
-                    anyhow::bail!("mcp streamable_http inherit_env is not allowed");
+                    anyhow::bail!("mcp server transport=streamable_http: inherit_env must be true");
                 }
                 if self.unix_path.is_some() {
-                    anyhow::bail!("mcp streamable_http unix_path is not allowed");
+                    anyhow::bail!("mcp server transport=streamable_http: unix_path is not allowed");
                 }
                 if !self.env.is_empty() {
-                    anyhow::bail!("mcp streamable_http env is not supported");
+                    anyhow::bail!("mcp server transport=streamable_http: env is not supported");
                 }
                 if self.stdout_log.is_some() {
-                    anyhow::bail!("mcp streamable_http stdout_log is not supported");
+                    anyhow::bail!(
+                        "mcp server transport=streamable_http: stdout_log is not supported"
+                    );
                 }
 
                 match (
@@ -303,53 +309,69 @@ impl ServerConfig {
                 ) {
                     (Some(url), None, None) => {
                         if url.trim().is_empty() {
-                            anyhow::bail!("mcp streamable_http url must not be empty");
+                            anyhow::bail!(
+                                "mcp server transport=streamable_http: url must not be empty"
+                            );
                         }
                     }
                     (None, Some(sse_url), Some(http_url)) => {
                         if sse_url.trim().is_empty() {
-                            anyhow::bail!("mcp streamable_http sse_url must not be empty");
+                            anyhow::bail!(
+                                "mcp server transport=streamable_http: sse_url must not be empty"
+                            );
                         }
                         if http_url.trim().is_empty() {
-                            anyhow::bail!("mcp streamable_http http_url must not be empty");
+                            anyhow::bail!(
+                                "mcp server transport=streamable_http: http_url must not be empty"
+                            );
                         }
                     }
                     (None, None, None) => {
-                        anyhow::bail!("mcp streamable_http url (or sse_url + http_url) is required")
+                        anyhow::bail!(
+                            "mcp server transport=streamable_http: url (or sse_url + http_url) is required"
+                        )
                     }
                     (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
                         anyhow::bail!(
-                            "mcp streamable_http set either url or (sse_url + http_url), not both"
+                            "mcp server transport=streamable_http: set either url or (sse_url + http_url), not both"
                         )
                     }
                     (None, Some(_), None) | (None, None, Some(_)) => {
-                        anyhow::bail!("mcp streamable_http sse_url and http_url must both be set")
+                        anyhow::bail!(
+                            "mcp server transport=streamable_http: sse_url and http_url must both be set"
+                        )
                     }
                 }
 
                 if let Some(env_var) = self.bearer_token_env_var.as_deref() {
                     if env_var.trim().is_empty() {
-                        anyhow::bail!("mcp streamable_http bearer_token_env_var must not be empty");
+                        anyhow::bail!(
+                            "mcp server transport=streamable_http: bearer_token_env_var must not be empty"
+                        );
                     }
                 }
 
                 for (header, value) in self.http_headers.iter() {
                     if header.trim().is_empty() {
-                        anyhow::bail!("mcp streamable_http http_headers key must not be empty");
+                        anyhow::bail!(
+                            "mcp server transport=streamable_http: http_headers key must not be empty"
+                        );
                     }
                     if value.trim().is_empty() {
                         anyhow::bail!(
-                            "mcp streamable_http http_headers[{header}] must not be empty"
+                            "mcp server transport=streamable_http: http_headers[{header}] must not be empty"
                         );
                     }
                 }
                 for (header, env_var) in self.env_http_headers.iter() {
                     if header.trim().is_empty() {
-                        anyhow::bail!("mcp streamable_http env_http_headers key must not be empty");
+                        anyhow::bail!(
+                            "mcp server transport=streamable_http: env_http_headers key must not be empty"
+                        );
                     }
                     if env_var.trim().is_empty() {
                         anyhow::bail!(
-                            "mcp streamable_http env_http_headers[{header}] must not be empty"
+                            "mcp server transport=streamable_http: env_http_headers[{header}] must not be empty"
                         );
                     }
                 }
@@ -455,12 +477,14 @@ impl Config {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
-        self.client
-            .validate()
-            .map_err(|err| anyhow::anyhow!("invalid mcp client config: {err}"))?;
+        self.client.validate().map_err(|err| {
+            let msg = format!("invalid mcp client config: {err}");
+            err.context(msg)
+        })?;
         for (name, server) in self.servers.iter() {
             server.validate().map_err(|err| {
-                anyhow::anyhow!("invalid mcp server config (server={name}): {err}")
+                let msg = format!("invalid mcp server config (server={name}): {err}");
+                err.context(msg)
             })?;
         }
         Ok(())
