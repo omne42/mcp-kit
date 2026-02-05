@@ -149,6 +149,7 @@
 - `mcp-kit`：解析 `mcpServers` 间接引用时缓存 canonical root，减少重复 canonicalize 开销。
 - `mcp-kit`：host allowlist 匹配逻辑不再做额外字符串分配（小幅减少 hot path 开销）。
 - `mcp-kit`：外部配置格式（`type=http|sse`）校验不再做额外字符串分配（小幅减少 hot path 开销）。
+- `mcp-kit`：外部配置解析对兼容字段的处理更明确（不影响行为，仅提升可读性）。
 - scripts: 加固 `scripts/gen-llms-txt.sh` 路径解析，拒绝路径穿越/符号链接导致的本机文件打包泄露风险。
 - scripts: `scripts/gen-llms-txt.sh` 在缺少 `realpath` 时允许回退到 `python`（提升在 Windows CI 环境中的兼容性）。
 - Examples: `in_memory_duplex` 现在用 `Url::from_directory_path` 生成正确的目录 `file://` URI（支持空格/非 ASCII 的 percent-encoding）。

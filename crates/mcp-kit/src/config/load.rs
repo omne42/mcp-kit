@@ -678,9 +678,8 @@ impl Config {
                 })?;
 
             // Intentionally ignored: kept for compatibility with external MCP config formats.
-            // Bind them to satisfy dead-code analysis without `allow`.
-            let _ignored_description = server.description.as_deref();
-            let _ignored_extra = &server.extra;
+            // Touch them to satisfy dead-code analysis without `allow`.
+            let _ = (&server.description, &server.extra);
 
             if matches!(server.enabled, Some(false)) {
                 continue;
