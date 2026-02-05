@@ -26,6 +26,7 @@
 - `mcp-jsonrpc`：stdout_log 写入失败不再直接 `eprintln!`；改为通过 `ClientHandle::stdout_log_write_error()` 暴露（失败后会禁用 stdout_log 写入）。
 - `mcp-jsonrpc`：`ClientHandle` 的 `close_reason` / `stdout_log_write_error` 内部存储从 `Mutex<Option<String>>` 改为 `OnceLock<String>`，减少锁与 poison 分支（API 不变）。
 - `mcp-kit`：`ServerConfig::validate` 在 `streamable_http` 场景下会 fail-fast 校验 `http_headers` / `env_http_headers` 的 header name/value 合法性；并将外部 `mcpServers` 格式的 streamable_http 校验收口到 `ServerConfig::validate`，避免重复规则漂移。
+- `mcp-kit`：外部 `mcpServers` 格式加载时，`stdout_log` 只在 `transport=stdio` 分支解析；对 `unix/streamable_http` 统一优先报“不支持 stdout_log”，避免先报 stdout_log 配置格式错误（更一致）。
 
 ### Added
 - `mcp-kit`：`ServerName` 现在实现 `Deserialize`（`serde`），便于在配置/外部数据模型中直接使用。

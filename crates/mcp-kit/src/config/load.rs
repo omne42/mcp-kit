@@ -367,11 +367,6 @@ impl Config {
                 }
             }
 
-            let stdout_log = server
-                .stdout_log
-                .map(|log| parse_stdout_log_config(thread_root, &name, log))
-                .transpose()?;
-
             let inherit_env = match transport {
                 Transport::Stdio => server.inherit_env.unwrap_or(false),
                 _ => {
@@ -433,6 +428,11 @@ impl Config {
                     for (k, v) in server.environment {
                         env.insert(k, v);
                     }
+
+                    let stdout_log = server
+                        .stdout_log
+                        .map(|log| parse_stdout_log_config(thread_root, &name, log))
+                        .transpose()?;
                     let server_cfg = ServerConfig {
                         transport: Transport::Stdio,
                         argv,
@@ -467,12 +467,12 @@ impl Config {
                             "mcp server {name}: url/sse_url/http_url are only valid for transport=streamable_http"
                         );
                     }
-                    if !server.env.is_empty()
-                        || !server.environment.is_empty()
-                        || stdout_log.is_some()
-                    {
+                    if !server.env.is_empty() || !server.environment.is_empty() {
+                        anyhow::bail!("mcp server {name}: env is not supported for transport=unix");
+                    }
+                    if server.stdout_log.is_some() {
                         anyhow::bail!(
-                            "mcp server {name}: env/stdout_log are not supported for transport=unix"
+                            "mcp server {name}: stdout_log is not supported for transport=unix"
                         );
                     }
                     if server.bearer_token_env_var.is_some()
@@ -536,7 +536,7 @@ impl Config {
                             "mcp server {name}: env is not supported for transport=streamable_http"
                         );
                     }
-                    if stdout_log.is_some() {
+                    if server.stdout_log.is_some() {
                         anyhow::bail!(
                             "mcp server {name}: stdout_log is not supported for transport=streamable_http"
                         );

@@ -789,6 +789,58 @@ async fn load_denies_streamable_http_with_invalid_env_http_header_name() {
 }
 
 #[tokio::test]
+async fn load_denies_unix_transport_with_stdout_log_in_external_format() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{
+  "mcpServers": {
+    "sock": {
+      "unix_path": "/tmp/mcp.sock",
+      "stdout_log": { "path": "" }
+    }
+  }
+}"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("stdout_log is not supported for transport=unix"),
+        "err={err:#}"
+    );
+    assert!(!msg.contains("invalid stdout_log config"), "err={err:#}");
+}
+
+#[tokio::test]
+async fn load_denies_streamable_http_with_stdout_log_in_external_format() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{
+  "mcpServers": {
+    "litellm": {
+      "url": "http://example.com/mcp",
+      "stdout_log": { "path": "" }
+    }
+  }
+}"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("stdout_log is not supported for transport=streamable_http"),
+        "err={err:#}"
+    );
+    assert!(!msg.contains("invalid stdout_log config"), "err={err:#}");
+}
+
+#[tokio::test]
 async fn load_parses_mcp_servers_wrapper_even_with_version_string() {
     let dir = tempfile::tempdir().unwrap();
     tokio::fs::write(
