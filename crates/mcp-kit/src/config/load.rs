@@ -321,16 +321,13 @@ fn build_v1_config(
         let server_cfg = match server.transport {
             Transport::Stdio => {
                 ensure_unix_path_only_for_unix(&name, unix_path.is_some())?;
-                ensure_url_fields_only_for_streamable_http(
-                    &name,
-                    server.url.is_some() || server.sse_url.is_some() || server.http_url.is_some(),
-                )?;
-                ensure_http_headers_auth_only_for_streamable_http(
-                    &name,
-                    server.bearer_token_env_var.is_some()
-                        || !server.http_headers.is_empty()
-                        || !server.env_http_headers.is_empty(),
-                )?;
+                let has_url_fields =
+                    server.url.is_some() || server.sse_url.is_some() || server.http_url.is_some();
+                ensure_url_fields_only_for_streamable_http(&name, has_url_fields)?;
+                let has_auth_fields = server.bearer_token_env_var.is_some()
+                    || !server.http_headers.is_empty()
+                    || !server.env_http_headers.is_empty();
+                ensure_http_headers_auth_only_for_streamable_http(&name, has_auth_fields)?;
 
                 let mut server_cfg = ServerConfig::stdio(argv)?;
                 server_cfg.set_inherit_env(inherit_env)?;
@@ -339,17 +336,15 @@ fn build_v1_config(
                 server_cfg
             }
             Transport::Unix => {
-                ensure_url_fields_only_for_streamable_http(
-                    &name,
-                    server.url.is_some() || server.sse_url.is_some() || server.http_url.is_some(),
-                )?;
-                ensure_env_empty(&name, Transport::Unix, !server.env.is_empty())?;
-                ensure_http_headers_auth_only_for_streamable_http(
-                    &name,
-                    server.bearer_token_env_var.is_some()
-                        || !server.http_headers.is_empty()
-                        || !server.env_http_headers.is_empty(),
-                )?;
+                let has_url_fields =
+                    server.url.is_some() || server.sse_url.is_some() || server.http_url.is_some();
+                ensure_url_fields_only_for_streamable_http(&name, has_url_fields)?;
+                let env_nonempty = !server.env.is_empty();
+                ensure_env_empty(&name, Transport::Unix, env_nonempty)?;
+                let has_auth_fields = server.bearer_token_env_var.is_some()
+                    || !server.http_headers.is_empty()
+                    || !server.env_http_headers.is_empty();
+                ensure_http_headers_auth_only_for_streamable_http(&name, has_auth_fields)?;
 
                 let unix_path = unix_path.ok_or_else(|| {
                     anyhow::anyhow!("mcp server {name}: unix_path is required for transport=unix")
@@ -358,7 +353,8 @@ fn build_v1_config(
             }
             Transport::StreamableHttp => {
                 ensure_unix_path_only_for_unix(&name, unix_path.is_some())?;
-                ensure_env_empty(&name, Transport::StreamableHttp, !server.env.is_empty())?;
+                let env_nonempty = !server.env.is_empty();
+                ensure_env_empty(&name, Transport::StreamableHttp, env_nonempty)?;
 
                 let mut server_cfg = match (server.url, server.sse_url, server.http_url) {
                     (Some(url), None, None) => ServerConfig::streamable_http(url)?,
@@ -541,28 +537,19 @@ impl Config {
                 }
             }
 
-            let inherit_env = match transport {
-                Transport::Stdio => {
-                    resolve_inherit_env(&name, Transport::Stdio, server.inherit_env)?
-                }
-                _ => resolve_inherit_env(&name, transport, server.inherit_env)?,
-            };
+            let inherit_env = resolve_inherit_env(&name, transport, server.inherit_env)?;
 
             match transport {
                 Transport::Stdio => {
                     ensure_unix_path_only_for_unix(&name, server.unix_path.is_some())?;
-                    ensure_url_fields_only_for_streamable_http(
-                        &name,
-                        server.url.is_some()
-                            || server.sse_url.is_some()
-                            || server.http_url.is_some(),
-                    )?;
-                    ensure_http_headers_auth_only_for_streamable_http(
-                        &name,
-                        server.bearer_token_env_var.is_some()
-                            || !server.http_headers.is_empty()
-                            || !server.env_http_headers.is_empty(),
-                    )?;
+                    let has_url_fields = server.url.is_some()
+                        || server.sse_url.is_some()
+                        || server.http_url.is_some();
+                    ensure_url_fields_only_for_streamable_http(&name, has_url_fields)?;
+                    let has_auth_fields = server.bearer_token_env_var.is_some()
+                        || !server.http_headers.is_empty()
+                        || !server.env_http_headers.is_empty();
+                    ensure_http_headers_auth_only_for_streamable_http(&name, has_auth_fields)?;
 
                     let argv = match (server.argv, server.command) {
                         (Some(argv), _) => argv,
@@ -605,32 +592,21 @@ impl Config {
                     servers.insert(server_name, server_cfg);
                 }
                 Transport::Unix => {
-                    ensure_command_args_argv_only_for_stdio(
-                        &name,
-                        server.command.is_some() || server.argv.is_some() || server.args.is_some(),
-                    )?;
-                    ensure_url_fields_only_for_streamable_http(
-                        &name,
-                        server.url.is_some()
-                            || server.sse_url.is_some()
-                            || server.http_url.is_some(),
-                    )?;
-                    ensure_env_empty(
-                        &name,
-                        Transport::Unix,
-                        !server.env.is_empty() || !server.environment.is_empty(),
-                    )?;
-                    ensure_stdout_log_supported(
-                        &name,
-                        Transport::Unix,
-                        server.stdout_log.is_some(),
-                    )?;
-                    ensure_http_headers_auth_only_for_streamable_http(
-                        &name,
-                        server.bearer_token_env_var.is_some()
-                            || !server.http_headers.is_empty()
-                            || !server.env_http_headers.is_empty(),
-                    )?;
+                    let has_command_args_argv =
+                        server.command.is_some() || server.argv.is_some() || server.args.is_some();
+                    ensure_command_args_argv_only_for_stdio(&name, has_command_args_argv)?;
+                    let has_url_fields = server.url.is_some()
+                        || server.sse_url.is_some()
+                        || server.http_url.is_some();
+                    ensure_url_fields_only_for_streamable_http(&name, has_url_fields)?;
+                    let env_nonempty = !server.env.is_empty() || !server.environment.is_empty();
+                    ensure_env_empty(&name, Transport::Unix, env_nonempty)?;
+                    let stdout_log_present = server.stdout_log.is_some();
+                    ensure_stdout_log_supported(&name, Transport::Unix, stdout_log_present)?;
+                    let has_auth_fields = server.bearer_token_env_var.is_some()
+                        || !server.http_headers.is_empty()
+                        || !server.env_http_headers.is_empty();
+                    ensure_http_headers_auth_only_for_streamable_http(&name, has_auth_fields)?;
 
                     let unix_path = server.unix_path.ok_or_else(|| {
                         anyhow::anyhow!(
@@ -656,20 +632,17 @@ impl Config {
                     servers.insert(server_name, server_cfg);
                 }
                 Transport::StreamableHttp => {
-                    ensure_command_args_argv_only_for_stdio(
-                        &name,
-                        server.command.is_some() || server.argv.is_some() || server.args.is_some(),
-                    )?;
+                    let has_command_args_argv =
+                        server.command.is_some() || server.argv.is_some() || server.args.is_some();
+                    ensure_command_args_argv_only_for_stdio(&name, has_command_args_argv)?;
                     ensure_unix_path_only_for_unix(&name, server.unix_path.is_some())?;
-                    ensure_env_empty(
-                        &name,
-                        Transport::StreamableHttp,
-                        !server.env.is_empty() || !server.environment.is_empty(),
-                    )?;
+                    let env_nonempty = !server.env.is_empty() || !server.environment.is_empty();
+                    ensure_env_empty(&name, Transport::StreamableHttp, env_nonempty)?;
+                    let stdout_log_present = server.stdout_log.is_some();
                     ensure_stdout_log_supported(
                         &name,
                         Transport::StreamableHttp,
-                        server.stdout_log.is_some(),
+                        stdout_log_present,
                     )?;
 
                     let mut server_cfg = match (server.url, server.sse_url, server.http_url) {
