@@ -10,6 +10,7 @@
 
 - `Config::load(root, override_path)`：读取并校验 `mcp.json`（v1），并解析为 `Config`
 - `Config::load_required(root, override_path)`：读取并校验 `mcp.json`；若未找到配置文件会报错（fail-fast），不会返回“空配置”
+- `ClientConfig::validate()` / `Config::validate()` / `ServerConfig::validate()`：手动构造配置时的 fail-fast 校验入口（`Config::load` 已隐式校验）
 - `Transport`：`Stdio | Unix | StreamableHttp`
 - `ServerConfig`：按 transport 聚合后的 server 配置
   - `ServerConfig::streamable_http_split(sse_url, http_url)`：便捷构造 split URL 的 `transport=streamable_http`（返回 `Result`）

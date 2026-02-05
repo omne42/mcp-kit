@@ -20,7 +20,7 @@
 ### Added
 - `mcp-kit`：`ServerName` 现在实现 `Deserialize`（`serde`），便于在配置/外部数据模型中直接使用。
 - `mcp-kit`：新增一组接受 `&ServerName` 的便捷入口（非 breaking）：`Config::server_named`、`Manager::*_named`。
-- `mcp-kit`：新增 `Config::validate` 与 `ServerConfig::validate`，用于在 Rust API 层 fail-fast 校验配置不变量（`Manager` 连接前会调用）。
+- `mcp-kit`：新增 `ClientConfig::validate` / `Config::validate` / `ServerConfig::validate`，用于在 Rust API 层 fail-fast 校验配置不变量（`Config::load` 已隐式校验；`Manager` 连接前会调用 `ServerConfig::validate`）。
 - `mcp-kit`：新增 `Manager::disconnect_and_wait` + `Connection::{wait, wait_with_timeout}` + `Session::{wait, wait_with_timeout}`，用于更明确的关闭/回收语义。
 - `mcp-kit`：新增 `Manager::{connect_io_unchecked, connect_jsonrpc_unchecked}`，用于测试/显式接入自定义 transport（会绕过 `Untrusted` 安全护栏）。
 - `mcp-jsonrpc`：`SpawnOptions` 新增 `kill_on_drop`（默认 `true`）、`stdout_log_redactor` 与 `diagnostics.invalid_json_sample_lines`（用于脱敏与诊断采样）。

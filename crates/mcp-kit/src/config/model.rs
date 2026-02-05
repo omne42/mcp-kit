@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,34 @@ pub struct ClientConfig {
     pub protocol_version: Option<String>,
     pub capabilities: Option<Value>,
     pub roots: Option<Vec<Root>>,
+}
+
+impl ClientConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(protocol_version) = self.protocol_version.as_deref() {
+            if protocol_version.trim().is_empty() {
+                anyhow::bail!("mcp client protocol_version must not be empty");
+            }
+        }
+        if let Some(capabilities) = self.capabilities.as_ref() {
+            if !capabilities.is_object() {
+                anyhow::bail!("mcp client capabilities must be a JSON object");
+            }
+        }
+        if let Some(roots) = self.roots.as_ref() {
+            for (idx, root) in roots.iter().enumerate() {
+                if root.uri.trim().is_empty() {
+                    anyhow::bail!("mcp client roots[{idx}].uri must not be empty");
+                }
+                if let Some(name) = root.name.as_deref() {
+                    if name.trim().is_empty() {
+                        anyhow::bail!("mcp client roots[{idx}].name must not be empty");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -195,6 +223,26 @@ impl ServerConfig {
                     }
                     if value.trim().is_empty() {
                         anyhow::bail!("mcp stdio env[{key}] must not be empty");
+                    }
+                }
+                if let Some(log) = self.stdout_log.as_ref() {
+                    if log.path.as_os_str().is_empty() {
+                        anyhow::bail!("mcp stdio stdout_log.path must not be empty");
+                    }
+                    if log
+                        .path
+                        .components()
+                        .any(|c| matches!(c, Component::ParentDir))
+                    {
+                        anyhow::bail!("mcp stdio stdout_log.path must not contain `..` segments");
+                    }
+                    if log.max_bytes_per_part == 0 {
+                        anyhow::bail!("mcp stdio stdout_log.max_bytes_per_part must be >= 1");
+                    }
+                    if matches!(log.max_parts, Some(0)) {
+                        anyhow::bail!(
+                            "mcp stdio stdout_log.max_parts must be >= 1 (or None for unlimited)"
+                        );
                     }
                 }
             }
@@ -403,6 +451,9 @@ impl Config {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
+        self.client
+            .validate()
+            .context("validate mcp client config")?;
         for (name, server) in self.servers.iter() {
             server
                 .validate()

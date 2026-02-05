@@ -274,6 +274,70 @@ fn server_config_validate_rejects_streamable_http_stdout_log() {
     assert!(cfg.validate().is_err());
 }
 
+#[test]
+fn client_config_validate_rejects_empty_protocol_version() {
+    let cfg = ClientConfig {
+        protocol_version: Some("   ".to_string()),
+        ..Default::default()
+    };
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn client_config_validate_rejects_non_object_capabilities() {
+    let cfg = ClientConfig {
+        capabilities: Some(serde_json::json!(1)),
+        ..Default::default()
+    };
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn config_validate_rejects_invalid_client_roots() {
+    let client = ClientConfig {
+        roots: Some(vec![Root {
+            uri: " ".to_string(),
+            name: None,
+        }]),
+        ..Default::default()
+    };
+    let cfg = Config::new(client, std::collections::BTreeMap::new());
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn server_config_validate_rejects_stdio_stdout_log_with_parent_dir() {
+    let mut cfg = ServerConfig::stdio(vec!["mcp-a".to_string()]).unwrap();
+    cfg.set_stdout_log(Some(StdoutLogConfig {
+        path: PathBuf::from("../oops.log"),
+        max_bytes_per_part: 1,
+        max_parts: Some(1),
+    }));
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn server_config_validate_rejects_stdio_stdout_log_with_zero_max_bytes() {
+    let mut cfg = ServerConfig::stdio(vec!["mcp-a".to_string()]).unwrap();
+    cfg.set_stdout_log(Some(StdoutLogConfig {
+        path: PathBuf::from("logs/stdout.log"),
+        max_bytes_per_part: 0,
+        max_parts: Some(1),
+    }));
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn server_config_validate_rejects_stdio_stdout_log_with_zero_max_parts() {
+    let mut cfg = ServerConfig::stdio(vec!["mcp-a".to_string()]).unwrap();
+    cfg.set_stdout_log(Some(StdoutLogConfig {
+        path: PathBuf::from("logs/stdout.log"),
+        max_bytes_per_part: 1,
+        max_parts: Some(0),
+    }));
+    assert!(cfg.validate().is_err());
+}
+
 #[tokio::test]
 async fn load_parses_stdio_inherit_env() {
     let dir = tempfile::tempdir().unwrap();
