@@ -21,8 +21,8 @@ pub enum ServerNameError {
 impl ServerName {
     /// Parse and validate an MCP server name.
     ///
-    /// Note: this trims leading/trailing ASCII whitespace before validation. In other words,
-    /// `" a "` and `"a"` normalize to the same `ServerName`.
+    /// Note: this trims leading/trailing whitespace before validation. In other words, `" a "`
+    /// and `"a"` normalize to the same `ServerName`.
     pub fn parse(name: impl AsRef<str>) -> Result<Self, ServerNameError> {
         let name = name.as_ref().trim();
         if name.is_empty() {

@@ -13,7 +13,7 @@
 - `mcp-kit`（BREAKING）：引入 `ServerName` 新类型，并将其用于 `Config/Manager` 的 server key；`Session::new(...)` 现在要求传入 `ServerName`（避免把任意 `String` 当作已校验的 server 名称）。
 - `mcp-kit`：重构内部模块边界：`config` 拆分为 `file_format/model/load`，`manager` 抽出 `placeholders` 与 `streamable_http_validation`，并将大型 `tests` 外置，降低单文件复杂度与后续维护成本。
 - `mcp-kit`：新增 `ServerNameError`（`thiserror`，`#[non_exhaustive]`），为后续把 `anyhow` 逐步替换为结构化错误打基础。
-- `mcp-kit`：`ServerName::parse(...)` 的 rustdoc 现在明确其会对输入做 `trim()` 后再校验（行为不变，只是把语义写清楚）。
+- `mcp-kit`：`ServerName::parse(...)` 的 rustdoc 现在明确其会对输入做 `trim()` 后再校验（行为不变，只是把语义写清楚；并修正了“ASCII whitespace”表述与实际行为不一致的问题）。
 - `mcp-kit`：`ServerName` 内部实现改为 `Arc<str>`，避免在 handler 等路径频繁 clone 时产生额外分配（API 不变）。
 
 ### Added
