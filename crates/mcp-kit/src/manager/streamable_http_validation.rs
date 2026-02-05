@@ -322,33 +322,25 @@ fn is_untrusted_non_global_ipv6(ip: Ipv6Addr) -> bool {
 
 fn normalize_ip(ip: IpAddr) -> IpAddr {
     match ip {
-        IpAddr::V6(ip) => {
-            if let Some(v4) = ip.to_ipv4() {
-                return IpAddr::V4(v4);
-            }
-            if let Some(v4) = ipv4_from_nat64_well_known_prefix(ip) {
-                return IpAddr::V4(v4);
-            }
-            if let Some(v4) = ipv4_from_6to4(ip) {
-                return IpAddr::V4(v4);
-            }
-            IpAddr::V6(ip)
-        }
         IpAddr::V4(ip) => IpAddr::V4(ip),
+        IpAddr::V6(ip) => embedded_ipv4_from_ipv6(ip)
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(ip)),
     }
 }
 
-fn ipv4_from_nat64_well_known_prefix(addr: Ipv6Addr) -> Option<Ipv4Addr> {
+fn embedded_ipv4_from_ipv6(addr: Ipv6Addr) -> Option<Ipv4Addr> {
+    if let Some(v4) = addr.to_ipv4() {
+        return Some(v4);
+    }
+
     let bytes = addr.octets();
+
     // NAT64 Well-Known Prefix (RFC6052): 64:ff9b::/96
     if bytes[..12] == [0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0] {
         return Some(Ipv4Addr::new(bytes[12], bytes[13], bytes[14], bytes[15]));
     }
-    None
-}
 
-fn ipv4_from_6to4(addr: Ipv6Addr) -> Option<Ipv4Addr> {
-    let bytes = addr.octets();
     // 6to4 (RFC3056; deprecated): 2002::/16 embeds an IPv4 address.
     if bytes[0] == 0x20 && bytes[1] == 0x02 {
         return Some(Ipv4Addr::new(bytes[2], bytes[3], bytes[4], bytes[5]));

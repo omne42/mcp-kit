@@ -19,6 +19,8 @@
 - `mcp-kit`：加固 Untrusted `streamable_http` 的“非公网 IP”判定：识别 NAT64 well-known prefix（`64:ff9b::/96`）与 6to4（`2002::/16`）中嵌入的 IPv4，避免绕过 `allow_private_ips=false` 的默认出站限制；并补齐更多 RFC6890 特殊用途 IPv4 前缀拒绝规则。
 - `mcp-kit`：文档补充 `Manager::try_from_config` 的适用场景，并统一 mdbook 安装命令为 `cargo install mdbook --locked`（更可复现）。
 - `mcp-kit`：`Config::load` 解析 `stdout_log` 时会先用 `StdoutLogConfig::validate` 做 fail-fast 校验，再 resolve 相对路径，避免空 `path` 被当作 root。
+- `mcp-kit`：移除 `Manager::connect` 内对 `argv` 的重复校验（统一由 `ServerConfig::validate` 负责）；并小幅整理 `normalize_ip` 的实现，降低后续继续加规则时的维护成本（行为不变）。
+- `mcp-jsonrpc`：deflake 一处 EOF 相关单测（仅测试改动，不影响库行为）。
 
 ### Added
 - `mcp-kit`：`ServerName` 现在实现 `Deserialize`（`serde`），便于在配置/外部数据模型中直接使用。

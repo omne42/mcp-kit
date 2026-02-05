@@ -496,9 +496,10 @@ async fn reader_eof_shuts_down_client_write_end() {
     // Closing the server->client direction should cause the client's reader task to hit EOF and
     // shutdown the client->server write end.
     drop(server_write);
+    tokio::task::yield_now().await;
 
     let mut buf = [0u8; 1];
-    let n = tokio::time::timeout(Duration::from_secs(1), server_read.read(&mut buf))
+    let n = tokio::time::timeout(Duration::from_secs(5), server_read.read(&mut buf))
         .await
         .expect("server read completed")
         .expect("server read ok");

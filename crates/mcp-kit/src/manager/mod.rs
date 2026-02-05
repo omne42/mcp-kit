@@ -473,9 +473,6 @@ impl Manager {
                         "refusing to spawn mcp server in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
                     );
                 }
-                if server_cfg.argv().is_empty() {
-                    anyhow::bail!("mcp server argv must not be empty");
-                }
 
                 let expanded_argv = server_cfg
                     .argv()
