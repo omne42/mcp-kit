@@ -762,6 +762,28 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    #[test]
+    fn content_type_helpers_handle_common_variants() {
+        assert!(is_event_stream_content_type("text/event-stream"));
+        assert!(is_event_stream_content_type("Text/Event-Stream"));
+        assert!(is_event_stream_content_type(
+            "text/event-stream; charset=utf-8"
+        ));
+        assert!(!is_event_stream_content_type("application/json"));
+
+        assert!(is_json_content_type(""));
+        assert!(is_json_content_type("application/json"));
+        assert!(is_json_content_type("Application/Json; charset=utf-8"));
+        assert!(is_json_content_type("application/problem+json"));
+        assert!(is_json_content_type(
+            "application/vnd.api+json; charset=utf-8"
+        ));
+        assert!(!is_json_content_type("text/plain"));
+        assert!(!is_json_content_type("application/xml"));
+        assert!(!is_json_content_type("application/jsonp"));
+        assert!(!is_json_content_type("application/notjson+jsone"));
+    }
+
     #[tokio::test]
     async fn sse_pump_writes_data_events_as_json_lines() {
         let sse = concat!(
