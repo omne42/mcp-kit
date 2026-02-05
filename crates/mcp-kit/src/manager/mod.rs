@@ -214,12 +214,38 @@ impl Default for Manager {
 }
 
 impl Manager {
+    pub fn try_from_config(
+        config: &Config,
+        client_name: impl Into<String>,
+        client_version: impl Into<String>,
+        timeout: Duration,
+    ) -> anyhow::Result<Self> {
+        config
+            .client()
+            .validate()
+            .map_err(|err| anyhow::anyhow!("invalid mcp client config: {err}"))?;
+        Ok(Self::from_config(
+            config,
+            client_name,
+            client_version,
+            timeout,
+        ))
+    }
+
+    /// Build a `Manager` using client defaults from `config`.
+    ///
+    /// Note: this assumes `config.client()` is valid. Use `Manager::try_from_config` if you
+    /// manually constructed a config and want fail-fast validation.
     pub fn from_config(
         config: &Config,
         client_name: impl Into<String>,
         client_version: impl Into<String>,
         timeout: Duration,
     ) -> Self {
+        debug_assert!(
+            config.client().validate().is_ok(),
+            "Manager::from_config requires a validated Config::client() (use try_from_config)"
+        );
         let mut manager = Self::new(client_name, client_version, timeout);
         if let Some(protocol_version) = config.client().protocol_version.clone() {
             manager = manager.with_protocol_version(protocol_version);

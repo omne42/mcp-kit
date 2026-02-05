@@ -10,7 +10,7 @@
 
 - `Config::load(root, override_path)`：读取并校验 `mcp.json`（v1），并解析为 `Config`
 - `Config::load_required(root, override_path)`：读取并校验 `mcp.json`；若未找到配置文件会报错（fail-fast），不会返回“空配置”
-- `ClientConfig::validate()` / `Config::validate()` / `ServerConfig::validate()`：手动构造配置时的 fail-fast 校验入口（`Config::load` 已隐式校验）
+- `ClientConfig::validate()` / `Config::validate()` / `ServerConfig::validate()` / `StdoutLogConfig::validate()`：手动构造配置时的 fail-fast 校验入口（`Config::load` 已隐式校验）
 - `Transport`：`Stdio | Unix | StreamableHttp`
 - `ServerConfig`：按 transport 聚合后的 server 配置
   - `ServerConfig::streamable_http_split(sse_url, http_url)`：便捷构造 split URL 的 `transport=streamable_http`（返回 `Result`）
@@ -22,7 +22,7 @@
 
 - `ServerName`：server 名称的新类型（用于 `Config` 的 `servers` key、`Manager` 的连接缓存 key、以及 `ProtocolVersionMismatch.server_name` 等）。大多数 API 仍接受 `&str` 查询；只有在你手动构造/持有会话（例如 `Session::new`）时需要显式构造 `ServerName`。注意：`ServerName::parse(...)` 会对输入做 `trim()` 后再校验，因此 `" a "` 与 `"a"` 会归一化为同一个名称；若你已经持有 `ServerName`，可优先使用 `Config::server_named`、`Manager::*_named` 这类入口避免重复处理/减少传参噪音。
 - `Manager`：多 server 连接缓存 + initialize + 便捷请求
-  - `from_config` / `new`
+  - `try_from_config` / `from_config` / `new`
   - `connect` / `get_or_connect`
   - `request` / `notify` / `request_typed` / `notify_typed`
   - `list_tools` / `call_tool` / `read_resource` / `get_prompt` 等常用 MCP 方法

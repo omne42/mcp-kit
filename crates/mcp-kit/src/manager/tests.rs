@@ -40,6 +40,23 @@ fn built_in_roots_list_returns_expected_shape() {
 }
 
 #[test]
+fn try_from_config_rejects_invalid_client_config() {
+    let config = Config::new(
+        crate::ClientConfig {
+            capabilities: Some(serde_json::json!(1)),
+            ..Default::default()
+        },
+        std::collections::BTreeMap::new(),
+    );
+    let err =
+        match Manager::try_from_config(&config, "test-client", "0.0.0", Duration::from_secs(1)) {
+            Ok(_) => panic!("expected error"),
+            Err(err) => err,
+        };
+    assert!(err.to_string().contains("capabilities"), "err={err:#}");
+}
+
+#[test]
 fn expand_placeholders_supports_claude_plugin_root() {
     let cwd = Path::new("/tmp/plugin");
     let expanded = expand_placeholders_trusted("${CLAUDE_PLUGIN_ROOT}/servers/mcp", cwd).unwrap();

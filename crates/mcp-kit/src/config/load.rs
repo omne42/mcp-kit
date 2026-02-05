@@ -23,13 +23,6 @@ fn parse_stdout_log_config(
     if log.path.as_os_str().is_empty() {
         anyhow::bail!("mcp server {name}: stdout_log.path must not be empty");
     }
-    if log
-        .path
-        .components()
-        .any(|c| matches!(c, Component::ParentDir))
-    {
-        anyhow::bail!("mcp server {name}: stdout_log.path must not contain `..` segments");
-    }
 
     let path = if log.path.is_absolute() {
         log.path
@@ -47,11 +40,14 @@ fn parse_stdout_log_config(
         Some(max_parts.max(1))
     };
 
-    Ok(StdoutLogConfig {
+    let cfg = StdoutLogConfig {
         path,
         max_bytes_per_part,
         max_parts,
-    })
+    };
+    cfg.validate()
+        .map_err(|err| anyhow::anyhow!("mcp server {name}: {err}"))?;
+    Ok(cfg)
 }
 
 fn validate_stdio_env(name: &str, env: &BTreeMap<String, String>) -> anyhow::Result<()> {

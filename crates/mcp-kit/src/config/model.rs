@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -63,6 +62,28 @@ pub struct StdoutLogConfig {
     pub path: PathBuf,
     pub max_bytes_per_part: u64,
     pub max_parts: Option<u32>,
+}
+
+impl StdoutLogConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.path.as_os_str().is_empty() {
+            anyhow::bail!("mcp stdout_log.path must not be empty");
+        }
+        if self
+            .path
+            .components()
+            .any(|c| matches!(c, Component::ParentDir))
+        {
+            anyhow::bail!("mcp stdout_log.path must not contain `..` segments");
+        }
+        if self.max_bytes_per_part == 0 {
+            anyhow::bail!("mcp stdout_log.max_bytes_per_part must be >= 1");
+        }
+        if matches!(self.max_parts, Some(0)) {
+            anyhow::bail!("mcp stdout_log.max_parts must be >= 1 (or None for unlimited)");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -226,24 +247,7 @@ impl ServerConfig {
                     }
                 }
                 if let Some(log) = self.stdout_log.as_ref() {
-                    if log.path.as_os_str().is_empty() {
-                        anyhow::bail!("mcp stdio stdout_log.path must not be empty");
-                    }
-                    if log
-                        .path
-                        .components()
-                        .any(|c| matches!(c, Component::ParentDir))
-                    {
-                        anyhow::bail!("mcp stdio stdout_log.path must not contain `..` segments");
-                    }
-                    if log.max_bytes_per_part == 0 {
-                        anyhow::bail!("mcp stdio stdout_log.max_bytes_per_part must be >= 1");
-                    }
-                    if matches!(log.max_parts, Some(0)) {
-                        anyhow::bail!(
-                            "mcp stdio stdout_log.max_parts must be >= 1 (or None for unlimited)"
-                        );
-                    }
+                    log.validate()?;
                 }
             }
             Transport::Unix => {
@@ -453,11 +457,11 @@ impl Config {
     pub fn validate(&self) -> anyhow::Result<()> {
         self.client
             .validate()
-            .context("validate mcp client config")?;
+            .map_err(|err| anyhow::anyhow!("invalid mcp client config: {err}"))?;
         for (name, server) in self.servers.iter() {
-            server
-                .validate()
-                .with_context(|| format!("validate mcp server: {name}"))?;
+            server.validate().map_err(|err| {
+                anyhow::anyhow!("invalid mcp server config (server={name}): {err}")
+            })?;
         }
         Ok(())
     }
