@@ -14,6 +14,7 @@
 - `mcp-kit`：重构内部模块边界：`config` 拆分为 `file_format/model/load`，`manager` 抽出 `placeholders` 与 `streamable_http_validation`，并将大型 `tests` 外置，降低单文件复杂度与后续维护成本。
 - `mcp-kit`：新增 `ServerNameError`（`thiserror`，`#[non_exhaustive]`），为后续把 `anyhow` 逐步替换为结构化错误打基础。
 - `mcp-kit`：`ServerName::parse(...)` 的 rustdoc 现在明确其会对输入做 `trim()` 后再校验（行为不变，只是把语义写清楚）。
+- `mcp-kit`：`ServerName` 内部实现改为 `Arc<str>`，避免在 handler 等路径频繁 clone 时产生额外分配（API 不变）。
 
 ### Added
 - `mcp-kit`：`ServerName` 现在实现 `Deserialize`（`serde`），便于在配置/外部数据模型中直接使用。
@@ -138,6 +139,7 @@
 - `mcp-kit`：配置加载读取做有界读取（防止特殊文件/无限流导致 hang），并要求配置文件为 regular file。
 - `mcp-kit`：配置读取在 unix 下使用 `O_NOFOLLOW` 并在 open 后再校验类型/大小，降低 TOCTOU 风险；缺失文件的 best-effort 读取在 open 阶段遇到 `NotFound` 会视为缺失。
 - `mcp-kit`：Trusted mode 下会展开 `${VAR}` 占位符（stdio `argv/env`、streamable_http `url/http_headers`），并支持 `${CLAUDE_PLUGIN_ROOT}` / `${MCP_ROOT}`。
+- `mcp-kit`：untrusted 下的 streamable_http host 检查/allowlist 匹配逻辑不再做额外字符串分配（小幅减少 hot path 开销）。
 - `mcp-kit`：Trusted mode 下的 argv/url 占位符展开与 URL 校验失败不会回显原始明文（避免 token/secret 泄露到错误链）。
 - `mcp-jsonrpc`：`Client::wait()` 现在会关闭写端/child stdin，避免“等待 stdin EOF 才退出”的 stdio server 造成 hang；reader EOF/IO error 也会触发关闭写端。
 - `mcp-jsonrpc`：stdout_log 打开时会拒绝包含 symlink 组件的路径，避免意外写入到不安全位置。

@@ -677,6 +677,9 @@ impl Config {
                     }
                 })?;
 
+            let _ = server.description.as_deref();
+            let _ = &server.extra;
+
             if matches!(server.enabled, Some(false)) {
                 continue;
             }

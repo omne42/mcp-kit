@@ -1,12 +1,13 @@
 use std::borrow::Borrow;
 use std::fmt;
 use std::ops::Deref;
+use std::sync::Arc;
 
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ServerName(Box<str>);
+pub struct ServerName(Arc<str>);
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -33,7 +34,7 @@ impl ServerName {
         {
             return Err(ServerNameError::Invalid(name.to_string()));
         }
-        Ok(Self(name.into()))
+        Ok(Self(Arc::from(name)))
     }
 
     pub fn as_str(&self) -> &str {
@@ -98,6 +99,6 @@ impl TryFrom<String> for ServerName {
 
 impl From<ServerName> for String {
     fn from(value: ServerName) -> Self {
-        value.0.into()
+        value.0.as_ref().to_string()
     }
 }

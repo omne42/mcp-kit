@@ -4,6 +4,15 @@ use anyhow::Context;
 
 use crate::{ServerConfig, TrustMode, UntrustedStreamableHttpPolicy};
 
+fn ends_with_ignore_ascii_case(haystack: &str, suffix: &str) -> bool {
+    if suffix.len() > haystack.len() {
+        return false;
+    }
+    haystack
+        .get(haystack.len() - suffix.len()..)
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
+}
+
 pub(super) fn validate_streamable_http_config(
     trust_mode: TrustMode,
     policy: &UntrustedStreamableHttpPolicy,
@@ -63,14 +72,13 @@ pub(super) fn validate_streamable_http_url_untrusted(
     let host = host.trim_end_matches('.');
     let host_for_ip = host.trim_start_matches('[').trim_end_matches(']');
     if !policy.allow_localhost {
-        let host_lc = host.to_ascii_lowercase();
         let is_ip_literal = host_for_ip.parse::<IpAddr>().is_ok();
-        let is_single_label = !is_ip_literal && !host_lc.contains('.');
-        if host_lc == "localhost"
-            || host_lc == "localhost.localdomain"
-            || host_lc.ends_with(".localhost")
-            || host_lc.ends_with(".local")
-            || host_lc.ends_with(".localdomain")
+        let is_single_label = !is_ip_literal && !host.contains('.');
+        if host.eq_ignore_ascii_case("localhost")
+            || host.eq_ignore_ascii_case("localhost.localdomain")
+            || ends_with_ignore_ascii_case(host, ".localhost")
+            || ends_with_ignore_ascii_case(host, ".local")
+            || ends_with_ignore_ascii_case(host, ".localdomain")
             || is_single_label
         {
             anyhow::bail!(
@@ -173,24 +181,29 @@ pub(super) async fn validate_streamable_http_url_untrusted_dns(
 }
 
 fn host_matches_allowlist(host: &str, allowed: &str) -> bool {
-    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
-    let allowed = allowed.trim().trim_end_matches('.').to_ascii_lowercase();
+    let host = host.trim().trim_end_matches('.');
+    let allowed = allowed.trim().trim_end_matches('.');
     if allowed.is_empty() {
         return false;
     }
-    if host == allowed {
+    if host.eq_ignore_ascii_case(allowed) {
         return true;
     }
-    host.strip_suffix(&allowed)
-        .is_some_and(|rest| rest.ends_with('.'))
+    if host.len() <= allowed.len() + 1 {
+        return false;
+    }
+    if !ends_with_ignore_ascii_case(host, allowed) {
+        return false;
+    }
+    let boundary = host.len() - allowed.len() - 1;
+    host.as_bytes().get(boundary).is_some_and(|ch| *ch == b'.')
 }
 
 fn is_untrusted_sensitive_http_header(header: &str) -> bool {
-    let header = header.trim().to_ascii_lowercase();
-    matches!(
-        header.as_str(),
-        "authorization" | "proxy-authorization" | "cookie"
-    )
+    let header = header.trim();
+    header.eq_ignore_ascii_case("authorization")
+        || header.eq_ignore_ascii_case("proxy-authorization")
+        || header.eq_ignore_ascii_case("cookie")
 }
 
 pub(super) fn should_disconnect_after_jsonrpc_error(err: &anyhow::Error) -> bool {

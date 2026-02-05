@@ -98,10 +98,8 @@ pub(super) struct ExternalServerConfigFile {
     #[serde(default)]
     pub(super) enabled: Option<bool>,
     #[serde(default)]
-    #[allow(dead_code)]
     pub(super) description: Option<String>,
     #[serde(flatten)]
-    #[allow(dead_code)]
     pub(super) extra: BTreeMap<String, Value>,
 }
 
