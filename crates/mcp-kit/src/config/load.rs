@@ -20,15 +20,6 @@ fn parse_stdout_log_config(
     name: &str,
     log: StdoutLogConfigFile,
 ) -> anyhow::Result<StdoutLogConfig> {
-    if log.path.as_os_str().is_empty() {
-        anyhow::bail!("mcp server {name}: stdout_log.path must not be empty");
-    }
-
-    let path = if log.path.is_absolute() {
-        log.path
-    } else {
-        thread_root.join(log.path)
-    };
     let max_bytes_per_part = log
         .max_bytes_per_part
         .unwrap_or(super::DEFAULT_STDOUT_LOG_MAX_BYTES_PER_PART)
@@ -40,13 +31,18 @@ fn parse_stdout_log_config(
         Some(max_parts.max(1))
     };
 
-    let cfg = StdoutLogConfig {
-        path,
+    let mut cfg = StdoutLogConfig {
+        path: log.path,
         max_bytes_per_part,
         max_parts,
     };
     cfg.validate()
         .map_err(|err| anyhow::anyhow!("mcp server {name}: {err}"))?;
+
+    if !cfg.path.is_absolute() {
+        cfg.path = thread_root.join(&cfg.path);
+    }
+
     Ok(cfg)
 }
 

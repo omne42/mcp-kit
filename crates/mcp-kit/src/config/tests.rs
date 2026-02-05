@@ -463,6 +463,24 @@ async fn load_parses_stdout_log_and_resolves_relative_path() {
 }
 
 #[tokio::test]
+async fn load_denies_stdout_log_with_empty_path() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{ "version": 1, "servers": { "rg": { "transport": "stdio", "argv": ["mcp-rg"], "stdout_log": { "path": "" } } } }"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    assert!(
+        err.to_string().contains("stdout_log.path")
+            && err.to_string().contains("must not be empty"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
 async fn load_stdout_log_max_parts_zero_means_unlimited() {
     let dir = tempfile::tempdir().unwrap();
     tokio::fs::write(
