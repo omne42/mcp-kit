@@ -19,7 +19,7 @@ fn roots_capability_overwrites_non_object() {
 
 #[test]
 fn built_in_roots_list_requires_roots() {
-    assert!(try_handle_built_in_request("roots/list", None).is_none());
+    assert!(super::handlers::try_handle_built_in_request("roots/list", None).is_none());
 }
 
 #[test]
@@ -29,7 +29,8 @@ fn built_in_roots_list_returns_expected_shape() {
         name: Some("tmp".to_string()),
     }]);
 
-    let result = try_handle_built_in_request("roots/list", Some(&roots)).expect("result");
+    let result =
+        super::handlers::try_handle_built_in_request("roots/list", Some(&roots)).expect("result");
     assert_eq!(
         result,
         serde_json::json!({

@@ -31,6 +31,10 @@ impl Session {
         self.server_name.as_str()
     }
 
+    pub fn server_name_named(&self) -> &ServerName {
+        &self.server_name
+    }
+
     pub fn initialize_result(&self) -> &Value {
         &self.initialize_result
     }

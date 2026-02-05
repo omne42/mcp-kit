@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -165,6 +166,147 @@ impl ServerConfig {
         self.transport
     }
 
+    pub fn validate(&self) -> anyhow::Result<()> {
+        match self.transport {
+            Transport::Stdio => {
+                if self.argv.is_empty() {
+                    anyhow::bail!("mcp stdio argv must not be empty");
+                }
+                for (idx, arg) in self.argv.iter().enumerate() {
+                    if arg.trim().is_empty() {
+                        anyhow::bail!("mcp stdio argv[{idx}] must not be empty");
+                    }
+                }
+                if self.unix_path.is_some() {
+                    anyhow::bail!("mcp stdio unix_path is not allowed");
+                }
+                if self.url.is_some() || self.sse_url.is_some() || self.http_url.is_some() {
+                    anyhow::bail!("mcp stdio url/sse_url/http_url are not allowed");
+                }
+                if self.bearer_token_env_var.is_some()
+                    || !self.http_headers.is_empty()
+                    || !self.env_http_headers.is_empty()
+                {
+                    anyhow::bail!("mcp stdio http auth/headers are not allowed");
+                }
+                for (key, value) in self.env.iter() {
+                    if key.trim().is_empty() {
+                        anyhow::bail!("mcp stdio env key must not be empty");
+                    }
+                    if value.trim().is_empty() {
+                        anyhow::bail!("mcp stdio env[{key}] must not be empty");
+                    }
+                }
+            }
+            Transport::Unix => {
+                if !self.argv.is_empty() {
+                    anyhow::bail!("mcp unix argv is not allowed");
+                }
+                if !self.inherit_env {
+                    anyhow::bail!("mcp unix inherit_env is not allowed");
+                }
+                let Some(unix_path) = self.unix_path.as_deref() else {
+                    anyhow::bail!("mcp unix unix_path must be set");
+                };
+                if unix_path.as_os_str().is_empty() {
+                    anyhow::bail!("mcp unix unix_path must not be empty");
+                }
+                if self.url.is_some() || self.sse_url.is_some() || self.http_url.is_some() {
+                    anyhow::bail!("mcp unix url/sse_url/http_url are not allowed");
+                }
+                if !self.env.is_empty() {
+                    anyhow::bail!("mcp unix env is not allowed");
+                }
+                if self.stdout_log.is_some() {
+                    anyhow::bail!("mcp unix stdout_log is not allowed");
+                }
+                if self.bearer_token_env_var.is_some()
+                    || !self.http_headers.is_empty()
+                    || !self.env_http_headers.is_empty()
+                {
+                    anyhow::bail!("mcp unix http auth/headers are not allowed");
+                }
+            }
+            Transport::StreamableHttp => {
+                if !self.argv.is_empty() {
+                    anyhow::bail!("mcp streamable_http argv is not allowed");
+                }
+                if !self.inherit_env {
+                    anyhow::bail!("mcp streamable_http inherit_env is not allowed");
+                }
+                if self.unix_path.is_some() {
+                    anyhow::bail!("mcp streamable_http unix_path is not allowed");
+                }
+                if !self.env.is_empty() {
+                    anyhow::bail!("mcp streamable_http env is not supported");
+                }
+                if self.stdout_log.is_some() {
+                    anyhow::bail!("mcp streamable_http stdout_log is not supported");
+                }
+
+                match (
+                    self.url.as_deref(),
+                    self.sse_url.as_deref(),
+                    self.http_url.as_deref(),
+                ) {
+                    (Some(url), None, None) => {
+                        if url.trim().is_empty() {
+                            anyhow::bail!("mcp streamable_http url must not be empty");
+                        }
+                    }
+                    (None, Some(sse_url), Some(http_url)) => {
+                        if sse_url.trim().is_empty() {
+                            anyhow::bail!("mcp streamable_http sse_url must not be empty");
+                        }
+                        if http_url.trim().is_empty() {
+                            anyhow::bail!("mcp streamable_http http_url must not be empty");
+                        }
+                    }
+                    (None, None, None) => {
+                        anyhow::bail!("mcp streamable_http url (or sse_url + http_url) is required")
+                    }
+                    (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+                        anyhow::bail!(
+                            "mcp streamable_http set either url or (sse_url + http_url), not both"
+                        )
+                    }
+                    (None, Some(_), None) | (None, None, Some(_)) => {
+                        anyhow::bail!("mcp streamable_http sse_url and http_url must both be set")
+                    }
+                }
+
+                if let Some(env_var) = self.bearer_token_env_var.as_deref() {
+                    if env_var.trim().is_empty() {
+                        anyhow::bail!("mcp streamable_http bearer_token_env_var must not be empty");
+                    }
+                }
+
+                for (header, value) in self.http_headers.iter() {
+                    if header.trim().is_empty() {
+                        anyhow::bail!("mcp streamable_http http_headers key must not be empty");
+                    }
+                    if value.trim().is_empty() {
+                        anyhow::bail!(
+                            "mcp streamable_http http_headers[{header}] must not be empty"
+                        );
+                    }
+                }
+                for (header, env_var) in self.env_http_headers.iter() {
+                    if header.trim().is_empty() {
+                        anyhow::bail!("mcp streamable_http env_http_headers key must not be empty");
+                    }
+                    if env_var.trim().is_empty() {
+                        anyhow::bail!(
+                            "mcp streamable_http env_http_headers[{header}] must not be empty"
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn argv(&self) -> &[String] {
         &self.argv
     }
@@ -258,6 +400,15 @@ impl Config {
 
     pub fn servers(&self) -> &BTreeMap<ServerName, ServerConfig> {
         &self.servers
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for (name, server) in self.servers.iter() {
+            server
+                .validate()
+                .with_context(|| format!("validate mcp server: {name}"))?;
+        }
+        Ok(())
     }
 
     pub fn server(&self, name: &str) -> Option<&ServerConfig> {

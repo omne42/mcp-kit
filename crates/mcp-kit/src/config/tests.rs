@@ -249,6 +249,31 @@ async fn load_denies_stdio_env_with_empty_value() {
     );
 }
 
+#[test]
+fn server_config_validate_rejects_stdio_http_auth_fields() {
+    let mut cfg = ServerConfig::stdio(vec!["mcp-a".to_string()]).unwrap();
+    cfg.set_bearer_token_env_var(Some("MCP_TOKEN".to_string()));
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn server_config_validate_rejects_unix_env_fields() {
+    let mut cfg = ServerConfig::unix(PathBuf::from("/tmp/mcp.sock")).unwrap();
+    cfg.env_mut().insert("X".to_string(), "1".to_string());
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn server_config_validate_rejects_streamable_http_stdout_log() {
+    let mut cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+    cfg.set_stdout_log(Some(StdoutLogConfig {
+        path: PathBuf::from("logs/stdout.log"),
+        max_bytes_per_part: 1,
+        max_parts: None,
+    }));
+    assert!(cfg.validate().is_err());
+}
+
 #[tokio::test]
 async fn load_parses_stdio_inherit_env() {
     let dir = tempfile::tempdir().unwrap();

@@ -1,11 +1,9 @@
 //! Connection cache + MCP initialize + request helpers.
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::path::Path;
-use std::pin::Pin;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -18,8 +16,14 @@ use crate::{
     Session, Transport, TrustMode, UntrustedStreamableHttpPolicy,
 };
 
+mod handlers;
 mod placeholders;
 mod streamable_http_validation;
+
+pub use handlers::{
+    ServerNotificationContext, ServerNotificationHandler, ServerRequestContext,
+    ServerRequestHandler, ServerRequestOutcome,
+};
 
 use placeholders::{apply_stdio_baseline_env, expand_placeholders_trusted};
 use streamable_http_validation::{
@@ -30,42 +34,10 @@ use streamable_http_validation::{
 #[cfg(test)]
 use streamable_http_validation::validate_streamable_http_url_untrusted;
 
-const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
-
-type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
-
 fn parse_server_name_anyhow(server_name: &str) -> anyhow::Result<ServerName> {
     ServerName::parse(server_name)
         .map_err(|err| anyhow::anyhow!("invalid mcp server name {server_name:?}: {err}"))
 }
-
-pub enum ServerRequestOutcome {
-    Ok(Value),
-    Error {
-        code: i64,
-        message: String,
-        data: Option<Value>,
-    },
-    MethodNotFound,
-}
-
-pub struct ServerRequestContext {
-    pub server_name: ServerName,
-    pub method: String,
-    pub params: Option<Value>,
-}
-
-pub type ServerRequestHandler =
-    Arc<dyn Fn(ServerRequestContext) -> BoxFuture<ServerRequestOutcome> + Send + Sync>;
-
-pub struct ServerNotificationContext {
-    pub server_name: ServerName,
-    pub method: String,
-    pub params: Option<Value>,
-}
-
-pub type ServerNotificationHandler =
-    Arc<dyn Fn(ServerNotificationContext) -> BoxFuture<()> + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProtocolVersionCheck {
@@ -94,7 +66,7 @@ pub struct Manager {
     protocol_version: String,
     protocol_version_check: ProtocolVersionCheck,
     protocol_version_mismatches: Vec<ProtocolVersionMismatch>,
-    server_handler_timeout_counts: Arc<Mutex<HashMap<ServerName, u64>>>,
+    server_handler_timeout_counts: Arc<RwLock<HashMap<ServerName, u64>>>,
     capabilities: Value,
     roots: Option<Arc<Vec<Root>>>,
     trust_mode: TrustMode,
@@ -279,7 +251,7 @@ impl Manager {
             protocol_version: MCP_PROTOCOL_VERSION.to_string(),
             protocol_version_check: ProtocolVersionCheck::Strict,
             protocol_version_mismatches: Vec::new(),
-            server_handler_timeout_counts: Arc::new(Mutex::new(HashMap::new())),
+            server_handler_timeout_counts: Arc::new(RwLock::new(HashMap::new())),
             capabilities: Value::Object(serde_json::Map::new()),
             roots: None,
             trust_mode: TrustMode::Untrusted,
@@ -345,7 +317,7 @@ impl Manager {
     pub fn server_handler_timeout_count(&self, server_name: &str) -> u64 {
         let counts = self
             .server_handler_timeout_counts
-            .lock()
+            .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         counts.get(server_name).copied().unwrap_or(0)
     }
@@ -354,7 +326,7 @@ impl Manager {
     pub fn server_handler_timeout_counts(&self) -> HashMap<ServerName, u64> {
         let counts = self
             .server_handler_timeout_counts
-            .lock()
+            .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         counts.clone()
     }
@@ -363,7 +335,7 @@ impl Manager {
     pub fn take_server_handler_timeout_counts(&mut self) -> HashMap<ServerName, u64> {
         let mut counts = self
             .server_handler_timeout_counts
-            .lock()
+            .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         std::mem::take(&mut *counts)
     }
@@ -464,6 +436,9 @@ impl Manager {
         }
 
         let server_name_key = build_server_name()?;
+        server_cfg
+            .validate()
+            .with_context(|| format!("invalid mcp server config (server={server_name_key})"))?;
 
         let (client, child) = match server_cfg.transport() {
             Transport::Stdio => {
@@ -896,208 +871,6 @@ impl Manager {
             },
         );
         Ok(())
-    }
-
-    fn attach_client_handlers(
-        &self,
-        server_name: ServerName,
-        client: &mut mcp_jsonrpc::Client,
-    ) -> Vec<tokio::task::JoinHandle<()>> {
-        use futures_util::FutureExt as _;
-
-        let mut tasks = Vec::new();
-        let handler_concurrency = self.server_handler_concurrency.max(1);
-        let handler_timeout = self.server_handler_timeout;
-        let handler_timeout_counts = self.server_handler_timeout_counts.clone();
-
-        if let Some(mut requests_rx) = client.take_requests() {
-            let handler = self.server_request_handler.clone();
-            let roots = self.roots.clone();
-            let server_name = server_name.clone();
-            let handler_timeout_counts = handler_timeout_counts.clone();
-            tasks.push(tokio::spawn(async move {
-                let mut in_flight = tokio::task::JoinSet::new();
-
-                loop {
-                    tokio::select! {
-                        Some(req) = requests_rx.recv(), if in_flight.len() < handler_concurrency => {
-                            let handler = handler.clone();
-                            let roots = roots.clone();
-                            let server_name = server_name.clone();
-                            let handler_timeout_counts = handler_timeout_counts.clone();
-                            in_flight.spawn(async move {
-                                const JSONRPC_SERVER_ERROR: i64 = -32000;
-
-                                let method = req.method.clone();
-                                let ctx = ServerRequestContext {
-                                    server_name: server_name.clone(),
-                                    method: method.clone(),
-                                    params: req.params.clone(),
-                                };
-
-                                let mut outcome = match (handler_timeout, ctx) {
-                                    (Some(timeout), ctx) => {
-                                        let handler_fut = std::panic::AssertUnwindSafe(handler(ctx))
-                                            .catch_unwind();
-                                        match tokio::time::timeout(timeout, handler_fut).await {
-                                            Ok(joined) => match joined {
-                                                Ok(outcome) => outcome,
-                                                Err(_) => ServerRequestOutcome::Error {
-                                                    code: JSONRPC_SERVER_ERROR,
-                                                    message: format!(
-                                                        "server request handler panicked: {method}"
-                                                    ),
-                                                    data: None,
-                                                },
-                                            },
-                                            Err(_) => {
-                                                {
-                                                    let mut counts = handler_timeout_counts
-                                                        .lock()
-                                                        .unwrap_or_else(|poisoned| {
-                                                            poisoned.into_inner()
-                                                        });
-                                                    *counts.entry(server_name.clone()).or_insert(0) +=
-                                                        1;
-                                                }
-                                                ServerRequestOutcome::Error {
-                                                    code: JSONRPC_SERVER_ERROR,
-                                                    message: format!(
-                                                        "server request handler timed out after {timeout:?}: {method}"
-                                                    ),
-                                                    data: None,
-                                                }
-                                            }
-                                        }
-                                    }
-                                    (None, ctx) => {
-                                        let handler_fut = std::panic::AssertUnwindSafe(handler(ctx))
-                                            .catch_unwind();
-                                        match handler_fut.await {
-                                            Ok(outcome) => outcome,
-                                            Err(_) => ServerRequestOutcome::Error {
-                                                code: JSONRPC_SERVER_ERROR,
-                                                message: format!(
-                                                    "server request handler panicked: {method}"
-                                                ),
-                                                data: None,
-                                            },
-                                        }
-                                    }
-                                };
-
-                                if matches!(outcome, ServerRequestOutcome::MethodNotFound) {
-                                    if let Some(result) =
-                                        try_handle_built_in_request(&method, roots.as_ref())
-                                    {
-                                        outcome = ServerRequestOutcome::Ok(result);
-                                    }
-                                }
-
-                                match outcome {
-                                    ServerRequestOutcome::Ok(result) => {
-                                        let _ = req.respond_ok(result).await;
-                                    }
-                                    ServerRequestOutcome::Error { code, message, data } => {
-                                        let _ = req.respond_error(code, message, data).await;
-                                    }
-                                    ServerRequestOutcome::MethodNotFound => {
-                                        let _ = req
-                                            .respond_error(
-                                                JSONRPC_METHOD_NOT_FOUND,
-                                                format!("method not found: {}", method.as_str()),
-                                                None,
-                                            )
-                                            .await;
-                                    }
-                                }
-                            });
-                        }
-                        Some(outcome) = in_flight.join_next(), if !in_flight.is_empty() => {
-                            match outcome {
-                                Ok(()) => {}
-                                Err(err) if err.is_panic() => return,
-                                Err(_) => {}
-                            }
-                        }
-                        else => break,
-                    }
-                }
-
-                while let Some(outcome) = in_flight.join_next().await {
-                    match outcome {
-                        Ok(()) => {}
-                        Err(err) if err.is_panic() => return,
-                        Err(_) => {}
-                    }
-                }
-            }));
-        }
-
-        if let Some(mut notifications_rx) = client.take_notifications() {
-            let handler = self.server_notification_handler.clone();
-            let server_name = server_name.clone();
-            let handler_timeout_counts = handler_timeout_counts.clone();
-            tasks.push(tokio::spawn(async move {
-                let mut in_flight = tokio::task::JoinSet::new();
-
-                loop {
-                    tokio::select! {
-                        Some(note) = notifications_rx.recv(), if in_flight.len() < handler_concurrency => {
-                            let handler = handler.clone();
-                            let server_name = server_name.clone();
-                            let handler_timeout_counts = handler_timeout_counts.clone();
-                            in_flight.spawn(async move {
-                                let ctx = ServerNotificationContext {
-                                    server_name: server_name.clone(),
-                                    method: note.method,
-                                    params: note.params,
-                                };
-
-                                match (handler_timeout, ctx) {
-                                    (Some(timeout), ctx) => {
-                                        let handler_fut = std::panic::AssertUnwindSafe(handler(ctx))
-                                            .catch_unwind();
-                                        match tokio::time::timeout(timeout, handler_fut).await {
-                                            Ok(Ok(())) | Ok(Err(_)) => {}
-                                            Err(_) => {
-                                                let mut counts = handler_timeout_counts
-                                                    .lock()
-                                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                                                *counts.entry(server_name).or_insert(0) += 1;
-                                            }
-                                        }
-                                    }
-                                    (None, ctx) => {
-                                        let handler_fut = std::panic::AssertUnwindSafe(handler(ctx))
-                                            .catch_unwind();
-                                        let _ = handler_fut.await;
-                                    }
-                                };
-                            });
-                        }
-                        Some(outcome) = in_flight.join_next(), if !in_flight.is_empty() => {
-                            match outcome {
-                                Ok(()) => {}
-                                Err(err) if err.is_panic() => return,
-                                Err(_) => {}
-                            }
-                        }
-                        else => break,
-                    }
-                }
-
-                while let Some(outcome) = in_flight.join_next().await {
-                    match outcome {
-                        Ok(()) => {}
-                        Err(err) if err.is_panic() => return,
-                        Err(_) => {}
-                    }
-                }
-            }));
-        }
-
-        tasks
     }
 
     pub async fn get_or_connect(
@@ -1919,16 +1692,6 @@ fn ensure_roots_capability(capabilities: &mut Value) {
         _ => {
             map.insert("roots".to_string(), Value::Object(serde_json::Map::new()));
         }
-    }
-}
-
-fn try_handle_built_in_request(method: &str, roots: Option<&Arc<Vec<Root>>>) -> Option<Value> {
-    match method {
-        "roots/list" => {
-            let roots = roots?;
-            Some(serde_json::json!({ "roots": roots.as_ref() }))
-        }
-        _ => None,
     }
 }
 
