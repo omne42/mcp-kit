@@ -8,6 +8,7 @@ use serde::Serialize;
 pub struct ServerName(Box<str>);
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ServerNameError {
     #[error("server name must not be empty")]
     Empty,

@@ -835,7 +835,7 @@ impl Manager {
 
         let handler_tasks = self.attach_client_handlers(server_name.clone(), &mut client);
         let handler_tasks_guard = HandlerTasksGuard::new(handler_tasks);
-        let init_result = self.initialize(server_name.as_str(), &client).await?;
+        let init_result = self.initialize(&server_name, &client).await?;
         let handler_tasks = handler_tasks_guard.disarm();
 
         self.init_results.insert(server_name.clone(), init_result);
@@ -1087,12 +1087,11 @@ impl Manager {
     /// `Session::wait_with_timeout` (or converting into a `Connection` and calling `wait*`) to
     /// ensure any associated stdio child process is reaped.
     pub fn take_session(&mut self, server_name: &str) -> Option<Session> {
-        let Some(connection) = self.conns.remove(server_name) else {
+        let Some((server_name, connection)) = self.conns.remove_entry(server_name) else {
             self.init_results.remove(server_name);
             return None;
         };
-        let initialize_result = self.init_results.remove(server_name)?;
-        let server_name = ServerName::parse(server_name).ok()?;
+        let initialize_result = self.init_results.remove(&server_name)?;
         Some(Session::new(
             server_name,
             connection,
@@ -1592,7 +1591,7 @@ impl Manager {
 
     async fn initialize(
         &mut self,
-        server_name: &str,
+        server_name: &ServerName,
         client: &mcp_jsonrpc::Client,
     ) -> anyhow::Result<Value> {
         if self.protocol_version.trim().is_empty() {
@@ -1616,9 +1615,12 @@ impl Manager {
             tokio::time::timeout(timeout, client.request("initialize", initialize_params)).await;
         let result = outcome
             .with_context(|| {
-                format!("mcp initialize timed out after {timeout:?} (server={server_name})")
+                format!(
+                    "mcp initialize timed out after {timeout:?} (server={})",
+                    server_name.as_str()
+                )
             })?
-            .with_context(|| format!("mcp initialize failed (server={server_name})"))?;
+            .with_context(|| format!("mcp initialize failed (server={})", server_name.as_str()))?;
 
         if let Some(server_protocol_version) =
             result.get("protocolVersion").and_then(|v| v.as_str())
@@ -1627,17 +1629,15 @@ impl Manager {
                 match self.protocol_version_check {
                     ProtocolVersionCheck::Strict => {
                         anyhow::bail!(
-                            "mcp initialize protocolVersion mismatch (server={server_name}): client={}, server={}",
+                            "mcp initialize protocolVersion mismatch (server={}): client={}, server={}",
+                            server_name.as_str(),
                             self.protocol_version,
                             server_protocol_version
                         );
                     }
                     ProtocolVersionCheck::Warn => {
-                        let server_name_key = ServerName::parse(server_name).map_err(|_| {
-                            anyhow::anyhow!("invalid mcp server name: {server_name}")
-                        })?;
                         let mismatch = ProtocolVersionMismatch {
-                            server_name: server_name_key,
+                            server_name: server_name.clone(),
                             client_protocol_version: self.protocol_version.clone(),
                             server_protocol_version: server_protocol_version.to_string(),
                         };
@@ -1645,7 +1645,7 @@ impl Manager {
                         if let Some(existing) = self
                             .protocol_version_mismatches
                             .iter_mut()
-                            .find(|m| m.server_name.as_str() == server_name)
+                            .find(|m| m.server_name == *server_name)
                         {
                             *existing = mismatch;
                         } else {
@@ -1659,13 +1659,18 @@ impl Manager {
 
         Self::notify_raw(
             timeout,
-            server_name,
+            server_name.as_str(),
             client,
             "notifications/initialized",
             None,
         )
         .await
-        .with_context(|| format!("mcp initialized notification failed (server={server_name})"))?;
+        .with_context(|| {
+            format!(
+                "mcp initialized notification failed (server={})",
+                server_name.as_str()
+            )
+        })?;
         Ok(result)
     }
 

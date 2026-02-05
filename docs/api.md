@@ -19,6 +19,7 @@
 
 ### 连接与会话
 
+- `ServerName`：server 名称的新类型（用于 `Config` 的 `servers` key、`Manager` 的连接缓存 key、以及 `ProtocolVersionMismatch.server_name` 等）。大多数 API 仍接受 `&str` 查询；只有在你手动构造/持有会话（例如 `Session::new`）时需要显式构造 `ServerName`。
 - `Manager`：多 server 连接缓存 + initialize + 便捷请求
   - `from_config` / `new`
   - `connect` / `get_or_connect`
