@@ -111,7 +111,6 @@ mcpctl --trust --yes-trust request <server> <method> --params-json '{"k":"v"}'
 # 不完全信任时，也可显式放开部分出站策略（仅影响 streamable_http）
 mcpctl --allow-host example.com list-tools <server>
 mcpctl --allow-private-ip --allow-http list-tools <server>
-mcpctl --dns-check --allow-host example.com list-tools <server>
 ```
 
 > 提示：默认不安装到 PATH，可用 `cargo run -p mcp-kit --features cli --bin mcpctl -- ...`。

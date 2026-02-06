@@ -85,21 +85,21 @@
 
 ### refusing to connect hostname that resolves to non-global ip in untrusted mode
 
-原因：默认启用了 `dns_check`（或显式传了 CLI `--dns-check`），并且该 hostname 解析到了非公网 IP。
+原因：默认启用了 `dns_check`（CLI 默认行为，`--dns-check` 仅为兼容保留参数），并且该 hostname 解析到了非公网 IP。
 
 解决（任选其一）：
 
-- 关闭 `dns_check`（或不传 `--dns-check`）
+- 关闭 `dns_check`（CLI 使用 `--no-dns-check`）
 - CLI：加 `--allow-private-ip`（允许私网/loopback）
 - 或使用 `--trust --yes-trust`（Trusted mode）
 
 ### refusing to connect hostname with failed/timed out dns lookup in untrusted mode
 
-原因：默认启用了 `dns_check`（或显式传了 CLI `--dns-check`），但 DNS 解析失败或超时；默认策略是 fail-closed（直接拒绝连接）。
+原因：默认启用了 `dns_check`（CLI 默认行为，`--dns-check` 仅为兼容保留参数），但 DNS 解析失败或超时；默认策略是 fail-closed（直接拒绝连接）。
 
 解决（任选其一）：
 
-- 关闭 `dns_check`（或不传 `--dns-check`）
+- 关闭 `dns_check`（CLI 使用 `--no-dns-check`）
 - CLI：调大 DNS timeout（`--dns-timeout-ms 5000`）
 - CLI：如确实需要，可用 `--dns-fail-open` 忽略 DNS 失败/超时（风险更高）
 - 修复本机 DNS（例如 VPN / 企业网 split-horizon / 网络策略导致的解析失败）

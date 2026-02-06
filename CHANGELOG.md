@@ -12,6 +12,7 @@
 ### Changed
 - `mcp-kit`（BREAKING）：`UntrustedStreamableHttpPolicy` 默认 `dns_check` 从 `false` 改为 `true`（默认开启 hostname DNS 解析校验并 fail-closed）；`mcpctl` 的 DNS 相关参数语义同步调整：`--no-dns-check` 显式关闭默认校验，`--dns-timeout-ms`/`--dns-fail-open` 不再要求显式传 `--dns-check`。
 - `mcp-kit`：`mcpctl --dns-check` 明确标注为兼容性保留参数（默认已开启 DNS 校验）；同时收紧默认 DNS 回归测试断言，强制命中 `resolves to non-global ip` 分支，避免被 `localhost` 早期拒绝路径误通过。
+- Docs：统一 `mcpctl` DNS 参数文案，明确 `--dns-check` 为兼容保留参数；需要关闭 DNS 校验时应使用 `--no-dns-check`，并去除 README 中重复的 `mcpctl --allow-host` 示例。
 - `mcp-kit`（BREAKING）：引入 `ServerName` 新类型，并将其用于 `Config/Manager` 的 server key；`Session::new(...)` 现在要求传入 `ServerName`（避免把任意 `String` 当作已校验的 server 名称）。
 - `mcp-kit`：重构内部模块边界：`config` 拆分为 `file_format/model/load`（并抽出 `load::fs`），`manager` 抽出 `placeholders/streamable_http_validation/handlers`，并将大型 `tests` 外置，降低单文件复杂度与后续维护成本。
 - `mcp-kit`（BREAKING）：`ServerConfig` 现在按 transport 分层为 enum（`Stdio/Unix/StreamableHttp`），减少“非法字段组合”；部分仅对特定 transport 有意义的 setter 现在返回 `Result`（fail-fast）。

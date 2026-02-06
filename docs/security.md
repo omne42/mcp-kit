@@ -74,7 +74,7 @@ CLI 对应：
 
 通过 `UntrustedStreamableHttpPolicy` 收紧/放开“远程连接”规则（只影响 `streamable_http`）：
 
-- CLI：`--allow-http` / `--allow-localhost` / `--allow-private-ip` / `--allow-host <host>` / `--dns-check`
+- CLI：`--allow-http` / `--allow-localhost` / `--allow-private-ip` / `--allow-host <host>` / `--no-dns-check`
 - 代码：`Manager::with_untrusted_streamable_http_policy(...)`
 
 建议用法：

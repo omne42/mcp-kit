@@ -625,13 +625,13 @@ cargo run -p mcp-kit --features cli --bin mcpctl -- --help
 - `--allow-http`：Untrusted 下允许连接 `http://`（默认只允许 https）
 - `--allow-localhost`：Untrusted 下允许连接 `localhost/*.localhost/*.local/*.localdomain`，以及**单标签 host**（不含 `.` 的 host，如 `https://example/...`；常见于本地/企业网搜索域解析）
 - `--allow-private-ip`：Untrusted 下允许连接非公网 IP 字面量
-- `--dns-check`：Untrusted 下对 hostnames 做 DNS 校验（解析到非公网 IP 会拒绝；除非同时允许 `--allow-private-ip`）
-- `--no-dns-check`：当设置了 `--allow-host` 时，显式关闭默认启用的 DNS 校验（更不安全）
-- `--dns-timeout-ms <ms>`：DNS lookup 超时（仅在 `--dns-check` 开启时生效；默认 2000）
-- `--dns-fail-open`：DNS lookup 失败/超时时不拦截（fail-open；仅在 `--dns-check` 开启时生效；默认 fail-closed）
-- `--allow-host <host>`：Untrusted 下设置 host allowlist（可重复；默认会启用 DNS 校验）
+- `--dns-check`：兼容性保留参数。Untrusted 下默认已开启 hostname DNS 校验（解析到非公网 IP 会拒绝；除非同时允许 `--allow-private-ip`）
+- `--no-dns-check`：显式关闭默认启用的 DNS 校验（更不安全）
+- `--dns-timeout-ms <ms>`：DNS lookup 超时（仅在 DNS 校验开启时生效；默认 2000）
+- `--dns-fail-open`：DNS lookup 失败/超时时不拦截（fail-open；仅在 DNS 校验开启时生效；默认 fail-closed）
+- `--allow-host <host>`：Untrusted 下设置 host allowlist（可重复；默认 DNS 校验已开启）
 
-> `--allow-*` / `--dns-check` 只影响 `transport=streamable_http`，不会放开 stdio/unix（它们需要 `--trust --yes-trust`）。
+> `--allow-*` / `--dns-check` / `--no-dns-check` 只影响 `transport=streamable_http`，不会放开 stdio/unix（它们需要 `--trust --yes-trust`）。
 >
 > 注意：`--allow-host` allowlist **不会**覆盖上述 `localhost/localdomain/单标签 host` 的拦截；如需允许这些 host，请显式 `--allow-localhost` 或直接 `--trust --yes-trust`。
 
@@ -964,7 +964,7 @@ CLI 对应：
 
 通过 `UntrustedStreamableHttpPolicy` 收紧/放开“远程连接”规则（只影响 `streamable_http`）：
 
-- CLI：`--allow-http` / `--allow-localhost` / `--allow-private-ip` / `--allow-host <host>` / `--dns-check`
+- CLI：`--allow-http` / `--allow-localhost` / `--allow-private-ip` / `--allow-host <host>` / `--no-dns-check`
 - 代码：`Manager::with_untrusted_streamable_http_policy(...)`
 
 建议用法：
@@ -2097,21 +2097,21 @@ v1 不做。上层可以通过 drop/重建 `Manager` 或 `Session` 实现重连�
 
 ### refusing to connect hostname that resolves to non-global ip in untrusted mode
 
-原因：默认启用了 `dns_check`（或显式传了 CLI `--dns-check`），并且该 hostname 解析到了非公网 IP。
+原因：默认启用了 `dns_check`（CLI 默认行为，`--dns-check` 仅为兼容保留参数），并且该 hostname 解析到了非公网 IP。
 
 解决（任选其一）：
 
-- 关闭 `dns_check`（或不传 `--dns-check`）
+- 关闭 `dns_check`（CLI 使用 `--no-dns-check`）
 - CLI：加 `--allow-private-ip`（允许私网/loopback）
 - 或使用 `--trust --yes-trust`（Trusted mode）
 
 ### refusing to connect hostname with failed/timed out dns lookup in untrusted mode
 
-原因：默认启用了 `dns_check`（或显式传了 CLI `--dns-check`），但 DNS 解析失败或超时；默认策略是 fail-closed（直接拒绝连接）。
+原因：默认启用了 `dns_check`（CLI 默认行为，`--dns-check` 仅为兼容保留参数），但 DNS 解析失败或超时；默认策略是 fail-closed（直接拒绝连接）。
 
 解决（任选其一）：
 
-- 关闭 `dns_check`（或不传 `--dns-check`）
+- 关闭 `dns_check`（CLI 使用 `--no-dns-check`）
 - CLI：调大 DNS timeout（`--dns-timeout-ms 5000`）
 - CLI：如确实需要，可用 `--dns-fail-open` 忽略 DNS 失败/超时（风险更高）
 - 修复本机 DNS（例如 VPN / 企业网 split-horizon / 网络策略导致的解析失败）
