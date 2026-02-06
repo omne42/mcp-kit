@@ -40,4 +40,18 @@ mod cli_tests {
                 .not(),
             );
     }
+
+    #[test]
+    fn dns_check_flag_prints_compatibility_note() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut cmd = cargo_bin_cmd!("mcpctl");
+        cmd.arg("--root")
+            .arg(dir.path())
+            .arg("--dns-check")
+            .arg("list-servers");
+        cmd.assert().success().stderr(predicate::str::contains(
+            "NOTE: --dns-check is already the default in untrusted mode; the flag is kept for compatibility.",
+        ));
+    }
 }

@@ -73,9 +73,9 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     allow_private_ip: bool,
 
-    /// Explicitly enable DNS checks for streamable_http hostnames in untrusted mode.
+    /// Enable DNS checks for streamable_http hostnames in untrusted mode.
     ///
-    /// DNS checks are enabled by default. This flag is mainly useful for readability in scripts.
+    /// Deprecated compatibility flag: DNS checks are already enabled by default.
     ///
     /// When enabled, hostnames that resolve to non-global IPs are rejected unless
     /// `--allow-private-ip` is also set.
@@ -183,6 +183,12 @@ async fn main() -> anyhow::Result<()> {
     let config = mcp_kit::Config::load(&root, cli.config.clone()).await?;
 
     let effective_dns_check = !cli.no_dns_check;
+
+    if !cli.trust && cli.dns_check {
+        eprintln!(
+            "NOTE: --dns-check is already the default in untrusted mode; the flag is kept for compatibility."
+        );
+    }
 
     if cli.trust {
         eprintln!("WARNING: --trust disables the default safety restrictions.");
