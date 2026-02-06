@@ -555,7 +555,7 @@ stdout_log 的旋转文件命名/保留策略见 [`日志与观测`](logging.md)
 
 安全（默认 Untrusted）：
 
-- 允许连接远程 `https` 且 host 看起来是公网域名的 `url`（默认拒绝 `localhost/*.localhost/*.local/*.localdomain`、**单标签 host**、以及私网/loopback IP 字面量）
+- 允许连接远程 `https` 且 host 看起来是公网域名的 `url`（默认拒绝 `localhost/*.localhost/*.local/*.localdomain`、**单标签 host**、私网/loopback IP 字面量，以及 DNS 解析到非公网 IP 的 hostname）
 - 拒绝发送敏感 header：`Authorization/Cookie/Proxy-Authorization`
 - 拒绝读取 `bearer_token_env_var` / `env_http_headers`（env secrets）
 
@@ -928,7 +928,7 @@ CLI 对应：
 - `require_https = true`：只允许 `https://`
 - `allow_localhost = false`：拒绝 `localhost` / `*.localhost` / `*.local` / `*.localdomain`，以及**单标签 host**（不含 `.` 的 host，如 `https://example/...`；常见于本地/企业网搜索域解析）
 - `allow_private_ips = false`：拒绝 loopback/link-local/private 等非公网 IP 字面量（包括 IPv4-mapped IPv6，以及 NAT64 well-known prefix / 6to4 中嵌入的 IPv4）
-- `dns_check = false`：默认不做 DNS 解析检查（可选开启；见下文）
+- `dns_check = true`：默认做 DNS 解析检查（若解析到非公网 IP 则拒绝）
 - `dns_timeout = 2s`：DNS lookup 超时（仅在 `dns_check=true` 时生效）
 - `dns_fail_open = false`：DNS lookup 失败/超时时默认拒绝连接（fail-closed；可选 fail-open）
 - `allowed_hosts = []`：默认不做 host allowlist；一旦配置 allowlist，则只允许 allowlist 命中的 host/子域名
@@ -986,16 +986,16 @@ CLI 对应：
 
 ## 重要注意点（限制与最佳实践）
 
-### IP 校验只覆盖“IP 字面量”
+### IP 校验与 DNS 校验
 
-Untrusted 下对 `127.0.0.1`、`10.0.0.0/8` 等 **IP 字面量** 会做拒绝/允许判断；但对域名（如 `example.com`）不会在此处做 DNS 解析与再校验。
+Untrusted 下会对 `127.0.0.1`、`10.0.0.0/8` 等 **IP 字面量** 做拒绝/允许判断；并且默认会对域名做 DNS 解析校验。
 
-因此如果你想降低 SSRF 风险，强烈建议：
+因此如果你想进一步降低 SSRF 风险，强烈建议：
 
 - 使用 `allowed_hosts`（或 CLI `--allow-host`）做 host allowlist
 - 避免在 Untrusted 下开启 `--allow-localhost/--allow-private-ip/--allow-http`
 
-如果你希望降低“域名解析到私网”的 SSRF 风险，可以开启 `dns_check`（或 CLI `--dns-check`）。开启后：
+`dns_check` 默认开启（CLI 可用 `--no-dns-check` 关闭，不推荐）。开启后：
 
 - hostnames 会做一次 DNS 解析（带超时；默认 2s，CLI 可用 `--dns-timeout-ms` 调整）；若解析到非公网 IP，会被拒绝（除非同时允许 `allow_private_ips` 或使用 `Trusted`）
 - DNS 解析失败/超时默认会直接拒绝连接（fail-closed）；如确实需要（例如企业网/VPN 的 DNS 不稳定），可以显式开启 `dns_fail_open` / `--dns-fail-open` 让 DNS 失败时不拦截（风险更高）
@@ -1003,7 +1003,7 @@ Untrusted 下对 `127.0.0.1`、`10.0.0.0/8` 等 **IP 字面量** 会做拒绝/�
 
 建议：
 
-- 当你需要在 Untrusted 下允许某些 hostname（例如使用 `allowed_hosts`/`--allow-host` 放开出站）且希望额外降低“域名解析到私网”的 SSRF 风险时，可以考虑开启 `dns_check`。
+- 当你需要在 Untrusted 下允许某些 hostname（例如使用 `allowed_hosts`/`--allow-host` 放开出站）时，建议保持默认 DNS 校验开启。
 - `dns_check` 只在 `allow_private_ips=false` 时有效；如果你同时开启了 `allow_private_ips`/`--allow-private-ip`，则解析到私网不再会被拒绝。
 - `dns_check` 会增加一次 DNS 解析（带超时），并可能在 VPN/企业网 split-horizon DNS 环境中产生误判；同时也无法彻底防住 rebinding。
 
@@ -2097,7 +2097,7 @@ v1 不做。上层可以通过 drop/重建 `Manager` 或 `Session` 实现重连�
 
 ### refusing to connect hostname that resolves to non-global ip in untrusted mode
 
-原因：启用了 `dns_check`（或 CLI `--dns-check`），并且该 hostname 解析到了非公网 IP。
+原因：默认启用了 `dns_check`（或显式传了 CLI `--dns-check`），并且该 hostname 解析到了非公网 IP。
 
 解决（任选其一）：
 
@@ -2107,7 +2107,7 @@ v1 不做。上层可以通过 drop/重建 `Manager` 或 `Session` 实现重连�
 
 ### refusing to connect hostname with failed/timed out dns lookup in untrusted mode
 
-原因：启用了 `dns_check`（或 CLI `--dns-check`），但 DNS 解析失败或超时；默认策略是 fail-closed（直接拒绝连接）。
+原因：默认启用了 `dns_check`（或显式传了 CLI `--dns-check`），但 DNS 解析失败或超时；默认策略是 fail-closed（直接拒绝连接）。
 
 解决（任选其一）：
 

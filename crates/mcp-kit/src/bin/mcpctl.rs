@@ -73,7 +73,9 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     allow_private_ip: bool,
 
-    /// Enable DNS checks for streamable_http hostnames in untrusted mode.
+    /// Explicitly enable DNS checks for streamable_http hostnames in untrusted mode.
+    ///
+    /// DNS checks are enabled by default. This flag is mainly useful for readability in scripts.
     ///
     /// When enabled, hostnames that resolve to non-global IPs are rejected unless
     /// `--allow-private-ip` is also set.
@@ -83,22 +85,22 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     dns_check: bool,
 
-    /// Disable DNS checks even when `--allow-host` is set.
+    /// Disable DNS checks (enabled by default).
     ///
     /// WARNING: This can re-introduce SSRF risk via hostnames resolving to non-global IPs.
     #[arg(long, default_value_t = false, conflicts_with = "dns_check")]
     no_dns_check: bool,
 
-    /// DNS lookup timeout in milliseconds (only used with `--dns-check`).
+    /// DNS lookup timeout in milliseconds.
     ///
     /// Default: 2000.
-    #[arg(long, requires = "dns_check")]
+    #[arg(long, conflicts_with = "no_dns_check")]
     dns_timeout_ms: Option<u64>,
 
-    /// When set, ignore DNS lookup failures/timeouts (fail-open; only used with `--dns-check`).
+    /// When set, ignore DNS lookup failures/timeouts (fail-open).
     ///
     /// Default: fail-closed.
-    #[arg(long, requires = "dns_check", default_value_t = false)]
+    #[arg(long, default_value_t = false, conflicts_with = "no_dns_check")]
     dns_fail_open: bool,
 
     /// Allowlist hostnames for streamable_http in untrusted mode (repeatable).
@@ -180,14 +182,7 @@ async fn main() -> anyhow::Result<()> {
 
     let config = mcp_kit::Config::load(&root, cli.config.clone()).await?;
 
-    let auto_dns_check =
-        !cli.trust && !cli.allow_host.is_empty() && !cli.dns_check && !cli.no_dns_check;
-    if auto_dns_check {
-        eprintln!("NOTE: enabling DNS checks because --allow-host was provided.");
-        eprintln!("  - Pass --no-dns-check to opt out (less safe).");
-        eprintln!("  - Pass --dns-check explicitly to customize timeout/fail-open settings.");
-    }
-    let effective_dns_check = cli.dns_check || auto_dns_check;
+    let effective_dns_check = !cli.no_dns_check;
 
     if cli.trust {
         eprintln!("WARNING: --trust disables the default safety restrictions.");
@@ -218,9 +213,14 @@ async fn main() -> anyhow::Result<()> {
         if has_stdout_log {
             eprintln!("WARNING: stdout_log writes protocol data to disk and may contain secrets.");
         }
-    } else if !cli.allow_host.is_empty() && cli.no_dns_check && !cli.allow_private_ip {
-        eprintln!("WARNING: --allow-host is set with DNS checks disabled (--no-dns-check).");
-        eprintln!("This can re-introduce SSRF risk via hostnames resolving to non-global IPs.");
+    } else if cli.no_dns_check {
+        eprintln!("WARNING: DNS checks are disabled (--no-dns-check).");
+        if !cli.allow_private_ip {
+            eprintln!("This can re-introduce SSRF risk via hostnames resolving to non-global IPs.");
+        }
+        if !cli.allow_host.is_empty() && !cli.allow_private_ip {
+            eprintln!("WARNING: --allow-host is set with DNS checks disabled (--no-dns-check).");
+        }
     }
 
     let timeout = Duration::from_millis(cli.timeout_ms);
@@ -235,7 +235,7 @@ async fn main() -> anyhow::Result<()> {
         && (cli.allow_http
             || cli.allow_localhost
             || cli.allow_private_ip
-            || effective_dns_check
+            || cli.no_dns_check
             || cli.dns_timeout_ms.is_some()
             || cli.dns_fail_open
             || !cli.allow_host.is_empty())
@@ -249,6 +249,9 @@ async fn main() -> anyhow::Result<()> {
         }
         if cli.allow_private_ip {
             policy.allow_private_ips = true;
+        }
+        if cli.no_dns_check {
+            policy.dns_check = false;
         }
         if effective_dns_check {
             policy.dns_check = true;

@@ -22,7 +22,7 @@ pub struct UntrustedStreamableHttpPolicy {
     /// When true, perform a DNS resolution check and reject hostnames that resolve to non-global
     /// IPs (unless `allow_private_ips` is also enabled).
     ///
-    /// Default: false (no DNS lookups).
+    /// Default: true (DNS lookups enabled, fail-closed by default).
     pub dns_check: bool,
     /// DNS lookup timeout (default: 2s). Only used when `dns_check` is enabled.
     pub dns_timeout: Duration,
@@ -41,7 +41,7 @@ impl Default for UntrustedStreamableHttpPolicy {
             require_https: true,
             allow_localhost: false,
             allow_private_ips: false,
-            dns_check: false,
+            dns_check: true,
             dns_timeout: Duration::from_secs(2),
             dns_fail_open: false,
             allowed_hosts: Vec::new(),

@@ -967,6 +967,25 @@ async fn untrusted_manager_refuses_streamable_http_url_credentials() {
 }
 
 #[tokio::test]
+async fn untrusted_manager_refuses_streamable_http_hostname_resolving_to_non_global_ip_by_default()
+{
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
+    assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
+
+    let server_cfg = ServerConfig::streamable_http("https://localhost/mcp").unwrap();
+
+    let err = manager
+        .connect("srv", &server_cfg, Path::new("."))
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("resolves to non-global ip")
+            || err.to_string().contains("localhost"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
 async fn untrusted_manager_refuses_streamable_http_sensitive_headers() {
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
     assert_eq!(manager.trust_mode(), TrustMode::Untrusted);

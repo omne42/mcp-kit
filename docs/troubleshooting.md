@@ -85,7 +85,7 @@
 
 ### refusing to connect hostname that resolves to non-global ip in untrusted mode
 
-原因：启用了 `dns_check`（或 CLI `--dns-check`），并且该 hostname 解析到了非公网 IP。
+原因：默认启用了 `dns_check`（或显式传了 CLI `--dns-check`），并且该 hostname 解析到了非公网 IP。
 
 解决（任选其一）：
 
@@ -95,7 +95,7 @@
 
 ### refusing to connect hostname with failed/timed out dns lookup in untrusted mode
 
-原因：启用了 `dns_check`（或 CLI `--dns-check`），但 DNS 解析失败或超时；默认策略是 fail-closed（直接拒绝连接）。
+原因：默认启用了 `dns_check`（或显式传了 CLI `--dns-check`），但 DNS 解析失败或超时；默认策略是 fail-closed（直接拒绝连接）。
 
 解决（任选其一）：
 

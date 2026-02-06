@@ -18,21 +18,6 @@ mod cli_tests {
     }
 
     #[test]
-    fn allow_host_enables_dns_check_by_default() {
-        let dir = tempfile::tempdir().unwrap();
-
-        let mut cmd = cargo_bin_cmd!("mcpctl");
-        cmd.arg("--root")
-            .arg(dir.path())
-            .arg("--allow-host")
-            .arg("example.com")
-            .arg("list-servers");
-        cmd.assert().success().stderr(predicate::str::contains(
-            "NOTE: enabling DNS checks because --allow-host was provided.",
-        ));
-    }
-
-    #[test]
     fn allow_host_with_no_dns_check_warns() {
         let dir = tempfile::tempdir().unwrap();
 

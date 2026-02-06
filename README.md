@@ -50,7 +50,7 @@ cargo run -p mcp-kit --features cli --bin mcpctl -- --help
 - `servers.<name>.inherit_env`：仅 `transport=stdio` 生效；是否继承当前进程环境变量（默认 `false`）。当为 `false` 时会清空子进程 env（仅保留少量基础变量并再注入 `servers.<name>.env`），用于降低宿主 secrets 泄露风险。
 - `transport=unix`：连接已有 unix socket MCP server（见 `servers.<name>.unix_path`）。
 - `transport=streamable_http`：连接远程 MCP server（见 `servers.<name>.url` 或 `servers.<name>.sse_url + servers.<name>.http_url`），可选 `servers.<name>.bearer_token_env_var` / `servers.<name>.http_headers` / `servers.<name>.env_http_headers`。
-- 安全默认（`TrustMode::Untrusted`）：仅允许连接 `https` 且非 localhost/私网的 `streamable_http`；并拒绝发送 `Authorization`/`Cookie` 等敏感 header、拒绝读取 env secrets；需要显式信任（`--trust --yes-trust` / `TrustMode::Trusted`）才放开。
+- 安全默认（`TrustMode::Untrusted`）：仅允许连接 `https` 且非 localhost/私网的 `streamable_http`（含 DNS 解析校验，默认 fail-closed）；并拒绝发送 `Authorization`/`Cookie` 等敏感 header、拒绝读取 env secrets；需要显式信任（`--trust --yes-trust` / `TrustMode::Trusted`）才放开。
 
 ## 作为库使用
 
