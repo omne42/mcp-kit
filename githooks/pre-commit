@@ -65,6 +65,11 @@ if [[ -x "$repo_root/scripts/gen-llms-txt.sh" ]]; then
   (cd "$repo_root" && ./scripts/gen-llms-txt.sh --check) >/dev/null
 fi
 
+if [[ -x "$repo_root/scripts/check-rust-hygiene.sh" ]]; then
+  echo "pre-commit: checking staged rust hygiene" >&2
+  (cd "$repo_root" && ./scripts/check-rust-hygiene.sh)
+fi
+
 if [[ "$needs_mdbook" -eq 1 && -f "$repo_root/docs/book.toml" ]]; then
   if command -v mdbook >/dev/null 2>&1; then
     echo "pre-commit: building docs (mdbook)" >&2
@@ -89,5 +94,6 @@ echo "pre-commit: running Rust gates in $workspace_root" >&2
 (
   cd "$workspace_root"
   cargo fmt --all -- --check
-  cargo check --workspace --all-targets
+  cargo clippy --workspace --all-targets --all-features -- -D warnings -W clippy::redundant_clone -W clippy::needless_pass_by_ref_mut
+  cargo test --workspace --all-features --quiet
 )

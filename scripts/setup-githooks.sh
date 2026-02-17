@@ -11,6 +11,7 @@ git -C "$repo_root" config core.hooksPath githooks
 
 chmod +x "$repo_root/githooks/pre-commit" "$repo_root/githooks/commit-msg"
 chmod +x "$repo_root/scripts/gen-llms-txt.sh"
+chmod +x "$repo_root/scripts/check-rust-hygiene.sh"
 
 echo "Configured git hooks: core.hooksPath=githooks" >&2
 echo "Hooks enabled: pre-commit, commit-msg" >&2

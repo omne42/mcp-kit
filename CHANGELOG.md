@@ -152,8 +152,10 @@
 - `mcpctl list-servers` 默认不输出 stdio `argv` 明文（避免把 token/key 打到终端/CI）；可用 `--show-argv` 显式开启。
 - `dns_check`（`--dns-check`）支持可配置 DNS timeout，并默认 fail-closed（失败直接拒绝连接）；如确实需要可显式开启 fail-open，并同步更新文档说明。
 - `mcp-jsonrpc`：移除未使用的 `anyhow` 依赖，保持依赖最小化。
+- githooks: `pre-commit` 新增 staged Rust hygiene 检查（库代码新增行中默认拒绝 `unwrap/expect` 与 `let _ =`），并将 Rust gate 升级为 `clippy -D warnings` + `cargo test --workspace --all-features`。
 
 ### Fixed
+- `mcp-kit`：`Session::notify` 超时后不再无上限等待 close 路径；现在会以有界 best-effort close 收尾，并保留结构化 `WaitTimeout` 错误，避免调用方在“已超时”后再次卡住。
 - `mcp-jsonrpc`：streamable_http POST bridge 在收到无效 JSON 时会 fail-fast 关闭连接，避免 pending request 无限悬挂。
 - `mcp-kit`：Windows 下读取 `mcp.json` 时 open 会设置 `FILE_FLAG_OPEN_REPARSE_POINT`（best-effort），降低 TOCTOU symlink replacement 风险。
 - `mcp-kit`：server→client request handler panic 现在会桥接为 `-32000` error 并继续处理后续消息，避免后台任务 panic 导致连接被动断开。

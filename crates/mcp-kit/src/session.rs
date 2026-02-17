@@ -70,8 +70,12 @@ impl Session {
     /// Note: this can hang indefinitely if the child does not exit. Prefer
     /// `Session::wait_with_timeout` if you need an upper bound.
     pub async fn wait(self) -> anyhow::Result<Option<std::process::ExitStatus>> {
-        let server_name = self.server_name.clone();
-        self.connection
+        let Session {
+            server_name,
+            connection,
+            ..
+        } = self;
+        connection
             .wait()
             .await
             .with_context(|| format!("close session (server={server_name})"))
@@ -83,8 +87,12 @@ impl Session {
         timeout: Duration,
         on_timeout: mcp_jsonrpc::WaitOnTimeout,
     ) -> anyhow::Result<Option<std::process::ExitStatus>> {
-        let server_name = self.server_name.clone();
-        self.connection
+        let Session {
+            server_name,
+            connection,
+            ..
+        } = self;
+        connection
             .wait_with_timeout(timeout, on_timeout)
             .await
             .with_context(|| format!("close session (server={server_name})"))
@@ -96,40 +104,61 @@ impl Session {
     }
 
     pub async fn request(&self, method: &str, params: Option<Value>) -> anyhow::Result<Value> {
-        let outcome = tokio::time::timeout(
-            self.request_timeout,
-            self.connection.client().request_optional(method, params),
-        )
-        .await;
-        outcome
-            .with_context(|| {
-                format!(
-                    "mcp request timed out after {:?}: {method} (server={})",
-                    self.request_timeout, self.server_name
-                )
-            })?
-            .with_context(|| format!("mcp request failed: {method} (server={})", self.server_name))
+        let result = self
+            .connection
+            .client()
+            .request_optional_with_timeout(method, params, self.request_timeout)
+            .await;
+        match result {
+            Ok(value) => Ok(value),
+            Err(err) if err.is_wait_timeout() => Err(anyhow::Error::new(err).context(format!(
+                "mcp request timed out after {:?}: {method} (server={})",
+                self.request_timeout, self.server_name
+            ))),
+            Err(err) => Err(anyhow::Error::new(err).context(format!(
+                "mcp request failed: {method} (server={})",
+                self.server_name
+            ))),
+        }
     }
 
     pub async fn notify(&self, method: &str, params: Option<Value>) -> anyhow::Result<()> {
+        let timeout = self.request_timeout;
         let outcome = tokio::time::timeout(
             self.request_timeout,
             self.connection.client().notify(method, params),
         )
         .await;
-        outcome
-            .with_context(|| {
-                format!(
-                    "mcp notification timed out after {:?}: {method} (server={})",
-                    self.request_timeout, self.server_name
-                )
-            })?
-            .with_context(|| {
+        match outcome {
+            Ok(result) => result.with_context(|| {
                 format!(
                     "mcp notification failed: {method} (server={})",
                     self.server_name
                 )
-            })
+            }),
+            Err(_) => {
+                const CLOSE_ON_TIMEOUT_BUDGET: Duration = Duration::from_millis(50);
+                let timeout_message = format!(
+                    "mcp notification timed out after {timeout:?}: {method} (server={})",
+                    self.server_name
+                );
+
+                // Best-effort close: bound close-path wait to avoid hanging the timeout caller.
+                if tokio::time::timeout(
+                    CLOSE_ON_TIMEOUT_BUDGET,
+                    self.connection.client().close(timeout_message.clone()),
+                )
+                .await
+                .is_err()
+                {
+                    // Close-path timeout is non-fatal here; the caller already gets timeout.
+                }
+                Err(anyhow::Error::new(mcp_jsonrpc::Error::protocol(
+                    mcp_jsonrpc::ProtocolErrorKind::WaitTimeout,
+                    timeout_message,
+                )))
+            }
+        }
     }
 
     pub async fn request_typed<R: McpRequest>(
