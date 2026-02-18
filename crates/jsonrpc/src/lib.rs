@@ -149,6 +149,8 @@ pub struct Limits {
     pub notifications_capacity: usize,
     /// Maximum buffered server->client requests.
     pub requests_capacity: usize,
+    /// Maximum in-flight client->server requests waiting for responses.
+    pub max_pending_requests: usize,
 }
 
 impl Default for Limits {
@@ -158,6 +160,7 @@ impl Default for Limits {
             max_message_bytes: 16 * 1024 * 1024,
             notifications_capacity: 256,
             requests_capacity: 64,
+            max_pending_requests: 64,
         }
     }
 }
@@ -237,6 +240,16 @@ pub enum Id {
 }
 
 type PendingRequests = Arc<Mutex<HashMap<Id, oneshot::Sender<Result<Value, Error>>>>>;
+type CancelledRequestIds = Arc<Mutex<CancelledRequestIdsState>>;
+
+const CANCELLED_REQUEST_IDS_MAX: usize = 1024;
+
+#[derive(Debug, Default)]
+struct CancelledRequestIdsState {
+    order: VecDeque<(u64, Id)>,
+    latest: HashMap<Id, u64>,
+    next_generation: u64,
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ClientStats {
@@ -285,13 +298,17 @@ impl DiagnosticsState {
         let mut guard = self
             .invalid_json_samples
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         if guard.len() >= self.invalid_json_sample_lines {
             return;
         }
 
-        let mut s = String::from_utf8_lossy(line).into_owned();
+        let sample_len = line.len().min(self.invalid_json_sample_max_bytes);
+        let mut s = String::from_utf8_lossy(&line[..sample_len]).into_owned();
+        if sample_len < line.len() {
+            s.push('…');
+        }
         s = truncate_string(s, self.invalid_json_sample_max_bytes);
         guard.push_back(s);
     }
@@ -299,7 +316,7 @@ impl DiagnosticsState {
     fn invalid_json_samples(&self) -> Vec<String> {
         self.invalid_json_samples
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .cloned()
             .collect()
@@ -311,6 +328,8 @@ pub struct ClientHandle {
     write: Arc<tokio::sync::Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
     next_id: Arc<AtomicI64>,
     pending: PendingRequests,
+    max_pending_requests: usize,
+    cancelled_request_ids: CancelledRequestIds,
     stats: Arc<ClientStatsInner>,
     diagnostics: Option<Arc<DiagnosticsState>>,
     closed: Arc<AtomicBool>,
@@ -354,6 +373,25 @@ impl ClientHandle {
 
     fn record_stdout_log_write_error(&self, err: &std::io::Error) {
         let _ = self.stdout_log_write_error.set(err.to_string());
+    }
+
+    pub async fn close(&self, reason: impl Into<String>) {
+        self.close_with_reason(reason).await;
+    }
+
+    fn schedule_close_once(&self, reason: String) {
+        if self
+            .closed
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        let _ = self.close_reason.set(reason.clone()); // pre-commit: allow-let-underscore
+        let handle = self.clone();
+        tokio::spawn(async move {
+            handle.close_with_reason(reason).await;
+        });
     }
 
     fn check_closed(&self) -> Result<(), Error> {
@@ -416,15 +454,47 @@ impl ClientHandle {
         method: &str,
         params: Option<Value>,
     ) -> Result<Value, Error> {
+        self.request_optional_inner(method, params, None).await
+    }
+
+    pub async fn request_optional_with_timeout(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout: Duration,
+    ) -> Result<Value, Error> {
+        self.request_optional_inner(method, params, Some(timeout))
+            .await
+    }
+
+    async fn request_optional_inner(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout: Option<Duration>,
+    ) -> Result<Value, Error> {
         self.check_closed()?;
         let id = Id::Integer(self.next_id.fetch_add(1, Ordering::Relaxed));
 
         let (tx, rx) = oneshot::channel::<Result<Value, Error>>();
         {
             let mut pending = lock_pending(&self.pending);
+            if pending.len() >= self.max_pending_requests {
+                return Err(Error::protocol(
+                    ProtocolErrorKind::Other,
+                    format!(
+                        "too many pending requests (limit: {})",
+                        self.max_pending_requests
+                    ),
+                ));
+            }
             pending.insert(id.clone(), tx);
         }
-        let mut guard = PendingRequestGuard::new(self.pending.clone(), id.clone());
+        let mut guard = PendingRequestGuard::new(
+            self.pending.clone(),
+            self.cancelled_request_ids.clone(),
+            id.clone(),
+        );
 
         let mut req = serde_json::json!({
             "jsonrpc": "2.0",
@@ -437,14 +507,49 @@ impl ClientHandle {
 
         let mut line = serde_json::to_string(&req)?;
         line.push('\n');
-        if let Err(err) = self.write_line(&line).await {
-            let mut pending = lock_pending(&self.pending);
-            pending.remove(&id);
-            guard.disarm();
-            return Err(err);
-        }
+        let recv_result = match timeout {
+            Some(timeout) => {
+                let deadline = tokio::time::Instant::now() + timeout;
+                match tokio::time::timeout_at(deadline, self.write_line(&line)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        let mut pending = lock_pending(&self.pending);
+                        pending.remove(&id);
+                        guard.disarm();
+                        return Err(err);
+                    }
+                    Err(_) => {
+                        let reason = format!("request timed out after {timeout:?} while writing");
+                        self.schedule_close_once(reason);
+                        return Err(Error::protocol(
+                            ProtocolErrorKind::WaitTimeout,
+                            format!("request timed out after {timeout:?}"),
+                        ));
+                    }
+                }
 
-        match rx.await {
+                match tokio::time::timeout_at(deadline, rx).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        return Err(Error::protocol(
+                            ProtocolErrorKind::WaitTimeout,
+                            format!("request timed out after {timeout:?}"),
+                        ));
+                    }
+                }
+            }
+            None => {
+                if let Err(err) = self.write_line(&line).await {
+                    let mut pending = lock_pending(&self.pending);
+                    pending.remove(&id);
+                    guard.disarm();
+                    return Err(err);
+                }
+                rx.await
+            }
+        };
+
+        match recv_result {
             Ok(result) => {
                 guard.disarm();
                 result
@@ -665,9 +770,12 @@ impl Client {
 
         let notify_cap = limits.notifications_capacity.max(1);
         let request_cap = limits.requests_capacity.max(1);
+        let max_pending_requests = limits.max_pending_requests.max(1);
         let (notify_tx, notify_rx) = mpsc::channel::<Notification>(notify_cap);
         let (request_tx, request_rx) = mpsc::channel::<IncomingRequest>(request_cap);
         let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
+        let cancelled_request_ids: CancelledRequestIds =
+            Arc::new(Mutex::new(CancelledRequestIdsState::default()));
         let stats = Arc::new(ClientStatsInner::default());
         let write = Arc::new(tokio::sync::Mutex::new(Box::new(write) as _));
         let diagnostics_state = DiagnosticsState::new(&diagnostics);
@@ -675,6 +783,8 @@ impl Client {
             write,
             next_id: Arc::new(AtomicI64::new(1)),
             pending: pending.clone(),
+            max_pending_requests,
+            cancelled_request_ids: cancelled_request_ids.clone(),
             stats: stats.clone(),
             diagnostics: diagnostics_state.clone(),
             closed: Arc::new(AtomicBool::new(false)),
@@ -690,6 +800,7 @@ impl Client {
             read,
             ReaderTaskContext {
                 pending,
+                cancelled_request_ids,
                 stats,
                 notify_tx,
                 request_tx,
@@ -715,8 +826,16 @@ impl Client {
         self.handle.clone()
     }
 
+    pub async fn close(&self, reason: impl Into<String>) {
+        self.task.abort();
+        for task in &self.transport_tasks {
+            task.abort();
+        }
+        self.handle.close(reason).await;
+    }
+
     pub fn child_id(&self) -> Option<u32> {
-        self.child.as_ref().and_then(|child| child.id())
+        self.child.as_ref().and_then(tokio::process::Child::id)
     }
 
     pub fn take_child(&mut self) -> Option<Child> {
@@ -745,6 +864,17 @@ impl Client {
         params: Option<Value>,
     ) -> Result<Value, Error> {
         self.handle.request_optional(method, params).await
+    }
+
+    pub async fn request_optional_with_timeout(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout: Duration,
+    ) -> Result<Value, Error> {
+        self.handle
+            .request_optional_with_timeout(method, params, timeout)
+            .await
     }
 
     /// Closes the client and (if present) waits for the underlying child process to exit.
@@ -782,17 +912,59 @@ impl Client {
         timeout: Duration,
         on_timeout: WaitOnTimeout,
     ) -> Result<Option<std::process::ExitStatus>, Error> {
+        let deadline = tokio::time::Instant::now() + timeout;
         self.task.abort();
         for task in self.transport_tasks.drain(..) {
             task.abort();
         }
-        self.handle.close_with_reason("client closed").await;
+        if tokio::time::timeout_at(deadline, self.handle.close_with_reason("client closed"))
+            .await
+            .is_err()
+        {
+            if let WaitOnTimeout::Kill { kill_timeout } = on_timeout
+                && let Some(child) = &mut self.child
+            {
+                let child_id = child.id();
+                if let Err(err) = child.start_kill() {
+                    return match child.try_wait() {
+                        Ok(Some(status)) => Ok(Some(status)),
+                        Ok(None) => Err(Error::protocol(
+                            ProtocolErrorKind::WaitTimeout,
+                            format!(
+                                "wait timed out after {timeout:?} while closing client; failed to kill child (id={child_id:?}): {err}"
+                            ),
+                        )),
+                        Err(try_wait_err) => Err(Error::protocol(
+                            ProtocolErrorKind::WaitTimeout,
+                            format!(
+                                "wait timed out after {timeout:?} while closing client; failed to kill child (id={child_id:?}): {err}; try_wait failed: {try_wait_err}"
+                            ),
+                        )),
+                    };
+                }
+                return match tokio::time::timeout(kill_timeout, child.wait()).await {
+                    Ok(status) => Ok(Some(status?)),
+                    Err(_) => Err(Error::protocol(
+                        ProtocolErrorKind::WaitTimeout,
+                        format!(
+                            "wait timed out after {timeout:?} while closing client; killed child (id={child_id:?}) but it did not exit within {kill_timeout:?}"
+                        ),
+                    )),
+                };
+            }
+
+            return Err(Error::protocol(
+                ProtocolErrorKind::WaitTimeout,
+                format!("wait timed out after {timeout:?} while closing client"),
+            ));
+        }
 
         let Some(child) = &mut self.child else {
             return Ok(None);
         };
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
 
-        match tokio::time::timeout(timeout, child.wait()).await {
+        match tokio::time::timeout(remaining, child.wait()).await {
             Ok(status) => Ok(Some(status?)),
             Err(_) => match on_timeout {
                 WaitOnTimeout::ReturnError => Err(Error::protocol(
@@ -846,6 +1018,10 @@ impl Drop for Client {
         for task in self.transport_tasks.drain(..) {
             task.abort();
         }
+        // Best-effort: eagerly drop the underlying writer even if cloned handles remain.
+        if let Ok(mut write) = self.handle.write.try_lock() {
+            drop(std::mem::replace(&mut *write, Box::new(tokio::io::sink())));
+        }
         let err = Error::protocol(ProtocolErrorKind::Closed, "client closed");
         drain_pending(&self.handle.pending, &err);
     }
@@ -853,14 +1029,16 @@ impl Drop for Client {
 
 struct PendingRequestGuard {
     pending: PendingRequests,
+    cancelled_request_ids: CancelledRequestIds,
     id: Id,
     armed: bool,
 }
 
 impl PendingRequestGuard {
-    fn new(pending: PendingRequests, id: Id) -> Self {
+    fn new(pending: PendingRequests, cancelled_request_ids: CancelledRequestIds, id: Id) -> Self {
         Self {
             pending,
+            cancelled_request_ids,
             id,
             armed: true,
         }
@@ -878,6 +1056,8 @@ impl Drop for PendingRequestGuard {
         }
         let mut pending = lock_pending(&self.pending);
         pending.remove(&self.id);
+        drop(pending);
+        remember_cancelled_request_id(&self.cancelled_request_ids, &self.id);
     }
 }
 
@@ -914,6 +1094,7 @@ impl IncomingRequest {
 
 struct ReaderTaskContext {
     pending: PendingRequests,
+    cancelled_request_ids: CancelledRequestIds,
     stats: Arc<ClientStatsInner>,
     notify_tx: mpsc::Sender<Notification>,
     request_tx: mpsc::Sender<IncomingRequest>,
@@ -931,6 +1112,7 @@ where
     tokio::spawn(async move {
         let ReaderTaskContext {
             pending,
+            cancelled_request_ids,
             stats,
             notify_tx,
             request_tx,
@@ -975,6 +1157,7 @@ where
                     handle_incoming_value(
                         value,
                         &pending,
+                        &cancelled_request_ids,
                         &stats,
                         &notify_tx,
                         &request_tx,
@@ -1001,6 +1184,7 @@ where
 async fn handle_incoming_value(
     value: Value,
     pending: &PendingRequests,
+    cancelled_request_ids: &CancelledRequestIds,
     stats: &Arc<ClientStatsInner>,
     notify_tx: &mpsc::Sender<Notification>,
     request_tx: &mpsc::Sender<IncomingRequest>,
@@ -1084,7 +1268,7 @@ async fn handle_incoming_value(
                                     )
                                     .await;
                             }
-                        };
+                        }
                         continue;
                     }
 
@@ -1121,7 +1305,12 @@ async fn handle_incoming_value(
                     continue;
                 }
 
-                handle_response(pending, Value::Object(map));
+                if let Err(err) =
+                    handle_response(pending, cancelled_request_ids, Value::Object(map))
+                {
+                    responder.close_with_error(err.to_string(), err).await;
+                    return;
+                }
             }
             _ => {
                 // JSON-RPC messages must be objects or arrays.
@@ -1148,9 +1337,7 @@ async fn read_line_limited<R: tokio::io::AsyncBufRead + Unpin>(
         }
 
         let newline_pos = available.iter().position(|b| *b == b'\n');
-        let take = newline_pos
-            .map(|idx| idx.saturating_add(1))
-            .unwrap_or(available.len());
+        let take = newline_pos.map_or(available.len(), |idx| idx.saturating_add(1));
         if buf.len().saturating_add(take) > max_bytes {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -1187,12 +1374,64 @@ fn truncate_string(mut s: String, max_bytes: usize) -> String {
     s
 }
 
-fn lock_pending<'a>(
-    pending: &'a PendingRequests,
-) -> std::sync::MutexGuard<'a, HashMap<Id, oneshot::Sender<Result<Value, Error>>>> {
+fn lock_pending(
+    pending: &PendingRequests,
+) -> std::sync::MutexGuard<'_, HashMap<Id, oneshot::Sender<Result<Value, Error>>>> {
     pending
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn lock_cancelled_request_ids(
+    cancelled_request_ids: &CancelledRequestIds,
+) -> std::sync::MutexGuard<'_, CancelledRequestIdsState> {
+    cancelled_request_ids
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn remember_cancelled_request_id(cancelled_request_ids: &CancelledRequestIds, id: &Id) {
+    let mut guard = lock_cancelled_request_ids(cancelled_request_ids);
+    if guard.latest.contains_key(id) {
+        return;
+    }
+    while guard.order.len() >= CANCELLED_REQUEST_IDS_MAX {
+        let Some((generation, evicted)) = guard.order.pop_front() else {
+            break;
+        };
+        if guard.latest.get(&evicted).copied() == Some(generation) {
+            guard.latest.remove(&evicted);
+        }
+    }
+    let generation = guard.next_generation;
+    guard.next_generation = guard.next_generation.wrapping_add(1);
+    guard.order.push_back((generation, id.clone()));
+    guard.latest.insert(id.clone(), generation);
+}
+
+fn take_cancelled_request_id(cancelled_request_ids: &CancelledRequestIds, id: &Id) -> bool {
+    let mut guard = lock_cancelled_request_ids(cancelled_request_ids);
+    if !guard.latest.contains_key(id) {
+        return false;
+    }
+    guard.latest.remove(id);
+    true
+}
+
+fn take_pending_type_mismatch_sender(
+    pending: &PendingRequests,
+    id: &Id,
+) -> Option<oneshot::Sender<Result<Value, Error>>> {
+    let candidate = match id {
+        Id::Integer(value) => Id::String(value.to_string()),
+        Id::String(value) => match value.parse::<i64>() {
+            Ok(parsed) if parsed.to_string() == *value => Id::Integer(parsed),
+            _ => return None,
+        },
+    };
+
+    let mut pending = lock_pending(pending);
+    pending.remove(&candidate)
 }
 
 fn drain_pending(pending: &PendingRequests, err: &Error) {
@@ -1236,16 +1475,29 @@ fn parse_id(value: &Value) -> Option<Id> {
     }
 }
 
-fn handle_response(pending: &PendingRequests, value: Value) {
+fn handle_response(
+    pending: &PendingRequests,
+    cancelled_request_ids: &CancelledRequestIds,
+    value: Value,
+) -> Result<(), Error> {
     let Value::Object(map) = value else {
-        return;
+        return Err(Error::protocol(
+            ProtocolErrorKind::InvalidMessage,
+            "invalid response: not an object",
+        ));
     };
 
     let Some(id_value) = map.get("id") else {
-        return;
+        return Err(Error::protocol(
+            ProtocolErrorKind::InvalidMessage,
+            "invalid response: missing id",
+        ));
     };
     let Some(id) = parse_id(id_value) else {
-        return;
+        return Err(Error::protocol(
+            ProtocolErrorKind::InvalidMessage,
+            "invalid response: invalid id",
+        ));
     };
 
     let tx = {
@@ -1253,7 +1505,19 @@ fn handle_response(pending: &PendingRequests, value: Value) {
         pending.remove(&id)
     };
     let Some(tx) = tx else {
-        return;
+        if take_cancelled_request_id(cancelled_request_ids, &id) {
+            return Ok(());
+        }
+        if let Some(tx) = take_pending_type_mismatch_sender(pending, &id) {
+            let _ = /* pre-commit: allow-let-underscore */ tx.send(Err(Error::protocol(
+                ProtocolErrorKind::InvalidMessage,
+                "invalid response: response id type mismatch",
+            )));
+            return Ok(());
+        }
+        // Unknown response ids are treated as stale/stray and ignored to avoid tearing down
+        // otherwise healthy connections when late responses arrive after local timeout/cancel.
+        return Ok(());
     };
 
     if map.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
@@ -1261,7 +1525,7 @@ fn handle_response(pending: &PendingRequests, value: Value) {
             ProtocolErrorKind::InvalidMessage,
             "invalid response jsonrpc version",
         )));
-        return;
+        return Ok(());
     }
 
     let has_error = map.contains_key("error");
@@ -1273,29 +1537,29 @@ fn handle_response(pending: &PendingRequests, value: Value) {
                     ProtocolErrorKind::InvalidMessage,
                     "invalid error response",
                 )));
-                return;
+                return Ok(());
             };
             let Value::Object(error) = error else {
                 let _ = tx.send(Err(Error::protocol(
                     ProtocolErrorKind::InvalidMessage,
                     "invalid error response",
                 )));
-                return;
+                return Ok(());
             };
 
-            let Some(code) = error.get("code").and_then(|v| v.as_i64()) else {
+            let Some(code) = error.get("code").and_then(Value::as_i64) else {
                 let _ = tx.send(Err(Error::protocol(
                     ProtocolErrorKind::InvalidMessage,
                     "invalid error response",
                 )));
-                return;
+                return Ok(());
             };
             let Some(message) = error.get("message").and_then(|v| v.as_str()) else {
                 let _ = tx.send(Err(Error::protocol(
                     ProtocolErrorKind::InvalidMessage,
                     "invalid error response",
                 )));
-                return;
+                return Ok(());
             };
             let data = error.get("data").cloned();
             let _ = tx.send(Err(Error::Rpc {
@@ -1303,6 +1567,7 @@ fn handle_response(pending: &PendingRequests, value: Value) {
                 message: message.to_string(),
                 data,
             }));
+            Ok(())
         }
         (false, true) => {
             let Some(result) = map.get("result").cloned() else {
@@ -1310,15 +1575,17 @@ fn handle_response(pending: &PendingRequests, value: Value) {
                     ProtocolErrorKind::InvalidMessage,
                     "invalid result response",
                 )));
-                return;
+                return Ok(());
             };
             let _ = tx.send(Ok(result));
+            Ok(())
         }
         _ => {
             let _ = tx.send(Err(Error::protocol(
                 ProtocolErrorKind::InvalidMessage,
                 "invalid response: must include exactly one of result/error",
             )));
+            Ok(())
         }
     }
 }
@@ -1387,5 +1654,104 @@ mod stats_tests {
         })
         .await
         .unwrap();
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod wait_timeout_tests {
+    use super::*;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
+
+    struct BlockingWrite {
+        entered: Arc<AtomicBool>,
+    }
+
+    impl tokio::io::AsyncWrite for BlockingWrite {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.entered.store(true, Ordering::Relaxed);
+            Poll::Pending
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            self.entered.store(true, Ordering::Relaxed);
+            Poll::Pending
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            self.entered.store(true, Ordering::Relaxed);
+            Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_with_timeout_kill_still_kills_when_close_stage_times_out() {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg("exec sleep 10");
+
+        let mut client = match Client::spawn_command(cmd).await {
+            Ok(client) => client,
+            Err(err) => panic!("spawn client: {err}"),
+        };
+        let entered = Arc::new(AtomicBool::new(false));
+        {
+            let mut write = client.handle.write.lock().await;
+            *write = Box::new(BlockingWrite {
+                entered: entered.clone(),
+            });
+        }
+
+        let wait_result = client
+            .wait_with_timeout(
+                Duration::from_millis(20),
+                WaitOnTimeout::Kill {
+                    kill_timeout: Duration::from_secs(1),
+                },
+            )
+            .await;
+        let child_status = match wait_result {
+            Ok(status) => status,
+            Err(err) => panic!("wait should kill child even when close stage times out: {err}"),
+        };
+        let status = match child_status {
+            Some(status) => status,
+            None => panic!("child exit status"),
+        };
+
+        assert!(entered.load(Ordering::Relaxed));
+        assert!(!status.success());
+    }
+}
+
+#[cfg(test)]
+mod cancelled_request_ids_tests {
+    use super::*;
+
+    #[test]
+    fn cancelled_request_id_eviction_preserves_latest_reinserted_id() {
+        let cancelled_request_ids = Arc::new(Mutex::new(CancelledRequestIdsState::default()));
+        let id = Id::Integer(1);
+
+        remember_cancelled_request_id(&cancelled_request_ids, &id);
+        assert!(take_cancelled_request_id(&cancelled_request_ids, &id));
+
+        // Reinsert the same id, then push enough unique ids to evict stale queue entries.
+        remember_cancelled_request_id(&cancelled_request_ids, &id);
+        for value in 2..=(CANCELLED_REQUEST_IDS_MAX as i64) {
+            remember_cancelled_request_id(&cancelled_request_ids, &Id::Integer(value));
+        }
+
+        assert!(take_cancelled_request_id(&cancelled_request_ids, &id));
+        assert!(!take_cancelled_request_id(&cancelled_request_ids, &id));
+
+        let guard = lock_cancelled_request_ids(&cancelled_request_ids);
+        assert!(guard.order.len() <= CANCELLED_REQUEST_IDS_MAX);
     }
 }

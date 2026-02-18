@@ -46,6 +46,12 @@ fn is_json_content_type(content_type: &str) -> bool {
     ends_with_ignore_ascii_case(subty, "+json")
 }
 
+fn normalized_max_message_bytes(max_message_bytes: usize) -> usize {
+    max_message_bytes.max(1)
+}
+
+const SSE_EVENT_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
+
 impl Client {
     pub async fn connect_streamable_http(url: &str) -> Result<Self, Error> {
         Self::connect_streamable_http_with_options(
@@ -79,8 +85,11 @@ impl Client {
             let mut req = http_client
                 .get(sse_url)
                 .header(reqwest::header::ACCEPT, "text/event-stream");
-            if let Some(session) = session_id.lock().await.clone() {
-                req = req.header("mcp-session-id", session);
+            {
+                let guard = session_id.lock().await;
+                if let Some(session) = guard.as_deref() {
+                    req = req.header("mcp-session-id", session);
+                }
             }
 
             let send = req.send();
@@ -136,14 +145,25 @@ impl Client {
 
             if let Some(value) = resp.headers().get("mcp-session-id") {
                 if let Ok(value) = value.to_str() {
-                    *session_id.lock().await = Some(value.to_string());
+                    let mut guard = session_id.lock().await;
+                    if guard.as_deref() != Some(value) {
+                        *guard = Some(value.to_owned());
+                    }
                 }
             }
 
             Ok(Some(resp))
         }
 
-        let limits = options.limits.clone();
+        if options.limits.max_message_bytes == 0 {
+            return Err(Error::protocol(
+                ProtocolErrorKind::InvalidInput,
+                "limits.max_message_bytes must be >= 1",
+            ));
+        }
+
+        let mut limits = options.limits.clone();
+        limits.max_message_bytes = normalized_max_message_bytes(limits.max_message_bytes);
         let max_message_bytes = limits.max_message_bytes;
         let connect_timeout = http_options.connect_timeout;
         let request_timeout = http_options.request_timeout;
@@ -253,7 +273,7 @@ impl Client {
                             .await;
                             return;
                         }
-                        Ok(None) => continue,
+                        Ok(None) => {}
                         Err(err) => {
                             handle_sse
                                 .close_with_reason(format!(
@@ -308,18 +328,20 @@ impl HttpPostBridge {
             request_timeout,
             error_body_preview_bytes,
         } = self;
+        let max_message_bytes = normalized_max_message_bytes(limits.max_message_bytes);
 
         let mut reader = tokio::io::BufReader::new(bridge_read);
         loop {
-            let line = match crate::read_line_limited(&mut reader, limits.max_message_bytes).await {
+            let line = match crate::read_line_limited(&mut reader, max_message_bytes).await {
                 Ok(Some(line)) => line,
                 Ok(None) => return,
                 Err(err) => {
-                    handle
-                        .close_with_reason(format!("streamable http POST bridge failed: {err}"))
-                        .await;
-                    let mut writer = writer.lock().await;
-                    let _ = writer.shutdown().await;
+                    close_post_bridge(
+                        &writer,
+                        &handle,
+                        format!("streamable http POST bridge failed: {err}"),
+                    )
+                    .await;
                     return;
                 }
             };
@@ -331,13 +353,14 @@ impl HttpPostBridge {
             let parsed: Value = match serde_json::from_slice(&line) {
                 Ok(v) => v,
                 Err(err) => {
-                    handle
-                        .close_with_reason(format!(
+                    close_post_bridge(
+                        &writer,
+                        &handle,
+                        format!(
                             "streamable http POST bridge received invalid JSON from client: {err}"
-                        ))
-                        .await;
-                    let mut writer = writer.lock().await;
-                    let _ = writer.shutdown().await;
+                        ),
+                    )
+                    .await;
                     return;
                 }
             };
@@ -352,8 +375,11 @@ impl HttpPostBridge {
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .body(line);
 
-            if let Some(session) = session_id.lock().await.clone() {
-                req = req.header("mcp-session-id", session);
+            {
+                let guard = session_id.lock().await;
+                if let Some(session) = guard.as_deref() {
+                    req = req.header("mcp-session-id", session);
+                }
             }
 
             let send = req.send();
@@ -361,15 +387,17 @@ impl HttpPostBridge {
                 Some(timeout) => match tokio::time::timeout(timeout, send).await {
                     Ok(resp) => resp,
                     Err(_) => {
-                        if let Some(id) = id {
-                            let _ = write_error_response(
-                                &writer,
-                                id,
-                                HTTP_TRANSPORT_ERROR,
-                                "http request timed out".to_string(),
-                                None,
-                            )
-                            .await;
+                        if !emit_post_bridge_error(
+                            &writer,
+                            &handle,
+                            id,
+                            HTTP_TRANSPORT_ERROR,
+                            "http request timed out".to_string(),
+                            None,
+                        )
+                        .await
+                        {
+                            return;
                         }
                         continue;
                     }
@@ -379,15 +407,17 @@ impl HttpPostBridge {
             let resp = match resp {
                 Ok(resp) => resp,
                 Err(err) => {
-                    if let Some(id) = id {
-                        let _ = write_error_response(
-                            &writer,
-                            id,
-                            HTTP_TRANSPORT_ERROR,
-                            format!("http request failed: {}", redact_reqwest_error(&err)),
-                            None,
-                        )
-                        .await;
+                    if !emit_post_bridge_error(
+                        &writer,
+                        &handle,
+                        id,
+                        HTTP_TRANSPORT_ERROR,
+                        format!("http request failed: {}", redact_reqwest_error(&err)),
+                        None,
+                    )
+                    .await
+                    {
+                        return;
                     }
                     continue;
                 }
@@ -398,7 +428,9 @@ impl HttpPostBridge {
                 if let Ok(value) = value.to_str() {
                     let mut guard = session_id.lock().await;
                     let was_none = guard.is_none();
-                    *guard = Some(value.to_string());
+                    if guard.as_deref() != Some(value) {
+                        *guard = Some(value.to_owned());
+                    }
                     if was_none {
                         should_wake_sse = true;
                     }
@@ -422,12 +454,7 @@ impl HttpPostBridge {
                         .map(|chunk| chunk.map_err(io::Error::other));
                     let reader = StreamReader::new(stream);
                     let mut reader = tokio::io::BufReader::new(reader);
-                    let pump = sse_pump_to_writer(
-                        &mut reader,
-                        writer.clone(),
-                        limits.max_message_bytes,
-                        true,
-                    );
+                    let pump = sse_pump_to_writer(&mut reader, &writer, max_message_bytes, true);
                     let pump = match request_timeout {
                         Some(timeout) => match tokio::time::timeout(timeout, pump).await {
                             Ok(result) => result,
@@ -438,74 +465,161 @@ impl HttpPostBridge {
                         },
                         None => pump.await,
                     };
-                    if pump.is_err() {
-                        if let Some(id) = id {
-                            let _ = write_error_response(
-                                &writer,
-                                id,
-                                HTTP_TRANSPORT_ERROR,
-                                "http response stream failed".to_string(),
-                                None,
-                            )
-                            .await;
-                        }
+                    if pump.is_err()
+                        && !emit_post_bridge_error(
+                            &writer,
+                            &handle,
+                            id,
+                            HTTP_TRANSPORT_ERROR,
+                            "http response stream failed".to_string(),
+                            None,
+                        )
+                        .await
+                    {
+                        return;
                     }
                     continue;
                 }
 
                 if !is_json_content_type(content_type) {
-                    if let Some(id) = id {
-                        let _ = write_error_response(
-                            &writer,
-                            id,
-                            HTTP_TRANSPORT_ERROR,
-                            "unexpected content-type for json response".to_string(),
-                            Some(serde_json::json!({ "content_type": content_type })),
-                        )
-                        .await;
+                    if !emit_post_bridge_error(
+                        &writer,
+                        &handle,
+                        id,
+                        HTTP_TRANSPORT_ERROR,
+                        "unexpected content-type for json response".to_string(),
+                        Some(serde_json::json!({ "content_type": content_type })),
+                    )
+                    .await
+                    {
+                        return;
                     }
                     continue;
                 }
 
                 let body = match request_timeout {
-                    Some(timeout) => match tokio::time::timeout(timeout, resp.bytes()).await {
-                        Ok(body) => body,
-                        Err(_) => {
-                            if let Some(id) = id {
-                                let _ = write_error_response(
+                    Some(timeout) => {
+                        match tokio::time::timeout(
+                            timeout,
+                            read_response_body_limited(resp, max_message_bytes),
+                        )
+                        .await
+                        {
+                            Ok(body) => body,
+                            Err(_) => {
+                                if !emit_post_bridge_error(
                                     &writer,
+                                    &handle,
                                     id,
                                     HTTP_TRANSPORT_ERROR,
                                     "http response timed out".to_string(),
                                     None,
                                 )
-                                .await;
+                                .await
+                                {
+                                    return;
+                                }
+                                continue;
                             }
-                            continue;
                         }
-                    },
-                    None => resp.bytes().await,
+                    }
+                    None => read_response_body_limited(resp, max_message_bytes).await,
                 };
                 match body {
+                    Err(ReadBodyError::TooLarge { actual_bytes }) => {
+                        if !emit_post_bridge_error(
+                            &writer,
+                            &handle,
+                            id,
+                            HTTP_TRANSPORT_ERROR,
+                            "http response too large".to_string(),
+                            Some(serde_json::json!({
+                                "max_bytes": max_message_bytes,
+                                "actual_bytes": actual_bytes,
+                            })),
+                        )
+                        .await
+                        {
+                            return;
+                        }
+                        continue;
+                    }
+                    Err(ReadBodyError::Http(err)) => {
+                        if !emit_post_bridge_error(
+                            &writer,
+                            &handle,
+                            id,
+                            HTTP_TRANSPORT_ERROR,
+                            format!("http response read failed: {}", redact_reqwest_error(&err)),
+                            None,
+                        )
+                        .await
+                        {
+                            return;
+                        }
+                    }
                     Ok(body) if !body.is_empty() => {
-                        if body.len() > limits.max_message_bytes {
-                            if let Some(id) = id {
-                                let _ = write_error_response(
+                        // The JSON-RPC bridge is line-delimited. Re-serialize only when the HTTP
+                        // body contains literal newlines so pretty-printed JSON remains valid.
+                        if body.iter().any(|b| *b == b'\n' || *b == b'\r') {
+                            let parsed_json: Value = match serde_json::from_slice(&body) {
+                                Ok(json) => json,
+                                Err(_) => {
+                                    let data = if error_body_preview_bytes > 0 {
+                                        let body_preview =
+                                            String::from_utf8_lossy(&body).into_owned();
+                                        let preview =
+                                            truncate_string(body_preview, error_body_preview_bytes);
+                                        Some(serde_json::json!({ "body": preview }))
+                                    } else {
+                                        None
+                                    };
+                                    if !emit_post_bridge_error(
+                                        &writer,
+                                        &handle,
+                                        id,
+                                        HTTP_TRANSPORT_ERROR,
+                                        "http response is not valid json".to_string(),
+                                        data,
+                                    )
+                                    .await
+                                    {
+                                        return;
+                                    }
+                                    continue;
+                                }
+                            };
+                            let compact = match serde_json::to_vec(&parsed_json) {
+                                Ok(compact) => compact,
+                                Err(err) => {
+                                    if !emit_post_bridge_error(
+                                        &writer,
+                                        &handle,
+                                        id,
+                                        HTTP_TRANSPORT_ERROR,
+                                        format!("http response json re-serialize failed: {err}"),
+                                        None,
+                                    )
+                                    .await
+                                    {
+                                        return;
+                                    }
+                                    continue;
+                                }
+                            };
+                            if let Err(err) = write_json_line(&writer, &compact).await {
+                                close_post_bridge(
                                     &writer,
-                                    id,
-                                    HTTP_TRANSPORT_ERROR,
-                                    "http response too large".to_string(),
-                                    Some(serde_json::json!({
-                                        "max_bytes": limits.max_message_bytes,
-                                        "actual_bytes": body.len(),
-                                    })),
+                                    &handle,
+                                    format!(
+                                        "streamable http POST bridge failed writing response: {err}"
+                                    ),
                                 )
                                 .await;
+                                return;
                             }
-                            continue;
-                        }
-                        if serde_json::from_slice::<Value>(&body).is_err() {
-                            if let Some(id) = id {
+                        } else {
+                            if serde_json::from_slice::<serde::de::IgnoredAny>(&body).is_err() {
                                 let data = if error_body_preview_bytes > 0 {
                                     let body_preview = String::from_utf8_lossy(&body).into_owned();
                                     let preview =
@@ -514,31 +628,46 @@ impl HttpPostBridge {
                                 } else {
                                     None
                                 };
-                                let _ = write_error_response(
+                                if !emit_post_bridge_error(
                                     &writer,
+                                    &handle,
                                     id,
                                     HTTP_TRANSPORT_ERROR,
                                     "http response is not valid json".to_string(),
                                     data,
                                 )
-                                .await;
+                                .await
+                                {
+                                    return;
+                                }
+                                continue;
                             }
-                            continue;
-                        }
-                        let _ = write_json_line(&writer, &body).await;
-                    }
-                    Ok(body) if body.is_empty() => {
-                        if status != reqwest::StatusCode::ACCEPTED {
-                            if let Some(id) = id {
-                                let _ = write_error_response(
+                            if let Err(err) = write_json_line(&writer, &body).await {
+                                close_post_bridge(
                                     &writer,
-                                    id,
-                                    HTTP_TRANSPORT_ERROR,
-                                    "http response is empty".to_string(),
-                                    None,
+                                    &handle,
+                                    format!(
+                                        "streamable http POST bridge failed writing response: {err}"
+                                    ),
                                 )
                                 .await;
+                                return;
                             }
+                        }
+                    }
+                    Ok(body) if body.is_empty() => {
+                        if status != reqwest::StatusCode::ACCEPTED
+                            && !emit_post_bridge_error(
+                                &writer,
+                                &handle,
+                                id,
+                                HTTP_TRANSPORT_ERROR,
+                                "http response is empty".to_string(),
+                                None,
+                            )
+                            .await
+                        {
+                            return;
                         }
                     }
                     _ => {}
@@ -546,27 +675,109 @@ impl HttpPostBridge {
                 continue;
             }
 
-            if let Some(id) = id {
-                let body_text = if error_body_preview_bytes == 0 {
-                    None
-                } else {
-                    let read = read_response_body_preview_text(resp, error_body_preview_bytes);
-                    match request_timeout {
-                        Some(timeout) => tokio::time::timeout(timeout, read)
-                            .await
-                            .unwrap_or_default(),
-                        None => read.await,
+            let body_text = if error_body_preview_bytes == 0 {
+                let drain = drain_response_body(resp);
+                match request_timeout {
+                    Some(timeout) => {
+                        let _ = tokio::time::timeout(timeout, drain).await; // pre-commit: allow-let-underscore
                     }
-                };
-                let _ = write_error_response(
-                    &writer,
-                    id,
-                    HTTP_TRANSPORT_ERROR,
-                    format!("http error: {status}"),
-                    body_text.map(|body| serde_json::json!({ "body": body })),
-                )
-                .await;
+                    None => drain.await,
+                }
+                None
+            } else {
+                let read = read_response_body_preview_text(resp, error_body_preview_bytes);
+                match request_timeout {
+                    Some(timeout) => tokio::time::timeout(timeout, read)
+                        .await
+                        .unwrap_or_default(),
+                    None => read.await,
+                }
+            };
+            if !emit_post_bridge_error(
+                &writer,
+                &handle,
+                id,
+                HTTP_TRANSPORT_ERROR,
+                format!("http error: {status}"),
+                body_text.map(|body| serde_json::json!({ "body": body })),
+            )
+            .await
+            {
+                return;
             }
+        }
+    }
+}
+
+async fn close_post_bridge(
+    writer: &Arc<tokio::sync::Mutex<tokio::io::WriteHalf<tokio::io::DuplexStream>>>,
+    handle: &ClientHandle,
+    reason: impl Into<String>,
+) {
+    handle.close_with_reason(reason.into()).await;
+    let mut writer = writer.lock().await;
+    let _ = writer.shutdown().await; // pre-commit: allow-let-underscore
+}
+
+async fn emit_post_bridge_error(
+    writer: &Arc<tokio::sync::Mutex<tokio::io::WriteHalf<tokio::io::DuplexStream>>>,
+    handle: &ClientHandle,
+    id: Option<Value>,
+    code: i64,
+    message: String,
+    data: Option<Value>,
+) -> bool {
+    if let Some(id) = id {
+        if let Err(err) = write_error_response(writer, id, code, message, data).await {
+            close_post_bridge(
+                writer,
+                handle,
+                format!("streamable http POST bridge failed writing error response: {err}"),
+            )
+            .await;
+            return false;
+        }
+        return true;
+    }
+
+    close_post_bridge(
+        writer,
+        handle,
+        format!("streamable http notification failed: {message}"),
+    )
+    .await;
+    false
+}
+
+enum ReadBodyError {
+    Http(reqwest::Error),
+    TooLarge { actual_bytes: usize },
+}
+
+async fn read_response_body_limited(
+    resp: reqwest::Response,
+    max_message_bytes: usize,
+) -> Result<Vec<u8>, ReadBodyError> {
+    let mut out = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(ReadBodyError::Http)?;
+        let next_len = out.len().saturating_add(chunk.len());
+        if next_len > max_message_bytes {
+            return Err(ReadBodyError::TooLarge {
+                actual_bytes: next_len,
+            });
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
+async fn drain_response_body(resp: reqwest::Response) {
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        if chunk.is_err() {
+            break;
         }
     }
 }
@@ -637,7 +848,7 @@ async fn pump_sse(
         .map(|chunk| chunk.map_err(io::Error::other));
     let reader = StreamReader::new(stream);
     let mut reader = tokio::io::BufReader::new(reader);
-    let result = sse_pump_to_writer(&mut reader, writer.clone(), max_message_bytes, false).await;
+    let result = sse_pump_to_writer(&mut reader, &writer, max_message_bytes, false).await;
     match result {
         Ok(()) => {
             handle
@@ -656,7 +867,7 @@ async fn pump_sse(
 
 async fn sse_pump_to_writer<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
-    writer: Arc<tokio::sync::Mutex<tokio::io::WriteHalf<tokio::io::DuplexStream>>>,
+    writer: &Arc<tokio::sync::Mutex<tokio::io::WriteHalf<tokio::io::DuplexStream>>>,
     max_message_bytes: usize,
     stop_on_done: bool,
 ) -> Result<(), io::Error> {
@@ -675,14 +886,18 @@ async fn sse_pump_to_writer<R: tokio::io::AsyncBufRead + Unpin>(
             if stop_on_done && data == b"[DONE]" {
                 return Ok(());
             }
-            write_json_line(&writer, &data).await?;
+            write_json_line(writer, &data).await?;
             data.clear();
+            if data.capacity() > SSE_EVENT_BUFFER_RETAIN_BYTES {
+                let retain = SSE_EVENT_BUFFER_RETAIN_BYTES.min(max_message_bytes);
+                data = Vec::with_capacity(retain);
+            }
             continue;
         }
 
         if let Some(rest) = line.strip_prefix(b"data:") {
             let mut rest = rest;
-            while rest.first().is_some_and(|b| b.is_ascii_whitespace()) {
+            while rest.first().is_some_and(u8::is_ascii_whitespace) {
                 rest = &rest[1..];
             }
 
@@ -707,7 +922,6 @@ async fn write_json_line(
     let mut writer = writer.lock().await;
     writer.write_all(line).await?;
     writer.write_all(b"\n").await?;
-    writer.flush().await?;
     Ok(())
 }
 
@@ -741,7 +955,6 @@ async fn write_error_response(
 
     let mut writer = writer.lock().await;
     writer.write_all(&out).await?;
-    writer.flush().await?;
     Ok(())
 }
 
@@ -805,7 +1018,7 @@ mod tests {
         drop(read);
         let writer = Arc::new(tokio::sync::Mutex::new(write));
 
-        sse_pump_to_writer(&mut reader, writer.clone(), 1024, false)
+        sse_pump_to_writer(&mut reader, &writer, 1024, false)
             .await
             .unwrap();
         drop(writer);

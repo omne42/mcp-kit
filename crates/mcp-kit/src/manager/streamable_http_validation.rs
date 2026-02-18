@@ -211,10 +211,12 @@ pub(super) fn should_disconnect_after_jsonrpc_error(err: &anyhow::Error) -> bool
         cause
             .downcast_ref::<mcp_jsonrpc::Error>()
             .is_some_and(|err| {
-                matches!(
-                    err,
-                    mcp_jsonrpc::Error::Io(_) | mcp_jsonrpc::Error::Protocol(_)
-                )
+                matches!(err, mcp_jsonrpc::Error::Io(_))
+                    || matches!(
+                        err,
+                        mcp_jsonrpc::Error::Protocol(protocol_err)
+                            if protocol_err.kind != mcp_jsonrpc::ProtocolErrorKind::WaitTimeout
+                    )
             })
     })
 }
@@ -323,9 +325,7 @@ fn is_untrusted_non_global_ipv6(ip: Ipv6Addr) -> bool {
 fn normalize_ip(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V4(ip) => IpAddr::V4(ip),
-        IpAddr::V6(ip) => embedded_ipv4_from_ipv6(ip)
-            .map(IpAddr::V4)
-            .unwrap_or(IpAddr::V6(ip)),
+        IpAddr::V6(ip) => embedded_ipv4_from_ipv6(ip).map_or(IpAddr::V6(ip), IpAddr::V4),
     }
 }
 

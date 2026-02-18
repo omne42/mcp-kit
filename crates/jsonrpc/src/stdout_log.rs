@@ -110,14 +110,17 @@ impl LogState {
     }
 
     pub(crate) async fn write_line_bytes(&mut self, line: &[u8]) -> Result<(), std::io::Error> {
-        let mut buf = Vec::with_capacity(line.len().saturating_add(1));
-        buf.extend_from_slice(line);
+        self.write_bytes_with_rotation(line).await?;
         if !line.ends_with(b"\n") {
-            buf.push(b'\n');
+            self.write_bytes_with_rotation(b"\n").await?;
         }
 
+        Ok(())
+    }
+
+    async fn write_bytes_with_rotation(&mut self, bytes: &[u8]) -> Result<(), std::io::Error> {
         let mut offset = 0usize;
-        while offset < buf.len() {
+        while offset < bytes.len() {
             let remaining = self.max_bytes_per_part.saturating_sub(self.current_len);
             if remaining == 0 {
                 self.file.flush().await?;
@@ -130,13 +133,12 @@ impl LogState {
                 continue;
             }
 
-            let take = usize::try_from(remaining.min((buf.len() - offset) as u64))
-                .unwrap_or(buf.len() - offset);
-            self.file.write_all(&buf[offset..(offset + take)]).await?;
+            let take = usize::try_from(remaining.min((bytes.len() - offset) as u64))
+                .unwrap_or(bytes.len() - offset);
+            self.file.write_all(&bytes[offset..(offset + take)]).await?;
             self.current_len = self.current_len.saturating_add(take as u64);
             offset = offset.saturating_add(take);
         }
-
         Ok(())
     }
 }
@@ -196,7 +198,6 @@ async fn rotate_log_file(base_path: &Path, mut part: u32) -> Result<u32, std::io
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(part),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
                 part = part.saturating_add(1);
-                continue;
             }
             Err(err) => {
                 return Err(err);
@@ -345,5 +346,33 @@ mod tests {
             err.to_string()
                 .contains("stdout_log path contains symlink component")
         );
+    }
+
+    #[tokio::test]
+    async fn write_line_bytes_rotates_large_line_without_extra_newline()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let base = dir.path().join("server.stdout.log");
+
+        let mut state = LogState::new(StdoutLog {
+            path: base.clone(),
+            max_bytes_per_part: 4,
+            max_parts: None,
+        })
+        .await?;
+        state.write_line_bytes(b"abcdef").await?;
+        drop(state);
+
+        let mut parts = list_rotating_log_parts(&base).await?;
+        parts.sort_by_key(|(part, _)| *part);
+
+        let mut combined = Vec::new();
+        for (_part, path) in parts {
+            combined.extend_from_slice(&tokio::fs::read(path).await?);
+        }
+        combined.extend_from_slice(&tokio::fs::read(&base).await?);
+
+        assert_eq!(combined, b"abcdef\n");
+        Ok(())
     }
 }

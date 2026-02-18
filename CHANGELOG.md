@@ -42,6 +42,7 @@
 - `mcp-kit`：进一步收口 v1/external transport 字段互斥校验为共享 helper，降低规则漂移风险（行为不变）。
 - `mcp-kit`：补充 server→client handler 的 panic 隔离边界说明（行为不变）。
 - `mcp-kit`：整理 config loader：将重复的字段存在性判断缓存为局部变量，减少分支噪音（行为不变）。
+- `mcp-jsonrpc`：修复/稳定 `reader_eof_shuts_down_client_write_end` 单测，改为在 peer 全连接关闭后断言 client 进入 `Closed`，避免依赖平台相关的半关闭语义。
 
 ### Added
 - `mcp-kit`：`ServerName` 现在实现 `Deserialize`（`serde`），便于在配置/外部数据模型中直接使用。

@@ -1,3 +1,8 @@
+use std::io;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use mcp_jsonrpc::Id;
@@ -41,6 +46,158 @@ async fn wait_with_timeout_returns_ok_none_when_client_has_no_child() {
 }
 
 #[tokio::test]
+async fn wait_with_timeout_includes_close_stage_lock_wait() {
+    struct BlockingWrite {
+        entered: Arc<AtomicBool>,
+    }
+
+    impl tokio::io::AsyncWrite for BlockingWrite {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.entered.store(true, Ordering::Relaxed);
+            Poll::Pending
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    let entered = Arc::new(AtomicBool::new(false));
+    let writer = BlockingWrite {
+        entered: entered.clone(),
+    };
+    let (client_stream, _server_stream) = tokio::io::duplex(64);
+    let (client_read, _client_write) = tokio::io::split(client_stream);
+
+    let mut client = mcp_jsonrpc::Client::connect_io(client_read, writer)
+        .await
+        .expect("client connect");
+    let handle = client.handle();
+    let write_task = tokio::spawn(async move {
+        let _ = handle
+            .notify("demo/stuck", Some(serde_json::json!({ "x": 1 })))
+            .await;
+    });
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !entered.load(Ordering::Relaxed) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("write task should enter write lock");
+
+    let err = client
+        .wait_with_timeout(
+            Duration::from_millis(20),
+            mcp_jsonrpc::WaitOnTimeout::ReturnError,
+        )
+        .await
+        .expect_err("close stage should time out when write lock is held");
+    assert!(err.is_wait_timeout());
+
+    write_task.abort();
+}
+
+#[tokio::test]
+async fn request_timeout_includes_write_stage_and_closes_client() {
+    struct BlockingWrite {
+        entered: Arc<AtomicBool>,
+    }
+
+    impl tokio::io::AsyncWrite for BlockingWrite {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.entered.store(true, Ordering::Relaxed);
+            Poll::Pending
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    let entered = Arc::new(AtomicBool::new(false));
+    let writer = BlockingWrite {
+        entered: entered.clone(),
+    };
+    let (client_stream, _server_stream) = tokio::io::duplex(64);
+    let (client_read, _client_write) = tokio::io::split(client_stream);
+
+    let client = mcp_jsonrpc::Client::connect_io(client_read, writer)
+        .await
+        .expect("client connect");
+    let handle = client.handle();
+    let started = tokio::time::Instant::now();
+    let err = handle
+        .request_optional_with_timeout("demo/request", None, Duration::from_millis(20))
+        .await
+        .expect_err("write-stage timeout should fail request");
+    assert!(err.is_wait_timeout());
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "request timeout should bound blocked writes"
+    );
+    assert!(
+        entered.load(Ordering::Relaxed),
+        "write stage should have been entered"
+    );
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !handle.is_closed() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("client should be closed after write-stage timeout");
+}
+
+#[tokio::test]
+async fn drop_closes_write_end_even_when_handle_is_cloned() {
+    let (client_stream, server_stream) = tokio::io::duplex(64);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (mut server_read, _server_write) = tokio::io::split(server_stream);
+
+    let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .expect("client connect");
+    let handle = client.handle();
+    drop(client);
+
+    let mut buf = [0u8; 1];
+    let n = tokio::time::timeout(Duration::from_secs(1), server_read.read(&mut buf))
+        .await
+        .expect("server read completed")
+        .expect("server read ok");
+    assert_eq!(n, 0, "peer should observe EOF after client drop");
+
+    let err = handle
+        .notify("demo/notify", None)
+        .await
+        .expect_err("cloned handle should be closed after client drop");
+    assert!(matches!(
+        err,
+        mcp_jsonrpc::Error::Protocol(ref protocol)
+            if protocol.kind == mcp_jsonrpc::ProtocolErrorKind::Closed
+    ));
+}
+
+#[tokio::test]
 async fn request_roundtrip_over_duplex() {
     let (client_stream, server_stream) = tokio::io::duplex(1024);
     let (client_read, client_write) = tokio::io::split(client_stream);
@@ -79,6 +236,318 @@ async fn request_roundtrip_over_duplex() {
         .await
         .expect("request ok");
     assert_eq!(result, serde_json::json!({ "ok": true }));
+
+    tokio::time::timeout(Duration::from_secs(1), &mut server_task)
+        .await
+        .expect("server task completed")
+        .expect("server task ok");
+}
+
+#[tokio::test]
+async fn request_fails_when_response_id_type_mismatches_pending_request() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let mut server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+        let line = lines
+            .next_line()
+            .await
+            .expect("read ok")
+            .expect("request line");
+
+        let msg = parse_line(&line);
+        assert_eq!(msg["jsonrpc"], "2.0");
+        assert_eq!(msg["method"], "demo/request");
+        let id = msg["id"].as_i64().expect("client id should be integer");
+
+        // Send the same id with a different JSON type to trigger response-id mismatch handling.
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id.to_string(),
+            "result": { "ok": true },
+        });
+        let mut out = serde_json::to_string(&response).unwrap();
+        out.push('\n');
+        server_write.write_all(out.as_bytes()).await.unwrap();
+        server_write.flush().await.unwrap();
+    });
+
+    let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .expect("client connect");
+    let err = tokio::time::timeout(
+        Duration::from_secs(1),
+        client.request("demo/request", serde_json::json!({ "x": 1 })),
+    )
+    .await
+    .expect("request should not hang")
+    .expect_err("request should fail on mismatched response id type");
+
+    assert!(matches!(
+        err,
+        mcp_jsonrpc::Error::Protocol(ref protocol)
+            if protocol.kind == mcp_jsonrpc::ProtocolErrorKind::InvalidMessage
+    ));
+    assert!(err.to_string().contains("type mismatch"));
+
+    tokio::time::timeout(Duration::from_secs(1), &mut server_task)
+        .await
+        .expect("server task completed")
+        .expect("server task ok");
+}
+
+#[tokio::test]
+async fn late_response_after_caller_timeout_does_not_close_connection() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let mut server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let slow_line = lines
+            .next_line()
+            .await
+            .expect("read ok")
+            .expect("slow request line");
+        let slow_msg = parse_line(&slow_line);
+        assert_eq!(slow_msg["method"], "demo/slow");
+        let slow_id = slow_msg["id"].clone();
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let slow_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": slow_id,
+            "result": { "slow": true },
+        });
+        let mut slow_out = serde_json::to_string(&slow_response).unwrap();
+        slow_out.push('\n');
+        server_write.write_all(slow_out.as_bytes()).await.unwrap();
+        server_write.flush().await.unwrap();
+
+        let fast_line = lines
+            .next_line()
+            .await
+            .expect("read ok")
+            .expect("fast request line");
+        let fast_msg = parse_line(&fast_line);
+        assert_eq!(fast_msg["method"], "demo/fast");
+        let fast_id = fast_msg["id"].clone();
+
+        let fast_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": fast_id,
+            "result": { "ok": true },
+        });
+        let mut fast_out = serde_json::to_string(&fast_response).unwrap();
+        fast_out.push('\n');
+        server_write.write_all(fast_out.as_bytes()).await.unwrap();
+        server_write.flush().await.unwrap();
+    });
+
+    let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .expect("client connect");
+    let slow = tokio::time::timeout(
+        Duration::from_millis(20),
+        client.request("demo/slow", serde_json::json!({})),
+    )
+    .await;
+    assert!(slow.is_err(), "slow request should time out at caller side");
+
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    let fast = tokio::time::timeout(
+        Duration::from_secs(1),
+        client.request("demo/fast", serde_json::json!({})),
+    )
+    .await
+    .expect("fast request future completed")
+    .expect("fast request succeeded");
+    assert_eq!(fast, serde_json::json!({ "ok": true }));
+
+    tokio::time::timeout(Duration::from_secs(1), &mut server_task)
+        .await
+        .expect("server task completed")
+        .expect("server task ok");
+}
+
+#[tokio::test]
+async fn stale_responses_after_cancelled_id_eviction_do_not_close_connection() {
+    const SLOW_REQUESTS: usize = 1050;
+
+    let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let mut server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+        let mut stale_ids = Vec::with_capacity(SLOW_REQUESTS);
+
+        for _ in 0..SLOW_REQUESTS {
+            let slow_line = lines
+                .next_line()
+                .await
+                .expect("read ok")
+                .expect("slow request line");
+            let slow_msg = parse_line(&slow_line);
+            assert_eq!(slow_msg["method"], "demo/slow");
+            stale_ids.push(slow_msg["id"].clone());
+        }
+
+        // Ensure caller-side timeouts have fired before replaying stale responses.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        let mut stale_batch = String::new();
+        for id in stale_ids {
+            let stale_response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "slow": true },
+            });
+            stale_batch.push_str(&serde_json::to_string(&stale_response).unwrap());
+            stale_batch.push('\n');
+        }
+        server_write
+            .write_all(stale_batch.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let fast_line = lines
+            .next_line()
+            .await
+            .expect("read ok")
+            .expect("fast request line");
+        let fast_msg = parse_line(&fast_line);
+        assert_eq!(fast_msg["method"], "demo/fast");
+        let fast_id = fast_msg["id"].clone();
+
+        let fast_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": fast_id,
+            "result": { "ok": true },
+        });
+        let mut fast_out = serde_json::to_string(&fast_response).unwrap();
+        fast_out.push('\n');
+        server_write.write_all(fast_out.as_bytes()).await.unwrap();
+        server_write.flush().await.unwrap();
+    });
+
+    let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .expect("client connect");
+
+    for _ in 0..SLOW_REQUESTS {
+        let slow = tokio::time::timeout(
+            Duration::from_millis(1),
+            client.request("demo/slow", serde_json::json!({})),
+        )
+        .await;
+        assert!(slow.is_err(), "slow request should time out at caller side");
+    }
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let fast = tokio::time::timeout(
+        Duration::from_secs(1),
+        client.request("demo/fast", serde_json::json!({})),
+    )
+    .await
+    .expect("fast request future completed")
+    .expect("fast request succeeded");
+    assert_eq!(fast, serde_json::json!({ "ok": true }));
+
+    tokio::time::timeout(Duration::from_secs(1), &mut server_task)
+        .await
+        .expect("server task completed")
+        .expect("server task ok");
+}
+
+#[tokio::test]
+async fn stale_responses_with_other_pending_do_not_close_connection() {
+    const SLOW_REQUESTS: usize = 1050;
+
+    let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let mut server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+        let mut stale_ids = Vec::with_capacity(SLOW_REQUESTS);
+
+        for _ in 0..SLOW_REQUESTS {
+            let slow_line = lines
+                .next_line()
+                .await
+                .expect("read ok")
+                .expect("slow request line");
+            let slow_msg = parse_line(&slow_line);
+            assert_eq!(slow_msg["method"], "demo/slow");
+            stale_ids.push(slow_msg["id"].clone());
+        }
+
+        let fast_line = lines
+            .next_line()
+            .await
+            .expect("read ok")
+            .expect("fast request line");
+        let fast_msg = parse_line(&fast_line);
+        assert_eq!(fast_msg["method"], "demo/fast");
+        let fast_id = fast_msg["id"].clone();
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        let mut stale_batch = String::new();
+        for id in stale_ids {
+            let stale_response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "slow": true },
+            });
+            stale_batch.push_str(&serde_json::to_string(&stale_response).unwrap());
+            stale_batch.push('\n');
+        }
+        server_write
+            .write_all(stale_batch.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let fast_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": fast_id,
+            "result": { "ok": true },
+        });
+        let mut fast_out = serde_json::to_string(&fast_response).unwrap();
+        fast_out.push('\n');
+        server_write.write_all(fast_out.as_bytes()).await.unwrap();
+        server_write.flush().await.unwrap();
+    });
+
+    let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+        .await
+        .expect("client connect");
+
+    for _ in 0..SLOW_REQUESTS {
+        let slow = tokio::time::timeout(
+            Duration::from_millis(1),
+            client.request("demo/slow", serde_json::json!({})),
+        )
+        .await;
+        assert!(slow.is_err(), "slow request should time out at caller side");
+    }
+
+    let fast = tokio::time::timeout(
+        Duration::from_secs(1),
+        client.request("demo/fast", serde_json::json!({})),
+    )
+    .await
+    .expect("fast request future completed")
+    .expect("fast request succeeded");
+    assert_eq!(fast, serde_json::json!({ "ok": true }));
 
     tokio::time::timeout(Duration::from_secs(1), &mut server_task)
         .await
@@ -377,6 +846,65 @@ async fn responds_invalid_request_when_jsonrpc_is_not_2_0() {
 }
 
 #[tokio::test]
+async fn request_rejected_when_pending_limit_reached() {
+    let (client_stream, server_stream) = tokio::io::duplex(4096);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let mut options = mcp_jsonrpc::SpawnOptions::default();
+    options.limits.max_pending_requests = 1;
+    let client = mcp_jsonrpc::Client::connect_io_with_options(client_read, client_write, options)
+        .await
+        .expect("client connect");
+    let handle = client.handle();
+
+    let first_handle = handle.clone();
+    let first = tokio::spawn(async move {
+        first_handle
+            .request("demo/one", serde_json::json!({}))
+            .await
+    });
+
+    let mut lines = tokio::io::BufReader::new(server_read).lines();
+    let line = lines
+        .next_line()
+        .await
+        .expect("read ok")
+        .expect("first request line");
+    let msg = parse_line(&line);
+    let id = msg["id"].clone();
+
+    let err = handle
+        .request("demo/two", serde_json::json!({}))
+        .await
+        .expect_err("second request should be rejected by pending limit");
+    match err {
+        mcp_jsonrpc::Error::Protocol(protocol) => {
+            assert_eq!(protocol.kind, mcp_jsonrpc::ProtocolErrorKind::Other);
+            assert!(protocol.message.contains("too many pending requests"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": { "ok": true },
+    });
+    let mut out = serde_json::to_string(&response).unwrap();
+    out.push('\n');
+    server_write.write_all(out.as_bytes()).await.unwrap();
+    server_write.flush().await.unwrap();
+
+    let result = tokio::time::timeout(Duration::from_secs(1), first)
+        .await
+        .expect("first task completed")
+        .expect("first task join ok")
+        .expect("first request ok");
+    assert_eq!(result, serde_json::json!({ "ok": true }));
+}
+
+#[tokio::test]
 async fn server_request_with_invalid_method_type_does_not_consume_pending_request() {
     let (client_stream, server_stream) = tokio::io::duplex(4096);
     let (client_read, client_write) = tokio::io::split(client_stream);
@@ -482,28 +1010,35 @@ async fn request_fails_when_server_sends_invalid_response_structure() {
         .expect("server task ok");
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn reader_eof_shuts_down_client_write_end() {
-    let (client_stream, server_stream) = tokio::net::UnixStream::pair().unwrap();
-    let (client_read, client_write) = client_stream.into_split();
-    let (mut server_read, server_write) = server_stream.into_split();
+    let (client_stream, server_stream) = tokio::io::duplex(64);
+    let (client_read, client_write) = tokio::io::split(client_stream);
 
-    let _client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
+    let client = mcp_jsonrpc::Client::connect_io(client_read, client_write)
         .await
         .expect("client connect");
+    let handle = client.handle();
 
-    // Closing the server->client direction should cause the client's reader task to hit EOF and
-    // shutdown the client->server write end.
-    drop(server_write);
-    tokio::task::yield_now().await;
+    // Closing the peer stream should cause the client's reader task to hit EOF and close.
+    drop(server_stream);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !handle.is_closed() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("client should close after peer EOF");
 
-    let mut buf = [0u8; 1];
-    let n = tokio::time::timeout(Duration::from_secs(5), server_read.read(&mut buf))
+    let err = handle
+        .notify("demo/notify", None)
         .await
-        .expect("server read completed")
-        .expect("server read ok");
-    assert_eq!(n, 0, "expected EOF on server_read");
+        .expect_err("closed client should reject writes after peer EOF");
+    assert!(matches!(
+        err,
+        mcp_jsonrpc::Error::Protocol(ref protocol)
+            if protocol.kind == mcp_jsonrpc::ProtocolErrorKind::Closed
+    ));
 }
 
 #[cfg(unix)]

@@ -40,9 +40,8 @@ async fn load_initial_path_and_contents(
         None => {
             for candidate in DEFAULT_CONFIG_CANDIDATES {
                 let candidate_path = thread_root.join(candidate);
-                match fs::try_read_to_string_limited(&candidate_path).await? {
-                    Some(contents) => return Ok(Some((candidate_path, contents))),
-                    None => continue,
+                if let Some(contents) = fs::try_read_to_string_limited(&candidate_path).await? {
+                    return Ok(Some((candidate_path, contents)));
                 }
             }
             Ok(None)

@@ -40,6 +40,18 @@ fn parse_server_name_anyhow(server_name: &str) -> anyhow::Result<ServerName> {
         .with_context(|| format!("invalid mcp server name {server_name:?}"))
 }
 
+fn normalize_server_name_lookup(server_name: &str) -> &str {
+    server_name.trim()
+}
+
+fn contains_wait_timeout(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<mcp_jsonrpc::Error>()
+            .is_some_and(mcp_jsonrpc::Error::is_wait_timeout)
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProtocolVersionCheck {
     /// Fail closed (default): reject servers whose `initialize` result includes a different
@@ -69,7 +81,7 @@ impl ServerHandlerTimeoutCounts {
         let mut counters = self
             .counters
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         counters
             .entry(server_name.clone())
             .or_insert_with(|| Arc::new(AtomicU64::new(0)))
@@ -79,16 +91,15 @@ impl ServerHandlerTimeoutCounts {
     fn count(&self, server_name: &str) -> u64 {
         self.counters
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(server_name)
-            .map(|counter| counter.load(Ordering::Relaxed))
-            .unwrap_or(0)
+            .map_or(0, |counter| counter.load(Ordering::Relaxed))
     }
 
     fn snapshot(&self) -> HashMap<ServerName, u64> {
         self.counters
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .map(|(name, counter)| (name.clone(), counter.load(Ordering::Relaxed)))
             .collect()
@@ -97,10 +108,17 @@ impl ServerHandlerTimeoutCounts {
     fn take_and_reset(&self) -> HashMap<ServerName, u64> {
         self.counters
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .map(|(name, counter)| (name.clone(), counter.swap(0, Ordering::Relaxed)))
             .collect()
+    }
+
+    fn remove(&self, server_name: &str) {
+        self.counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(server_name);
     }
 }
 
@@ -131,6 +149,33 @@ pub struct Connection {
     handler_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
+fn handler_task_join_error(err: tokio::task::JoinError) -> anyhow::Error {
+    if err.is_panic() {
+        anyhow::anyhow!("server handler task panicked")
+    } else {
+        anyhow::anyhow!("server handler task failed: {err}")
+    }
+}
+
+fn reap_stale_child_best_effort(mut child: Child) {
+    const REAP_TIMEOUT: Duration = Duration::from_millis(200);
+
+    if child.try_wait().ok().flatten().is_some() {
+        return;
+    }
+
+    let _ = child.start_kill(); // pre-commit: allow-let-underscore
+    if child.try_wait().ok().flatten().is_some() {
+        return;
+    }
+
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        drop(handle.spawn(async move {
+            let _ = tokio::time::timeout(REAP_TIMEOUT, child.wait()).await; // pre-commit: allow-let-underscore
+        }));
+    }
+}
+
 impl Connection {
     pub fn client(&self) -> &mcp_jsonrpc::Client {
         &self.client
@@ -141,7 +186,7 @@ impl Connection {
     }
 
     pub fn child_id(&self) -> Option<u32> {
-        self.child.as_ref().and_then(|child| child.id())
+        self.child.as_ref().and_then(tokio::process::Child::id)
     }
 
     pub fn take_child(&mut self) -> Option<Child> {
@@ -163,13 +208,21 @@ impl Connection {
         };
 
         let handler_tasks = std::mem::take(&mut self.handler_tasks);
+        let mut first_handler_task_error: Option<anyhow::Error> = None;
         for task in handler_tasks {
-            if let Err(err) = task.await {
-                if err.is_panic() {
-                    anyhow::bail!("server handler task panicked");
-                }
-                anyhow::bail!("server handler task failed: {err}");
+            if first_handler_task_error.is_some() {
+                task.abort();
+                drop(task.await);
+                continue;
             }
+
+            if let Err(err) = task.await {
+                first_handler_task_error = Some(handler_task_join_error(err));
+            }
+        }
+
+        if let Some(err) = first_handler_task_error {
+            return Err(err);
         }
 
         Ok(status)
@@ -182,15 +235,17 @@ impl Connection {
         timeout: Duration,
         on_timeout: mcp_jsonrpc::WaitOnTimeout,
     ) -> anyhow::Result<Option<std::process::ExitStatus>> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let remaining_budget = || deadline.saturating_duration_since(tokio::time::Instant::now());
         let status = self
             .client
-            .wait_with_timeout(timeout, on_timeout)
+            .wait_with_timeout(remaining_budget(), on_timeout)
             .await
             .context("close jsonrpc client")?;
         let status = match status {
             Some(status) => Some(status),
             None => match &mut self.child {
-                Some(child) => match tokio::time::timeout(timeout, child.wait()).await {
+                Some(child) => match tokio::time::timeout_at(deadline, child.wait()).await {
                     Ok(status) => Some(status?),
                     Err(_) => match on_timeout {
                         mcp_jsonrpc::WaitOnTimeout::ReturnError => {
@@ -200,7 +255,7 @@ impl Connection {
                             let child_id = child.id();
                             if let Err(err) = child.start_kill() {
                                 match child.try_wait() {
-                                    Ok(Some(status)) => return Ok(Some(status)),
+                                    Ok(Some(status)) => Some(status),
                                     Ok(None) => {
                                         anyhow::bail!(
                                             "wait timed out after {timeout:?}; failed to kill child (id={child_id:?}): {err}"
@@ -212,13 +267,13 @@ impl Connection {
                                         )
                                     }
                                 }
-                            }
-
-                            match tokio::time::timeout(kill_timeout, child.wait()).await {
-                                Ok(status) => Some(status?),
-                                Err(_) => anyhow::bail!(
-                                    "wait timed out after {timeout:?}; killed child (id={child_id:?}) but it did not exit within {kill_timeout:?}"
-                                ),
+                            } else {
+                                match tokio::time::timeout(kill_timeout, child.wait()).await {
+                                    Ok(status) => Some(status?),
+                                    Err(_) => anyhow::bail!(
+                                        "wait timed out after {timeout:?}; killed child (id={child_id:?}) but it did not exit within {kill_timeout:?}"
+                                    ),
+                                }
                             }
                         }
                     },
@@ -228,13 +283,58 @@ impl Connection {
         };
 
         let handler_tasks = std::mem::take(&mut self.handler_tasks);
-        for task in handler_tasks {
-            if let Err(err) = task.await {
-                if err.is_panic() {
-                    anyhow::bail!("server handler task panicked");
+        let mut first_handler_task_error: Option<anyhow::Error> = None;
+        for mut task in handler_tasks {
+            if first_handler_task_error.is_some() {
+                task.abort();
+                let cleanup_timeout = match on_timeout {
+                    mcp_jsonrpc::WaitOnTimeout::ReturnError => remaining_budget(),
+                    mcp_jsonrpc::WaitOnTimeout::Kill { kill_timeout } => kill_timeout,
+                };
+                if !cleanup_timeout.is_zero() {
+                    let _ = tokio::time::timeout(cleanup_timeout, task).await; // pre-commit: allow-let-underscore
                 }
-                anyhow::bail!("server handler task failed: {err}");
+                continue;
             }
+
+            match tokio::time::timeout_at(deadline, &mut task).await {
+                Ok(join_result) => {
+                    if let Err(err) = join_result {
+                        first_handler_task_error = Some(handler_task_join_error(err));
+                    }
+                }
+                Err(_) => match on_timeout {
+                    mcp_jsonrpc::WaitOnTimeout::ReturnError => {
+                        first_handler_task_error = Some(anyhow::anyhow!(
+                            "wait timed out after {timeout:?} while waiting for server handler task"
+                        ));
+                        task.abort();
+                        let cleanup_timeout = remaining_budget();
+                        if !cleanup_timeout.is_zero() {
+                            let _ = tokio::time::timeout(cleanup_timeout, task).await; // pre-commit: allow-let-underscore
+                        }
+                    }
+                    mcp_jsonrpc::WaitOnTimeout::Kill { kill_timeout } => {
+                        task.abort();
+                        match tokio::time::timeout(kill_timeout, task).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(err)) if err.is_cancelled() => {}
+                            Ok(Err(err)) => {
+                                first_handler_task_error = Some(handler_task_join_error(err));
+                            }
+                            Err(_) => {
+                                first_handler_task_error = Some(anyhow::anyhow!(
+                                    "wait timed out after {timeout:?}; aborted server handler task but it did not stop within {kill_timeout:?}"
+                                ));
+                            }
+                        }
+                    }
+                },
+            }
+        }
+
+        if let Some(err) = first_handler_task_error {
+            return Err(err);
         }
 
         Ok(status)
@@ -382,12 +482,19 @@ impl Manager {
         std::mem::take(&mut self.protocol_version_mismatches)
     }
 
+    fn remove_protocol_version_mismatch(&mut self, server_name: &str) {
+        let server_name = normalize_server_name_lookup(server_name);
+        self.protocol_version_mismatches
+            .retain(|mismatch| mismatch.server_name.as_str() != server_name);
+    }
+
     /// Returns the number of server→client handler timeouts observed for `server_name`.
     ///
     /// This increments when a server→client request/notification handler exceeds
     /// `Manager::with_server_handler_timeout(...)`.
     pub fn server_handler_timeout_count(&self, server_name: &str) -> u64 {
-        self.server_handler_timeout_counts.count(server_name)
+        self.server_handler_timeout_counts
+            .count(normalize_server_name_lookup(server_name))
     }
 
     /// Returns a snapshot of timeout counts for all servers.
@@ -450,7 +557,7 @@ impl Manager {
     }
 
     pub fn is_connected(&mut self, server_name: &str) -> bool {
-        self.is_connected_and_alive(server_name)
+        self.is_connected_and_alive(normalize_server_name_lookup(server_name))
     }
 
     pub fn is_connected_named(&mut self, server_name: &ServerName) -> bool {
@@ -466,7 +573,8 @@ impl Manager {
     }
 
     pub fn initialize_result(&self, server_name: &str) -> Option<&Value> {
-        self.init_results.get(server_name)
+        self.init_results
+            .get(normalize_server_name_lookup(server_name))
     }
 
     pub fn initialize_result_named(&self, server_name: &ServerName) -> Option<&Value> {
@@ -495,11 +603,11 @@ impl Manager {
     where
         F: FnOnce() -> anyhow::Result<ServerName>,
     {
-        if self.is_connected_and_alive(server_name) {
+        let server_name_key = build_server_name()?;
+        if self.is_connected_and_alive(server_name_key.as_str()) {
             return Ok(());
         }
 
-        let server_name_key = build_server_name()?;
         server_cfg
             .validate()
             .with_context(|| format!("invalid mcp server config (server={server_name_key})"))?;
@@ -784,18 +892,18 @@ impl Manager {
 
     async fn connect_jsonrpc_with_builder<F>(
         &mut self,
-        server_name: &str,
+        _server_name: &str,
         build_server_name: F,
         mut client: mcp_jsonrpc::Client,
     ) -> anyhow::Result<()>
     where
         F: FnOnce() -> anyhow::Result<ServerName>,
     {
-        if self.is_connected_and_alive(server_name) {
+        let server_name_key = build_server_name()?;
+        if self.is_connected_and_alive(server_name_key.as_str()) {
             return Ok(());
         }
 
-        let server_name_key = build_server_name()?;
         let child = client.take_child();
         self.install_connection_parsed(server_name_key, client, child)
             .await?;
@@ -840,14 +948,16 @@ impl Manager {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        if self.is_connected_and_alive(server_name) {
+        let server_name_key = parse_server_name_anyhow(server_name)?;
+        if self.is_connected_and_alive(server_name_key.as_str()) {
             return Ok(());
         }
 
         let client = mcp_jsonrpc::Client::connect_io(read, write)
             .await
             .context("connect jsonrpc io")?;
-        self.connect_jsonrpc_unchecked(server_name, client).await
+        self.install_connection_parsed(server_name_key, client, None)
+            .await
     }
 
     fn is_connected_and_alive(&mut self, server_name: &str) -> bool {
@@ -855,8 +965,14 @@ impl Manager {
             return false;
         };
         if exited {
-            self.conns.remove(server_name);
+            if let Some(mut conn) = self.conns.remove(server_name)
+                && let Some(child) = conn.child.take()
+            {
+                reap_stale_child_best_effort(child);
+            }
             self.init_results.remove(server_name);
+            self.server_handler_timeout_counts.remove(server_name);
+            self.remove_protocol_version_mismatch(server_name);
             return false;
         }
         true
@@ -879,7 +995,11 @@ impl Manager {
             return Some(true);
         }
 
-        if conn.handler_tasks.iter().any(|task| task.is_finished()) {
+        if conn
+            .handler_tasks
+            .iter()
+            .any(tokio::task::JoinHandle::is_finished)
+        {
             return Some(true);
         }
 
@@ -921,7 +1041,15 @@ impl Manager {
 
         let handler_tasks = self.attach_client_handlers(server_name.clone(), &mut client);
         let handler_tasks_guard = HandlerTasksGuard::new(handler_tasks);
-        let init_result = self.initialize(&server_name, &client).await?;
+        let init_result = match self.initialize(&server_name, &client).await {
+            Ok(init_result) => init_result,
+            Err(err) => {
+                self.server_handler_timeout_counts
+                    .remove(server_name.as_str());
+                self.remove_protocol_version_mismatch(server_name.as_str());
+                return Err(err);
+            }
+        };
         let handler_tasks = handler_tasks_guard.disarm();
 
         self.init_results.insert(server_name.clone(), init_result);
@@ -997,12 +1125,24 @@ impl Manager {
 
     /// Remove a cached connection (if any) without waiting for shutdown.
     ///
-    /// This is best-effort and may leave a child process running/zombied if you drop it without
-    /// an explicit `wait*` call. Prefer `Manager::disconnect_and_wait` (or `take_connection` +
+    /// This performs best-effort child-process reaping, but still does not guarantee clean
+    /// shutdown ordering. Prefer `Manager::disconnect_and_wait` (or `take_connection` +
     /// `Connection::wait_with_timeout`) when you own the lifecycle.
     pub fn disconnect(&mut self, server_name: &str) -> bool {
+        let server_name = normalize_server_name_lookup(server_name);
         self.init_results.remove(server_name);
-        self.conns.remove(server_name).is_some()
+        let removed = match self.conns.remove(server_name) {
+            Some(mut conn) => {
+                if let Some(child) = conn.child.take() {
+                    reap_stale_child_best_effort(child);
+                }
+                true
+            }
+            None => false,
+        };
+        self.server_handler_timeout_counts.remove(server_name);
+        self.remove_protocol_version_mismatch(server_name);
+        removed
     }
 
     pub fn disconnect_named(&mut self, server_name: &ServerName) -> bool {
@@ -1015,9 +1155,14 @@ impl Manager {
         timeout: Duration,
         on_timeout: mcp_jsonrpc::WaitOnTimeout,
     ) -> anyhow::Result<Option<std::process::ExitStatus>> {
+        let server_name = normalize_server_name_lookup(server_name);
         let Some(conn) = self.take_connection(server_name) else {
+            self.server_handler_timeout_counts.remove(server_name);
+            self.remove_protocol_version_mismatch(server_name);
             return Ok(None);
         };
+        self.server_handler_timeout_counts.remove(server_name);
+        self.remove_protocol_version_mismatch(server_name);
 
         conn.wait_with_timeout(timeout, on_timeout)
             .await
@@ -1034,14 +1179,41 @@ impl Manager {
             .await
     }
 
+    async fn disconnect_after_jsonrpc_error(&mut self, server_name: &str) {
+        const DISCONNECT_TIMEOUT: Duration = Duration::from_millis(200);
+        const DISCONNECT_KILL_TIMEOUT: Duration = Duration::from_millis(200);
+
+        let server_name = normalize_server_name_lookup(server_name);
+        let Some(conn) = self.take_connection(server_name) else {
+            self.server_handler_timeout_counts.remove(server_name);
+            self.remove_protocol_version_mismatch(server_name);
+            return;
+        };
+
+        let _ = /* pre-commit: allow-let-underscore */ conn
+            .wait_with_timeout(
+                DISCONNECT_TIMEOUT,
+                mcp_jsonrpc::WaitOnTimeout::Kill {
+                    kill_timeout: DISCONNECT_KILL_TIMEOUT,
+                },
+            )
+            .await; // pre-commit: allow-let-underscore
+    }
+
     /// Take ownership of a cached connection (if any).
     ///
     /// After calling this, the caller owns the connection lifecycle. In particular, if the
     /// connection was created via `transport=stdio`, prefer an explicit `Connection::wait*` call
     /// to avoid leaving a child process running/zombied.
     pub fn take_connection(&mut self, server_name: &str) -> Option<Connection> {
+        let server_name = normalize_server_name_lookup(server_name);
         self.init_results.remove(server_name);
-        self.conns.remove(server_name)
+        let conn = self.conns.remove(server_name);
+        if conn.is_some() {
+            self.server_handler_timeout_counts.remove(server_name);
+            self.remove_protocol_version_mismatch(server_name);
+        }
+        conn
     }
 
     pub fn take_connection_named(&mut self, server_name: &ServerName) -> Option<Connection> {
@@ -1053,12 +1225,20 @@ impl Manager {
     /// After calling this, the caller owns the session lifecycle. Prefer calling
     /// `Session::wait_with_timeout` (or converting into a `Connection` and calling `wait*`) to
     /// ensure any associated stdio child process is reaped.
+    ///
+    /// Note: this does not clear manager-local telemetry/state (e.g. protocol-version mismatch
+    /// records or timeout counters). If you want to clear retained state after handoff, call
+    /// `Manager::disconnect` / `Manager::disconnect_and_wait` for the same server name.
     pub fn take_session(&mut self, server_name: &str) -> Option<Session> {
+        let server_name = normalize_server_name_lookup(server_name);
         let Some((server_name, connection)) = self.conns.remove_entry(server_name) else {
             self.init_results.remove(server_name);
             return None;
         };
-        let initialize_result = self.init_results.remove(&server_name)?;
+        let Some(initialize_result) = self.init_results.remove(&server_name) else {
+            self.conns.insert(server_name, connection);
+            return None;
+        };
         Some(Session::new(
             server_name,
             connection,
@@ -1069,6 +1249,25 @@ impl Manager {
 
     pub fn take_session_named(&mut self, server_name: &ServerName) -> Option<Session> {
         self.take_session(server_name.as_str())
+    }
+
+    /// Take ownership of a cached session (if any) and clear manager-local telemetry/state.
+    ///
+    /// Unlike `Manager::take_session`, this also clears timeout counters and protocol-version
+    /// mismatch records for the target server name.
+    pub fn take_session_and_clear_state(&mut self, server_name: &str) -> Option<Session> {
+        let session = self.take_session(server_name);
+        let server_name = normalize_server_name_lookup(server_name);
+        self.server_handler_timeout_counts.remove(server_name);
+        self.remove_protocol_version_mismatch(server_name);
+        session
+    }
+
+    pub fn take_session_and_clear_state_named(
+        &mut self,
+        server_name: &ServerName,
+    ) -> Option<Session> {
+        self.take_session_and_clear_state(server_name.as_str())
     }
 
     pub async fn connect_session(
@@ -1152,13 +1351,7 @@ impl Manager {
         cwd: &Path,
     ) -> anyhow::Result<Value> {
         self.get_or_connect(config, server_name, cwd).await?;
-        let result = self.request_connected(server_name, method, params).await;
-        if let Err(err) = &result {
-            if should_disconnect_after_jsonrpc_error(err) {
-                self.disconnect(server_name);
-            }
-        }
-        result
+        self.request_connected(server_name, method, params).await
     }
 
     pub async fn request_named(
@@ -1182,13 +1375,7 @@ impl Manager {
         cwd: &Path,
     ) -> anyhow::Result<Value> {
         self.connect(server_name, server_cfg, cwd).await?;
-        let result = self.request_connected(server_name, method, params).await;
-        if let Err(err) = &result {
-            if should_disconnect_after_jsonrpc_error(err) {
-                self.disconnect(server_name);
-            }
-        }
-        result
+        self.request_connected(server_name, method, params).await
     }
 
     pub async fn request_typed<R: McpRequest>(
@@ -1246,13 +1433,7 @@ impl Manager {
         cwd: &Path,
     ) -> anyhow::Result<()> {
         self.get_or_connect(config, server_name, cwd).await?;
-        let result = self.notify_connected(server_name, method, params).await;
-        if let Err(err) = &result {
-            if should_disconnect_after_jsonrpc_error(err) {
-                self.disconnect(server_name);
-            }
-        }
-        result
+        self.notify_connected(server_name, method, params).await
     }
 
     pub async fn notify_server(
@@ -1264,13 +1445,7 @@ impl Manager {
         cwd: &Path,
     ) -> anyhow::Result<()> {
         self.connect(server_name, server_cfg, cwd).await?;
-        let result = self.notify_connected(server_name, method, params).await;
-        if let Err(err) = &result {
-            if should_disconnect_after_jsonrpc_error(err) {
-                self.disconnect(server_name);
-            }
-        }
-        result
+        self.notify_connected(server_name, method, params).await
     }
 
     pub async fn notify_typed<N: McpNotification>(
@@ -1558,6 +1733,7 @@ impl Manager {
         method: &str,
         params: Option<Value>,
     ) -> anyhow::Result<Value> {
+        let server_name = normalize_server_name_lookup(server_name);
         if !self.is_connected_and_alive(server_name) {
             anyhow::bail!("mcp server not connected: {server_name}");
         }
@@ -1573,7 +1749,7 @@ impl Manager {
 
         if let Err(err) = &result {
             if should_disconnect_after_jsonrpc_error(err) {
-                self.disconnect(server_name);
+                self.disconnect_after_jsonrpc_error(server_name).await;
             }
         }
 
@@ -1596,6 +1772,7 @@ impl Manager {
         method: &str,
         params: Option<Value>,
     ) -> anyhow::Result<()> {
+        let server_name = normalize_server_name_lookup(server_name);
         if !self.is_connected_and_alive(server_name) {
             anyhow::bail!("mcp server not connected: {server_name}");
         }
@@ -1610,8 +1787,8 @@ impl Manager {
         };
 
         if let Err(err) = &result {
-            if should_disconnect_after_jsonrpc_error(err) {
-                self.disconnect(server_name);
+            if should_disconnect_after_jsonrpc_error(err) || contains_wait_timeout(err) {
+                self.disconnect_after_jsonrpc_error(server_name).await;
             }
         }
 
@@ -1693,6 +1870,8 @@ impl Manager {
                     }
                     ProtocolVersionCheck::Ignore => {}
                 }
+            } else {
+                self.remove_protocol_version_mismatch(server_name.as_str());
             }
         }
 
@@ -1720,12 +1899,18 @@ impl Manager {
         method: &str,
         params: Option<Value>,
     ) -> anyhow::Result<Value> {
-        let outcome = tokio::time::timeout(timeout, client.request_optional(method, params)).await;
-        outcome
-            .with_context(|| {
-                format!("mcp request timed out after {timeout:?}: {method} (server={server_name})")
-            })?
-            .with_context(|| format!("mcp request failed: {method} (server={server_name})"))
+        let result = client
+            .request_optional_with_timeout(method, params, timeout)
+            .await;
+        match result {
+            Ok(value) => Ok(value),
+            Err(err) if err.is_wait_timeout() => Err(anyhow::Error::new(err).context(format!(
+                "mcp request timed out after {timeout:?}: {method} (server={server_name})"
+            ))),
+            Err(err) => Err(anyhow::Error::new(err).context(format!(
+                "mcp request failed: {method} (server={server_name})"
+            ))),
+        }
     }
 
     async fn notify_raw(
@@ -1736,13 +1921,17 @@ impl Manager {
         params: Option<Value>,
     ) -> anyhow::Result<()> {
         let outcome = tokio::time::timeout(timeout, client.notify(method, params)).await;
-        outcome
-            .with_context(|| {
+        match outcome {
+            Ok(result) => result.with_context(|| {
+                format!("mcp notification failed: {method} (server={server_name})")
+            }),
+            Err(_) => Err(anyhow::Error::new(mcp_jsonrpc::Error::protocol(
+                mcp_jsonrpc::ProtocolErrorKind::WaitTimeout,
                 format!(
                     "mcp notification timed out after {timeout:?}: {method} (server={server_name})"
-                )
-            })?
-            .with_context(|| format!("mcp notification failed: {method} (server={server_name})"))
+                ),
+            ))),
+        }
     }
 }
 
