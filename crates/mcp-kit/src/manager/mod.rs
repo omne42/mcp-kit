@@ -757,6 +757,17 @@ impl Manager {
                     )?;
                 }
                 if self.trust_mode != TrustMode::Trusted {
+                    if server_cfg.bearer_token_env_var().is_some() {
+                        anyhow::bail!(
+                            "refusing to read bearer token env var in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
+                        );
+                    }
+                    if !server_cfg.env_http_headers().is_empty() {
+                        anyhow::bail!(
+                            "refusing to read http header env vars in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
+                        );
+                    }
+
                     validate_streamable_http_url_untrusted_dns(
                         &self.untrusted_streamable_http_policy,
                         server_name,
@@ -799,22 +810,14 @@ impl Manager {
                 );
 
                 if let Some(env_var) = server_cfg.bearer_token_env_var() {
-                    if self.trust_mode == TrustMode::Untrusted {
-                        anyhow::bail!(
-                            "refusing to read bearer token env var in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
-                        );
-                    }
+                    debug_assert_eq!(self.trust_mode, TrustMode::Trusted);
                     let token = std::env::var(env_var)
                         .with_context(|| format!("read bearer token env var: {env_var}"))?;
                     headers.insert("Authorization".to_string(), format!("Bearer {token}"));
                 }
 
                 if !server_cfg.env_http_headers().is_empty() {
-                    if self.trust_mode == TrustMode::Untrusted {
-                        anyhow::bail!(
-                            "refusing to read http header env vars in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
-                        );
-                    }
+                    debug_assert_eq!(self.trust_mode, TrustMode::Trusted);
 
                     for (header, env_var) in server_cfg.env_http_headers().iter() {
                         let value = std::env::var(env_var)

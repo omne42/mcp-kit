@@ -2122,6 +2122,24 @@ async fn untrusted_manager_refuses_streamable_http_env_secrets() {
 }
 
 #[tokio::test]
+async fn untrusted_manager_refuses_streamable_http_env_header_secrets() {
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
+    assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
+
+    let mut server_cfg = ServerConfig::streamable_http("https://example.com/mcp").unwrap();
+    server_cfg
+        .env_http_headers_mut()
+        .unwrap()
+        .insert("x-api-key".to_string(), "MCP_API_KEY".to_string());
+
+    let err = manager
+        .connect("srv", &server_cfg, Path::new("."))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("http header env vars"));
+}
+
+#[tokio::test]
 async fn untrusted_manager_refuses_streamable_http_non_https_urls() {
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5));
     assert_eq!(manager.trust_mode(), TrustMode::Untrusted);
@@ -2392,9 +2410,10 @@ async fn untrusted_policy_dns_check_allows_localhost_with_allow_private_ip() {
 }
 
 #[tokio::test]
-async fn untrusted_policy_dns_check_fails_closed_on_lookup_error() {
+async fn untrusted_policy_dns_check_fails_closed_on_lookup_timeout() {
     let policy = UntrustedStreamableHttpPolicy {
         dns_check: true,
+        dns_timeout: Duration::from_nanos(1),
         ..Default::default()
     };
 
@@ -2413,14 +2432,18 @@ async fn untrusted_policy_dns_check_fails_closed_on_lookup_error() {
     )
     .await
     .unwrap_err();
-    assert!(err.to_string().contains("dns"), "err={err}");
+    assert!(
+        err.to_string().contains("timed out dns lookup"),
+        "err={err}"
+    );
 }
 
 #[tokio::test]
-async fn untrusted_policy_dns_check_can_fail_open_on_lookup_error() {
+async fn untrusted_policy_dns_check_can_fail_open_on_lookup_timeout() {
     let policy = UntrustedStreamableHttpPolicy {
         dns_check: true,
         dns_fail_open: true,
+        dns_timeout: Duration::from_nanos(1),
         ..Default::default()
     };
 
