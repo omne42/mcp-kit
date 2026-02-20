@@ -327,13 +327,12 @@ impl Client {
                         }
                         Ok(None) => {}
                         Err(err) => {
-                            handle_sse
-                                .close_with_reason(format!(
-                                    "streamable http SSE connection failed: {err}"
-                                ))
-                                .await;
-                            let mut writer = writer_sse.lock().await;
-                            let _ = writer.shutdown().await;
+                            close_post_bridge(
+                                &writer_sse,
+                                &handle_sse,
+                                format!("streamable http SSE connection failed: {err}"),
+                            )
+                            .await;
                             return;
                         }
                     }

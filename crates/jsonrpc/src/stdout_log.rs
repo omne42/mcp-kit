@@ -191,10 +191,13 @@ async fn rotate_log_file(base_path: &Path, mut part: u32) -> Result<u32, std::io
     loop {
         let rotated = parent.join(format!("{stem}.segment-{part:04}.log"));
         match tokio::fs::rename(base_path, &rotated).await {
-            Ok(()) => return Ok(part.saturating_add(1)),
+            Ok(()) => return Ok(part.checked_add(1).unwrap_or(part)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(part),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                part = part.saturating_add(1);
+                let Some(next_part) = part.checked_add(1) else {
+                    return Err(std::io::Error::other("stdout_log rotation index exhausted"));
+                };
+                part = next_part;
             }
             Err(err) => {
                 return Err(err);
@@ -320,6 +323,35 @@ mod tests {
         }
         out.extend(tokio::fs::read(&base).await.unwrap());
         assert_eq!(out, b"abc\n");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn rotate_log_file_fails_when_segment_index_exhausted() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("server.stdout.log");
+        tokio::fs::write(&base, b"x").await.unwrap();
+        let max_segment = dir.path().join("server.stdout.segment-4294967295.log");
+        tokio::fs::write(&max_segment, b"taken").await.unwrap();
+
+        let err = rotate_log_file(&base, u32::MAX)
+            .await
+            .expect_err("rotation should fail after reaching u32::MAX segment");
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
+        assert!(err.to_string().contains("index exhausted"));
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn rotate_log_file_at_max_keeps_part_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("server.stdout.log");
+        tokio::fs::write(&base, b"x").await.unwrap();
+
+        let next_part = rotate_log_file(&base, u32::MAX)
+            .await
+            .expect("rotation at max part should not hang");
+        assert_eq!(next_part, u32::MAX);
     }
 
     #[cfg(unix)]
