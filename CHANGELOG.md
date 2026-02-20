@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.3.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-jsonrpc`：优化响应分发热路径：`handle_response` 在 `result` 与 `error.data` 分支改为从已拥有的 JSON 对象中直接移动值，不再额外克隆大 payload，降低大响应场景的瞬时内存占用（行为不变）。
 - `mcp-jsonrpc`：优化 JSON-RPC 入站与 `streamable_http` POST bridge 的“空白行过滤”热路径：新增首字节 fast-path，避免对绝大多数非空白消息做整行扫描；并补充等价语义回归测试（行为不变）。
 - `mcp-jsonrpc`：`streamable_http` 在 SSE 重连失败时统一走 `close_post_bridge` 关闭路径，提前释放写锁并复用既有收尾逻辑，降低异常路径下的锁竞争窗口（行为不变）。
 - `mcp-jsonrpc`：`streamable_http` 的 POST bridge 改为仅在错误分支按需解析请求 `id`，并将请求行改为 `bytes::Bytes` 复用同一缓冲（避免成功路径上的额外 JSON 解析与 body 拷贝）；同时为 SSE pump 行缓冲/事件缓冲增加小幅预分配，减少高频场景下的重复扩容（行为不变）。

@@ -1607,25 +1607,38 @@ fn parse_id(value: &Value) -> Option<Id> {
     }
 }
 
+fn parse_id_owned(value: Value) -> Option<Id> {
+    match value {
+        Value::String(value) => Some(Id::String(value)),
+        Value::Number(value) => value.as_i64().map(Id::Integer).or_else(|| {
+            value
+                .as_u64()
+                .and_then(|v| i64::try_from(v).ok())
+                .map(Id::Integer)
+        }),
+        _ => None,
+    }
+}
+
 fn handle_response(
     pending: &PendingRequests,
     cancelled_request_ids: &CancelledRequestIds,
     value: Value,
 ) -> Result<(), Error> {
-    let Value::Object(map) = value else {
+    let Value::Object(mut map) = value else {
         return Err(Error::protocol(
             ProtocolErrorKind::InvalidMessage,
             "invalid response: not an object",
         ));
     };
 
-    let Some(id_value) = map.get("id") else {
+    let Some(id_value) = map.remove("id") else {
         return Err(Error::protocol(
             ProtocolErrorKind::InvalidMessage,
             "invalid response: missing id",
         ));
     };
-    let Some(id) = parse_id(id_value) else {
+    let Some(id) = parse_id_owned(id_value) else {
         return Err(Error::protocol(
             ProtocolErrorKind::InvalidMessage,
             "invalid response: invalid id",
@@ -1666,14 +1679,14 @@ fn handle_response(
     let has_result = map.contains_key("result");
     match (has_error, has_result) {
         (true, false) => {
-            let Some(error) = map.get("error") else {
+            let Some(error) = map.remove("error") else {
                 let _ = tx.send(Err(Error::protocol(
                     ProtocolErrorKind::InvalidMessage,
                     "invalid error response",
                 )));
                 return Ok(());
             };
-            let Value::Object(error) = error else {
+            let Value::Object(mut error) = error else {
                 let _ = tx.send(Err(Error::protocol(
                     ProtocolErrorKind::InvalidMessage,
                     "invalid error response",
@@ -1688,23 +1701,27 @@ fn handle_response(
                 )));
                 return Ok(());
             };
-            let Some(message) = error.get("message").and_then(|v| v.as_str()) else {
+            let Some(message) = error
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(ToOwned::to_owned)
+            else {
                 let _ = tx.send(Err(Error::protocol(
                     ProtocolErrorKind::InvalidMessage,
                     "invalid error response",
                 )));
                 return Ok(());
             };
-            let data = error.get("data").cloned();
+            let data = error.remove("data");
             let _ = tx.send(Err(Error::Rpc {
                 code,
-                message: message.to_string(),
+                message,
                 data,
             }));
             Ok(())
         }
         (false, true) => {
-            let Some(result) = map.get("result").cloned() else {
+            let Some(result) = map.remove("result") else {
                 let _ = tx.send(Err(Error::protocol(
                     ProtocolErrorKind::InvalidMessage,
                     "invalid result response",
