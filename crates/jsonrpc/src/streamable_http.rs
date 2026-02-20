@@ -3,6 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
+use serde::de::{IgnoredAny, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
@@ -44,13 +46,66 @@ fn is_json_content_type(content_type: &str) -> bool {
     ends_with_ignore_ascii_case(subty, "+json")
 }
 
-fn jsonrpc_response_id(value: &Value) -> Option<Value> {
-    match value.get("id") {
-        Some(Value::String(id)) => Some(Value::String(id.clone())),
-        Some(Value::Number(id)) => Some(Value::Number(id.clone())),
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum JsonRpcIdProbe {
+    Object(JsonRpcIdObjectProbe),
+    Other(IgnoredAny),
+}
+
+#[derive(Default)]
+struct JsonRpcIdObjectProbe {
+    id: Option<Value>,
+    saw_id: bool,
+}
+
+impl<'de> Deserialize<'de> for JsonRpcIdObjectProbe {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ProbeVisitor;
+
+        impl<'de> Visitor<'de> for ProbeVisitor {
+            type Value = JsonRpcIdObjectProbe;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut probe = JsonRpcIdObjectProbe::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "id" {
+                        probe.saw_id = true;
+                        probe.id = Some(map.next_value()?);
+                    } else {
+                        map.next_value::<IgnoredAny>()?;
+                    }
+                }
+                Ok(probe)
+            }
+        }
+
+        deserializer.deserialize_map(ProbeVisitor)
+    }
+}
+
+fn jsonrpc_response_id_from_line(line: &[u8]) -> Result<Option<Value>, serde_json::Error> {
+    let id = match serde_json::from_slice::<JsonRpcIdProbe>(line)? {
+        JsonRpcIdProbe::Object(probe) if probe.saw_id => probe.id,
+        JsonRpcIdProbe::Other(_) => None,
+        JsonRpcIdProbe::Object(_) => None,
+    };
+    Ok(match id {
+        Some(Value::String(id)) => Some(Value::String(id)),
+        Some(Value::Number(id)) => Some(Value::Number(id)),
         Some(Value::Null) => Some(Value::Null),
         _ => None,
-    }
+    })
 }
 
 const SSE_EVENT_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
@@ -344,8 +399,8 @@ impl HttpPostBridge {
                 continue;
             }
 
-            let parsed: Value = match serde_json::from_slice(&line) {
-                Ok(v) => v,
+            let id = match jsonrpc_response_id_from_line(&line) {
+                Ok(id) => id,
                 Err(err) => {
                     close_post_bridge(
                         &writer,
@@ -358,7 +413,6 @@ impl HttpPostBridge {
                     return;
                 }
             };
-            let id = jsonrpc_response_id(&parsed);
 
             let mut req = http_client
                 .post(&post_url)
@@ -1003,20 +1057,34 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
+    fn jsonrpc_response_id_from_line_accepts_object_and_ignores_non_object() {
+        let id = jsonrpc_response_id_from_line(br#"{"jsonrpc":"2.0","id":"abc","method":"x"}"#)
+            .expect("valid json");
+        assert_eq!(id, Some(serde_json::json!("abc")));
+
+        let id = jsonrpc_response_id_from_line(br#"{"jsonrpc":"2.0","id":{"nested":1}}"#)
+            .expect("valid json");
+        assert!(id.is_none());
+
+        let id = jsonrpc_response_id_from_line(br#"[{"id":1}]"#).expect("valid json");
+        assert!(id.is_none());
+    }
+
+    #[test]
     fn jsonrpc_response_id_rejects_non_scalar_ids() {
-        let id_string = jsonrpc_response_id(&serde_json::json!({ "id": "abc" }));
+        let id_string = jsonrpc_response_id_from_line(br#"{"id":"abc"}"#).expect("valid json");
         assert_eq!(id_string, Some(serde_json::json!("abc")));
 
-        let id_number = jsonrpc_response_id(&serde_json::json!({ "id": 7 }));
+        let id_number = jsonrpc_response_id_from_line(br#"{"id":7}"#).expect("valid json");
         assert_eq!(id_number, Some(serde_json::json!(7)));
 
-        let id_null = jsonrpc_response_id(&serde_json::json!({ "id": null }));
+        let id_null = jsonrpc_response_id_from_line(br#"{"id":null}"#).expect("valid json");
         assert_eq!(id_null, Some(serde_json::Value::Null));
 
-        let id_object = jsonrpc_response_id(&serde_json::json!({ "id": { "x": 1 } }));
+        let id_object = jsonrpc_response_id_from_line(br#"{"id":{"x":1}}"#).expect("valid json");
         assert!(id_object.is_none());
 
-        let missing = jsonrpc_response_id(&serde_json::json!({ "method": "ping" }));
+        let missing = jsonrpc_response_id_from_line(br#"{"method":"ping"}"#).expect("valid json");
         assert!(missing.is_none());
     }
 

@@ -11,6 +11,7 @@
 
 ### Changed
 - `mcp-jsonrpc`：JSON-RPC 出站（`notify/request/respond_*`）改为直接序列化到 `Vec<u8>` 再写入，减少热路径上的字符串分配与字节拷贝（行为不变）。
+- `mcp-jsonrpc`：`streamable_http` 的 POST bridge 提取请求 `id` 时改为轻量反序列化（只解析 `id`，其余字段走 `IgnoredAny`），避免为大 `params` 请求构建整棵 `Value` 树，降低热路径内存分配与 CPU 开销（行为不变）。
 - `mcp-kit`：修复 `ProtocolVersionCheck::Warn` 下的状态残留：当重连后的 `initialize.result` 未包含 `protocolVersion` 时，会清理该 server 的旧 mismatch 记录，避免陈旧告警。
 - `mcp-jsonrpc`：`streamable_http` 的 SSE 事件缓冲回收改为 `Vec::shrink_to(...)`，避免通过重建 `Vec` 触发一次额外分配（行为不变）。
 - `mcpctl`：构建 Untrusted `allow_host` 策略时改用 `clone_from`，减少一次不必要的分配/拷贝（行为不变）。
