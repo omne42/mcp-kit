@@ -260,11 +260,51 @@ impl Connection {
     ) -> anyhow::Result<Option<std::process::ExitStatus>> {
         let deadline = tokio::time::Instant::now() + timeout;
         let remaining_budget = || deadline.saturating_duration_since(tokio::time::Instant::now());
-        let status = self
+        let status = match self
             .client
             .wait_with_timeout(remaining_budget(), on_timeout)
             .await
-            .context("close jsonrpc client")?;
+        {
+            Ok(status) => status,
+            Err(err) => {
+                let err = anyhow::Error::new(err).context("close jsonrpc client");
+                if !contains_wait_timeout(&err) {
+                    return Err(err);
+                }
+
+                match on_timeout {
+                    mcp_jsonrpc::WaitOnTimeout::ReturnError => return Err(err),
+                    mcp_jsonrpc::WaitOnTimeout::Kill { kill_timeout } => {
+                        let Some(child) = &mut self.child else {
+                            return Err(err);
+                        };
+                        let child_id = child.id();
+                        if let Err(kill_err) = child.start_kill() {
+                            match child.try_wait() {
+                                Ok(Some(status)) => Some(status),
+                                Ok(None) => {
+                                    anyhow::bail!(
+                                        "wait timed out after {timeout:?}; failed to kill detached child (id={child_id:?}): {kill_err}"
+                                    )
+                                }
+                                Err(try_wait_err) => {
+                                    anyhow::bail!(
+                                        "wait timed out after {timeout:?}; failed to kill detached child (id={child_id:?}): {kill_err}; try_wait failed: {try_wait_err}"
+                                    )
+                                }
+                            }
+                        } else {
+                            match tokio::time::timeout(kill_timeout, child.wait()).await {
+                                Ok(status) => Some(status?),
+                                Err(_) => anyhow::bail!(
+                                    "wait timed out after {timeout:?}; killed detached child (id={child_id:?}) but it did not exit within {kill_timeout:?}"
+                                ),
+                            }
+                        }
+                    }
+                }
+            }
+        };
         let status = match status {
             Some(status) => Some(status),
             None => match &mut self.child {

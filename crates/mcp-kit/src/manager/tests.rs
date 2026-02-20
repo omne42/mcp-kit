@@ -3120,6 +3120,92 @@ async fn connection_wait_with_timeout_uses_single_deadline_budget() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn connection_wait_with_timeout_kill_still_kills_detached_child_when_close_stage_times_out() {
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
+
+    struct BlockingWrite {
+        entered: Arc<AtomicBool>,
+    }
+
+    impl tokio::io::AsyncWrite for BlockingWrite {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.entered.store(true, Ordering::Relaxed);
+            Poll::Pending
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.entered.store(true, Ordering::Relaxed);
+            Poll::Pending
+        }
+    }
+
+    let entered = Arc::new(AtomicBool::new(false));
+    let writer = BlockingWrite {
+        entered: entered.clone(),
+    };
+    let (client_stream, _server_stream) = tokio::io::duplex(64);
+    let (client_read, _client_write) = tokio::io::split(client_stream);
+    let client = mcp_jsonrpc::Client::connect_io(client_read, writer)
+        .await
+        .unwrap();
+    let handle = client.handle();
+    let write_task = tokio::spawn(async move {
+        let _ = handle
+            .notify("demo/stuck", Some(serde_json::json!({ "x": 1 })))
+            .await;
+    });
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !entered.load(Ordering::Relaxed) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("write task should enter write lock");
+
+    let child = tokio::process::Command::new("sleep")
+        .arg("5")
+        .spawn()
+        .expect("spawn child");
+
+    let conn = Connection {
+        child: Some(child),
+        client,
+        handler_tasks: Vec::new(),
+    };
+    let status = match conn
+        .wait_with_timeout(
+            Duration::from_millis(20),
+            mcp_jsonrpc::WaitOnTimeout::Kill {
+                kill_timeout: Duration::from_secs(1),
+            },
+        )
+        .await
+    {
+        Ok(status) => status,
+        Err(err) => {
+            panic!("wait should kill detached child even when close stage times out: {err:#}")
+        }
+    };
+    assert!(status.is_some(), "detached child should be reaped");
+
+    write_task.abort();
+}
+
 #[tokio::test]
 async fn take_connection_clears_timeout_counter_entry() {
     let (client_stream, server_stream) = tokio::io::duplex(1024);
