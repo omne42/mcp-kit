@@ -901,10 +901,8 @@ async fn sse_pump_to_writer<R: tokio::io::AsyncBufRead + Unpin>(
         }
 
         if let Some(rest) = line.strip_prefix(b"data:") {
-            let mut rest = rest;
-            while rest.first().is_some_and(u8::is_ascii_whitespace) {
-                rest = &rest[1..];
-            }
+            // Per SSE parsing rules, only one optional U+0020 after ':' is stripped.
+            let rest = rest.strip_prefix(b" ").unwrap_or(rest);
 
             if !data.is_empty() {
                 data.push(b'\n');
@@ -939,7 +937,7 @@ async fn flush_sse_event_data(
     data.clear();
     if data.capacity() > SSE_EVENT_BUFFER_RETAIN_BYTES {
         let retain = SSE_EVENT_BUFFER_RETAIN_BYTES.min(max_message_bytes);
-        *data = Vec::with_capacity(retain);
+        data.shrink_to(retain);
     }
     Ok(false)
 }
@@ -1129,6 +1127,32 @@ mod tests {
         let mut out = Vec::new();
         capture_side.read_to_end(&mut out).await?;
         assert!(out.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sse_pump_strips_only_one_optional_space_after_data_colon()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let sse = "data:  {\"jsonrpc\":\"2.0\",\"method\":\"demo/notify\"}\n\n";
+
+        let (mut in_write, in_read) = tokio::io::duplex(1024);
+        in_write.write_all(sse.as_bytes()).await?;
+        drop(in_write);
+        let mut reader = tokio::io::BufReader::new(in_read);
+
+        let (client_side, mut capture_side) = tokio::io::duplex(1024);
+        let (read, write) = tokio::io::split(client_side);
+        drop(read);
+        let writer = Arc::new(tokio::sync::Mutex::new(write));
+
+        sse_pump_to_writer(&mut reader, &writer, 1024, false)
+            .await
+            .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
+        drop(writer);
+
+        let mut out = Vec::new();
+        capture_side.read_to_end(&mut out).await?;
+        assert_eq!(out, b" {\"jsonrpc\":\"2.0\",\"method\":\"demo/notify\"}\n");
         Ok(())
     }
 }

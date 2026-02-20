@@ -269,7 +269,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         if !cli.allow_host.is_empty() {
-            policy.allowed_hosts = cli.allow_host.clone();
+            policy.allowed_hosts.clone_from(&cli.allow_host);
         }
         manager = manager.with_untrusted_streamable_http_policy(policy);
     }

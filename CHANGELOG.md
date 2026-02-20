@@ -10,6 +10,8 @@
 > 计划下一个版本：`0.3.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-jsonrpc`：`streamable_http` 的 SSE 事件缓冲回收改为 `Vec::shrink_to(...)`，避免通过重建 `Vec` 触发一次额外分配（行为不变）。
+- `mcpctl`：构建 Untrusted `allow_host` 策略时改用 `clone_from`，减少一次不必要的分配/拷贝（行为不变）。
 - `mcp-jsonrpc`：`streamable_http` 的 HTTP JSON body 缓冲初始容量现在上限为 `64KiB`（仍受 `max_message_bytes` 约束），降低大 `Content-Length` 场景下的瞬时内存占用（行为不变）。
 - `mcp-jsonrpc`：移除 `streamable_http` 中未使用的内部 helper，恢复 `clippy -D warnings` 全绿。
 - `mcp-jsonrpc`：优化入站 JSON-RPC 消息分发路径，`method/params` 改为从已拥有的对象中移动而非克隆，降低大 `params` 场景下的额外分配开销（行为不变）。
@@ -163,6 +165,7 @@
 - githooks: `pre-commit` 新增 staged Rust hygiene 检查（库代码新增行中默认拒绝 `unwrap/expect` 与 `let _ =`），并将 Rust gate 升级为 `clippy -D warnings` + `cargo test --workspace --all-features`。
 
 ### Fixed
+- `mcp-jsonrpc`：修复 SSE `data:` 字段解析会剥离全部前导空白的问题；现在仅剥离规范允许的一个可选空格，避免改写以空白开头的 payload，并补充回归测试。
 - `mcp-jsonrpc`：修复逐行读取复用缓冲区在偶发超大消息后长期保留大容量的问题；当后续恢复为小消息时会回收到 `64KiB` 保留上限，降低连接常驻内存占用（行为不变），并补充回归测试。
 - `mcp-jsonrpc`：修正 `streamable_http` 错误响应 body 预览的读取边界，严格按 `error_body_preview_bytes` 截断，避免无意义的额外读取（行为不变）。
 - `mcp-jsonrpc`：修复逐行读取的大小边界判断，消息 payload 与 `max_message_bytes` 刚好相等时（含 `\n`/`\r\n` 行结束）不再被误判为超限，并补充回归测试覆盖。
