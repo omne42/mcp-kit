@@ -1257,8 +1257,11 @@ async fn handle_incoming_value(
     const METHOD_NOT_FOUND: i64 = -32601;
     const CLIENT_OVERLOADED: i64 = -32000;
 
-    let mut stack = vec![value];
-    while let Some(value) = stack.pop() {
+    // Most traffic is a single JSON-RPC object (non-batch). Keep the common path allocation-free
+    // by only allocating stack storage when we actually need to expand batch arrays.
+    let mut stack = Vec::new();
+    let mut next = Some(value);
+    while let Some(value) = next.take().or_else(|| stack.pop()) {
         match value {
             Value::Array(items) => {
                 if items.is_empty() {
@@ -1270,6 +1273,7 @@ async fn handle_incoming_value(
                 for item in items.into_iter().rev() {
                     stack.push(item);
                 }
+                continue;
             }
             Value::Object(mut map) => {
                 let jsonrpc_valid = map.get("jsonrpc").and_then(Value::as_str) == Some("2.0");
@@ -1385,12 +1389,14 @@ async fn handle_incoming_value(
                     responder.close_with_error(err.to_string(), err).await;
                     return;
                 }
+                continue;
             }
             _ => {
                 // JSON-RPC messages must be objects or arrays.
                 let _ = responder
                     .respond_error_raw_id(Value::Null, INVALID_REQUEST, "invalid message", None)
                     .await;
+                continue;
             }
         }
     }
@@ -1512,9 +1518,6 @@ fn lock_cancelled_request_ids(
 
 fn remember_cancelled_request_id(cancelled_request_ids: &CancelledRequestIds, id: &Id) {
     let mut guard = lock_cancelled_request_ids(cancelled_request_ids);
-    if guard.latest.contains_key(id) {
-        return;
-    }
     while guard.order.len() >= CANCELLED_REQUEST_IDS_MAX {
         let Some((generation, evicted)) = guard.order.pop_front() else {
             break;
@@ -2035,6 +2038,25 @@ mod cancelled_request_ids_tests {
             &Id::String("7".to_string())
         ));
         assert!(!take_cancelled_request_id(&cancelled_request_ids, &id));
+    }
+
+    #[test]
+    fn cancelled_request_id_duplicate_insert_refreshes_recency() {
+        let cancelled_request_ids = Arc::new(Mutex::new(CancelledRequestIdsState::default()));
+        let id = Id::Integer(1);
+
+        remember_cancelled_request_id(&cancelled_request_ids, &id);
+        for value in 2..=(CANCELLED_REQUEST_IDS_MAX as i64) {
+            remember_cancelled_request_id(&cancelled_request_ids, &Id::Integer(value));
+        }
+        // Refresh the same id after the queue is full so its "latest generation" becomes recent.
+        remember_cancelled_request_id(&cancelled_request_ids, &id);
+        remember_cancelled_request_id(
+            &cancelled_request_ids,
+            &Id::Integer(CANCELLED_REQUEST_IDS_MAX as i64 + 1),
+        );
+
+        assert!(take_cancelled_request_id(&cancelled_request_ids, &id));
     }
 }
 
