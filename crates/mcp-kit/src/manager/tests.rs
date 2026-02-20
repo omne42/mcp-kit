@@ -899,6 +899,80 @@ async fn session_notify_timeout_is_bounded_when_close_path_blocks() {
     );
 }
 
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn session_notify_timeout_returns_without_waiting_for_close_budget() {
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
+
+    struct BlockingWrite {
+        entered: Arc<AtomicBool>,
+    }
+
+    impl tokio::io::AsyncWrite for BlockingWrite {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.entered.store(true, Ordering::Relaxed);
+            Poll::Pending
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.entered.store(true, Ordering::Relaxed);
+            Poll::Pending
+        }
+    }
+
+    let entered = Arc::new(AtomicBool::new(false));
+    let (client_stream, _server_stream) = tokio::io::duplex(64);
+    let (client_read, _client_write) = tokio::io::split(client_stream);
+    let client = mcp_jsonrpc::Client::connect_io(
+        client_read,
+        BlockingWrite {
+            entered: entered.clone(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let connection = Connection {
+        child: None,
+        client,
+        handler_tasks: Vec::new(),
+    };
+    let session = crate::Session::new(
+        ServerName::parse("srv").unwrap(),
+        connection,
+        serde_json::json!({}),
+        Duration::from_millis(20),
+    );
+
+    let started = tokio::time::Instant::now();
+    let err = session
+        .notify("demo/notify", Some(serde_json::json!({ "x": 1 })))
+        .await
+        .expect_err("notify should time out");
+
+    assert!(entered.load(Ordering::Relaxed));
+    assert!(
+        started.elapsed() < Duration::from_millis(30),
+        "notify timeout should not wait for close budget, elapsed={:?}",
+        started.elapsed()
+    );
+    assert!(
+        contains_wait_timeout(&err),
+        "timeout should preserve structured wait-timeout error, err={err:#}"
+    );
+}
+
 #[tokio::test]
 async fn connect_io_session_without_handler_timeout_does_not_track_timeout_counter() {
     let (client_stream, server_stream) = tokio::io::duplex(1024);

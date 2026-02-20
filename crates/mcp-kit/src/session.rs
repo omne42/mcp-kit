@@ -143,16 +143,17 @@ impl Session {
                     self.server_name
                 );
 
-                // Best-effort close: bound close-path wait to avoid hanging the timeout caller.
-                if tokio::time::timeout(
-                    CLOSE_ON_TIMEOUT_BUDGET,
-                    self.connection.client().close(timeout_message.clone()),
-                )
-                .await
-                .is_err()
-                {
-                    // Close-path timeout is non-fatal here; the caller already gets timeout.
-                }
+                // Best-effort close: run close in the background so timeout callers are not
+                // delayed by close-path lock contention.
+                let handle = self.connection.client().handle();
+                let close_reason = timeout_message.clone();
+                std::mem::drop(tokio::spawn(async move {
+                    let _ = /* pre-commit: allow-let-underscore */ tokio::time::timeout(
+                        CLOSE_ON_TIMEOUT_BUDGET,
+                        handle.close(close_reason),
+                    )
+                    .await;
+                }));
                 Err(anyhow::Error::new(mcp_jsonrpc::Error::protocol(
                     mcp_jsonrpc::ProtocolErrorKind::WaitTimeout,
                     timeout_message,
