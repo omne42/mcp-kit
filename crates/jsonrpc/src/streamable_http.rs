@@ -460,12 +460,12 @@ impl HttpPostBridge {
             if let Some(value) = resp.headers().get("mcp-session-id") {
                 if let Ok(value) = value.to_str() {
                     let mut guard = session_id.lock().await;
-                    let was_none = guard.is_none();
-                    if guard.as_deref() != Some(value) {
+                    let changed = guard.as_deref() != Some(value);
+                    if changed {
                         *guard = Some(value.to_owned());
                     }
                     drop(guard);
-                    if was_none {
+                    if changed {
                         should_wake_sse = true;
                     }
                 }

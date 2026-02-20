@@ -186,6 +186,7 @@
 - githooks: `pre-commit` 新增 staged Rust hygiene 检查（库代码新增行中默认拒绝 `unwrap/expect` 与 `let _ =`），并将 Rust gate 升级为 `clippy -D warnings` + `cargo test --workspace --all-features`。
 
 ### Fixed
+- `mcp-jsonrpc`：修复 `streamable_http` 在 `mcp-session-id` 从旧值更新为新值且响应并非 `202` 时未触发 SSE 重试的问题；现在只要会话 ID 发生变化就会唤醒重连流程，避免 SSE 长期停留在旧会话（并新增回归测试覆盖该场景）。
 - `mcpctl`：修复 `--config` 越出 `--root` 且目标文件尚不存在时可能绕过边界预检的问题；现在会回退检查最近已存在父路径并保持 fail-closed（可通过 `--allow-config-outside-root` 显式覆盖）。
 - `mcp-jsonrpc`：修复 stdout 日志轮转在分段号达到 `u32::MAX` 且目标分段已存在时可能陷入无限重试的问题；现在会 fail-fast 返回错误，避免卡死/CPU 空转。
 - `mcp-kit`：修复配置加载在 server 名称经 `trim()` 归一化后发生冲突时会被静默覆盖的问题；现在会 fail-fast 报错（并补充 v1 / external 格式回归测试）。

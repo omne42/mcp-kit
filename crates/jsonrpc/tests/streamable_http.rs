@@ -92,8 +92,8 @@ async fn streamable_http_allows_initial_sse_405_and_retries_after_202() {
                             .await;
 
                         let response = loop {
-                            if let Some(response) = server_state.response_json.lock().await.clone()
-                            {
+                            let response = server_state.response_json.lock().await.clone();
+                            if let Some(response) = response {
                                 break response;
                             }
                             server_state.response_ready.notified().await;
@@ -223,8 +223,8 @@ async fn streamable_http_propagates_mcp_session_id_and_updates() {
                             .await;
 
                         let response = loop {
-                            if let Some(response) = server_state.response_json.lock().await.clone()
-                            {
+                            let response = server_state.response_json.lock().await.clone();
+                            if let Some(response) = response {
                                 break response;
                             }
                             server_state.response_ready.notified().await;
@@ -367,6 +367,205 @@ async fn streamable_http_propagates_mcp_session_id_and_updates() {
         *state.third_post_session.lock().await,
         Some(Some("def".to_string()))
     );
+
+    drop(client);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streamable_http_retries_sse_when_session_id_changes_without_202() {
+    #[derive(Default)]
+    struct State {
+        get_count: AtomicUsize,
+        post_count: AtomicUsize,
+        response_json: Mutex<Option<Vec<u8>>>,
+        response_ready: Notify,
+        sse_sessions: Mutex<Vec<Option<String>>>,
+    }
+
+    let state = Arc::new(State::default());
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server_state = state.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => return,
+            };
+            let server_state = server_state.clone();
+            tokio::spawn(async move {
+                let Some((req, body)) = read_http_request(&mut socket).await else {
+                    return;
+                };
+
+                match (req.method.as_str(), req.path.as_str()) {
+                    ("GET", "/mcp") => {
+                        let get_idx = server_state.get_count.fetch_add(1, Ordering::SeqCst);
+                        let session = req.headers.get("mcp-session-id").cloned();
+                        server_state.sse_sessions.lock().await.push(session.clone());
+
+                        if get_idx == 0 {
+                            let _ = socket
+                                .write_all(
+                                    b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                                )
+                                .await;
+                            return;
+                        }
+
+                        if session.as_deref() != Some("def") {
+                            let _ = socket
+                                .write_all(
+                                    b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                                )
+                                .await;
+                            return;
+                        }
+
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n",
+                            )
+                            .await;
+
+                        let response = loop {
+                            let response = server_state.response_json.lock().await.clone();
+                            if let Some(response) = response {
+                                break response;
+                            }
+                            server_state.response_ready.notified().await;
+                        };
+
+                        let mut sse = Vec::new();
+                        sse.extend_from_slice(b"data: ");
+                        sse.extend_from_slice(&response);
+                        sse.extend_from_slice(b"\n\n");
+                        let _ = socket.write_all(&sse).await;
+                        let _ = socket.flush().await;
+
+                        let mut drain = [0u8; 1024];
+                        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                            loop {
+                                match socket.read(&mut drain).await {
+                                    Ok(0) => break,
+                                    Ok(_) => continue,
+                                    Err(_) => break,
+                                }
+                            }
+                        })
+                        .await;
+                    }
+                    ("POST", "/mcp") => {
+                        let post_idx = server_state.post_count.fetch_add(1, Ordering::SeqCst);
+                        let parsed: serde_json::Value = match serde_json::from_slice(&body) {
+                            Ok(v) => v,
+                            Err(_) => return,
+                        };
+                        let id = parsed.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                        let response = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": { "ok": true },
+                        });
+                        let body = serde_json::to_vec(&response).unwrap();
+
+                        match post_idx {
+                            0 => {
+                                let _ = write_http_response(
+                                    &mut socket,
+                                    "200 OK",
+                                    &[
+                                        ("Content-Type", "application/json".to_string()),
+                                        ("mcp-session-id", "abc".to_string()),
+                                        ("Connection", "close".to_string()),
+                                    ],
+                                    &body,
+                                )
+                                .await;
+                            }
+                            1 => {
+                                let _ = write_http_response(
+                                    &mut socket,
+                                    "200 OK",
+                                    &[
+                                        ("Content-Type", "application/json".to_string()),
+                                        ("mcp-session-id", "def".to_string()),
+                                        ("Connection", "close".to_string()),
+                                    ],
+                                    &body,
+                                )
+                                .await;
+                            }
+                            2 => {
+                                *server_state.response_json.lock().await = Some(body);
+                                server_state.response_ready.notify_waiters();
+                                let _ = write_http_response(
+                                    &mut socket,
+                                    "202 Accepted",
+                                    &[("Connection", "close".to_string())],
+                                    b"",
+                                )
+                                .await;
+                            }
+                            _ => {
+                                let _ = socket
+                                    .write_all(
+                                        b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                    _ => {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                    }
+                }
+            });
+        }
+    });
+
+    let url = format!("http://{}/mcp", addr);
+    let client = mcp_jsonrpc::Client::connect_streamable_http(&url)
+        .await
+        .expect("connect streamable http");
+
+    for method in ["ping1", "ping2"] {
+        let result = client
+            .request(method, serde_json::json!({}))
+            .await
+            .expect("request should succeed");
+        assert_eq!(result, serde_json::json!({ "ok": true }));
+    }
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while state.get_count.load(Ordering::SeqCst) < 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("session-id change should trigger another SSE retry");
+
+    let third = tokio::time::timeout(
+        Duration::from_secs(1),
+        client.request("ping3", serde_json::json!({})),
+    )
+    .await
+    .expect("third request should not hang")
+    .expect("third request should succeed");
+    assert_eq!(third, serde_json::json!({ "ok": true }));
+
+    assert_eq!(state.post_count.load(Ordering::SeqCst), 3);
+    let sse_sessions = state.sse_sessions.lock().await.clone();
+    assert!(sse_sessions.len() >= 3);
+    assert_eq!(sse_sessions[0], None);
+    assert_eq!(sse_sessions[1], Some("abc".to_string()));
+    assert_eq!(sse_sessions[2], Some("def".to_string()));
 
     drop(client);
     server.abort();
