@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
@@ -355,6 +355,51 @@ impl std::fmt::Debug for ClientHandle {
     }
 }
 
+#[derive(Serialize)]
+struct OutboundNotification<'a> {
+    jsonrpc: &'static str,
+    method: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    params: Option<&'a Value>,
+}
+
+#[derive(Serialize)]
+struct OutboundRequest<'a> {
+    jsonrpc: &'static str,
+    id: &'a Id,
+    method: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    params: Option<&'a Value>,
+}
+
+#[derive(Serialize)]
+struct OutboundOkResponse<'a> {
+    jsonrpc: &'static str,
+    id: &'a Id,
+    result: &'a Value,
+}
+
+#[derive(Serialize)]
+struct OutboundErrorBody<'a> {
+    code: i64,
+    message: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<&'a Value>,
+}
+
+#[derive(Serialize)]
+struct OutboundErrorResponse<'a, I> {
+    jsonrpc: &'static str,
+    id: &'a I,
+    error: OutboundErrorBody<'a>,
+}
+
+fn serialize_json_line(value: &impl Serialize) -> Result<Vec<u8>, Error> {
+    let mut line = serde_json::to_vec(value)?;
+    line.push(b'\n');
+    Ok(line)
+}
+
 impl ClientHandle {
     pub fn stats(&self) -> ClientStats {
         self.stats.snapshot()
@@ -453,16 +498,13 @@ impl ClientHandle {
 
     pub async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), Error> {
         self.check_closed()?;
-        let mut msg = Map::new();
-        msg.insert("jsonrpc".to_string(), Value::String("2.0".to_string()));
-        msg.insert("method".to_string(), Value::String(method.to_string()));
-        if let Some(params) = params.filter(|v| !v.is_null()) {
-            msg.insert("params".to_string(), params);
-        }
-        let msg = Value::Object(msg);
-
-        let mut line = serde_json::to_vec(&msg)?;
-        line.push(b'\n');
+        let params = params.filter(|v| !v.is_null());
+        let msg = OutboundNotification {
+            jsonrpc: "2.0",
+            method,
+            params: params.as_ref(),
+        };
+        let line = serialize_json_line(&msg)?;
         self.write_line(&line).await?;
         Ok(())
     }
@@ -518,17 +560,14 @@ impl ClientHandle {
             id.clone(),
         );
 
-        let mut req = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-        });
-        if let Some(params) = params.filter(|v| !v.is_null()) {
-            req["params"] = params;
-        }
-
-        let mut line = serde_json::to_vec(&req)?;
-        line.push(b'\n');
+        let params = params.filter(|v| !v.is_null());
+        let req = OutboundRequest {
+            jsonrpc: "2.0",
+            id: &id,
+            method,
+            params: params.as_ref(),
+        };
+        let line = serialize_json_line(&req)?;
         let recv_result = match timeout {
             Some(timeout) => {
                 let deadline = tokio::time::Instant::now() + timeout;
@@ -583,13 +622,12 @@ impl ClientHandle {
 
     pub async fn respond_ok(&self, id: Id, result: Value) -> Result<(), Error> {
         self.check_closed()?;
-        let response = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": result,
-        });
-        let mut line = serde_json::to_vec(&response)?;
-        line.push(b'\n');
+        let response = OutboundOkResponse {
+            jsonrpc: "2.0",
+            id: &id,
+            result: &result,
+        };
+        let line = serialize_json_line(&response)?;
         self.write_line(&line).await
     }
 
@@ -601,22 +639,17 @@ impl ClientHandle {
         data: Option<Value>,
     ) -> Result<(), Error> {
         self.check_closed()?;
-        let mut error = serde_json::json!({
-            "code": code,
-            "message": message.into(),
-        });
-        if let Some(data) = data {
-            error["data"] = data;
-        }
-
-        let response = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": error,
-        });
-
-        let mut line = serde_json::to_vec(&response)?;
-        line.push(b'\n');
+        let message = message.into();
+        let response = OutboundErrorResponse {
+            jsonrpc: "2.0",
+            id: &id,
+            error: OutboundErrorBody {
+                code,
+                message: &message,
+                data: data.as_ref(),
+            },
+        };
+        let line = serialize_json_line(&response)?;
         self.write_line(&line).await
     }
 
@@ -628,22 +661,17 @@ impl ClientHandle {
         data: Option<Value>,
     ) -> Result<(), Error> {
         self.check_closed()?;
-        let mut error = serde_json::json!({
-            "code": code,
-            "message": message.into(),
-        });
-        if let Some(data) = data {
-            error["data"] = data;
-        }
-
-        let response = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": error,
-        });
-
-        let mut line = serde_json::to_vec(&response)?;
-        line.push(b'\n');
+        let message = message.into();
+        let response = OutboundErrorResponse {
+            jsonrpc: "2.0",
+            id: &id,
+            error: OutboundErrorBody {
+                code,
+                message: &message,
+                data: data.as_ref(),
+            },
+        };
+        let line = serialize_json_line(&response)?;
         self.write_line(&line).await
     }
 
