@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.3.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：`Config::load` 的 `mcpServers` 路径跳转新增“已访问 canonical path”循环检测；循环引用现在会快速失败而不是反复读取到跳数上限，减少无效 I/O 与解析开销（行为更明确，仍保留最大跳数保护）。
 - `mcp-jsonrpc`：优化 `handle_response` 热路径：`result/error` 字段改为一次性移动解析，并在错误分支直接移动 `code/message/data`，减少 `HashMap` 重复查找与 `error.message` 额外字符串克隆；并补充响应路由回归测试（行为不变）。
 - `mcp-jsonrpc`：优化 `streamable_http` 错误 body 预览路径：无效 JSON 场景现在只对 `error_body_preview_bytes` 窗口做 UTF-8 lossy 转换，不再先把整段响应体转换为 `String` 再截断，降低大响应错误路径的瞬时内存占用；并补充预览边界测试。
 - `mcp-kit`：`Manager` 的 `stdout_log.path` root 边界判断改为先按当前工作目录绝对化 `cwd`，修复“`cwd` 为相对路径且 `stdout_log.path` 为绝对路径”时的误判拒绝问题（行为更符合预期，未放宽安全边界）。

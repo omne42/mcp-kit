@@ -138,6 +138,24 @@ async fn load_required_errors_when_missing() {
 }
 
 #[tokio::test]
+async fn load_denies_mcpservers_indirection_cycle() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{ "mcpServers": "mcp.json" }"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("indirection") && msg.contains("cycle"),
+        "err={msg}"
+    );
+}
+
+#[tokio::test]
 async fn load_fails_closed_when_config_is_too_large() {
     let dir = tempfile::tempdir().unwrap();
     let big = "a".repeat((MAX_CONFIG_BYTES + 1) as usize);

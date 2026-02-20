@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, btree_map::Entry};
+use std::collections::{BTreeMap, HashSet, btree_map::Entry};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::Context;
@@ -63,6 +63,7 @@ async fn parse_config_or_external(
     }
 
     let mut hops = 0usize;
+    let mut visited_indirections = HashSet::<PathBuf>::new();
     loop {
         let json: Value =
             serde_json::from_str(&contents).with_context(|| parse_context(path.as_deref()))?;
@@ -111,6 +112,12 @@ async fn parse_config_or_external(
                                 fs::canonicalize_in_root(canonical_root, &next_path)
                                     .await
                                     .context("resolve mcpServers path")?;
+                            if !visited_indirections.insert(canonical_next_path.clone()) {
+                                anyhow::bail!(
+                                    "mcpServers path indirection contains a cycle: {}",
+                                    canonical_next_path.display()
+                                );
+                            }
                             contents = fs::read_to_string_limited(&canonical_next_path).await?;
                             path = Some(next_path);
                             continue;
