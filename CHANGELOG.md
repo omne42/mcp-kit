@@ -7,9 +7,10 @@
 
 ## [Unreleased]
 
-> 计划下一个版本：`0.3.0`（包含若干 breaking changes；见下文标注）。
+> 计划下一个版本：`1.0.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- release: bump workspace package version to `1.0.0`.
 - `mcp-kit`：修复 `Manager::connect` 对 `stdout_log.path` 的相对路径处理：连接时先按 `cwd` 解析为绝对路径，再做 root 边界校验并将解析后的路径传给 `mcp-jsonrpc`，避免程序化配置传入相对路径时出现“校验与实际落盘路径不一致”的问题。
 - `mcp-jsonrpc`：优化 `stdout_log` 轮转扫描目录的热路径：先按文件名模式过滤，再对候选项执行 `file_type` 检查，减少大目录下的无效 `stat`/`file_type` 调用（行为不变）。
 - `mcp-kit`：优化 `stdout_log_path_within_root` 的路径归一化判断：支持 root/path 含等价父目录段时的稳定比较，减少边界校验误判（行为更准确）。
