@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.3.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-jsonrpc`：`streamable_http` 的 POST bridge 改为仅在错误分支按需解析请求 `id`，并将请求行改为 `bytes::Bytes` 复用同一缓冲（避免成功路径上的额外 JSON 解析与 body 拷贝）；同时为 SSE pump 行缓冲/事件缓冲增加小幅预分配，减少高频场景下的重复扩容（行为不变）。
 - `mcp-jsonrpc`：出站 JSON-RPC `notify/request/respond_*` 改为借用型 `Serialize` 结构体序列化，去除热路径上临时 `Map/Value` 组装分配（行为不变）；并补充 `params = null` 仍省略 `params` 字段的回归测试。
 - `mcp-jsonrpc`：新增 `Client::is_closed()` 并在 `mcp-kit` 连接存活性检查中直接使用，避免热路径上为只读 closed 状态而克隆整份 `ClientHandle`（行为不变）。
 - `mcp-jsonrpc`：收紧 `streamable_http` 写路径与 session-id 更新路径的异步锁生命周期，并复用 `Content-Length -> usize` 转换结果，减少热点路径上的锁占用与重复计算（行为不变）。
