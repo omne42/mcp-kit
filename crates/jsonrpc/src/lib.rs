@@ -401,9 +401,19 @@ impl ClientHandle {
         }
         let _ = self.close_reason.set(reason.clone()); // pre-commit: allow-let-underscore
         let handle = self.clone();
-        tokio::spawn(async move {
-            handle.close_with_reason(reason).await;
-        });
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            drop(runtime.spawn(async move {
+                handle.close_with_reason(reason).await;
+            }));
+            return;
+        }
+
+        // No runtime available (e.g. sync context): avoid panicking and perform best-effort close.
+        let err = Error::protocol(ProtocolErrorKind::Closed, reason);
+        drain_pending(&handle.pending, &err);
+        if let Ok(mut write) = handle.write.try_lock() {
+            drop(std::mem::replace(&mut *write, Box::new(tokio::io::sink())));
+        }
     }
 
     fn check_closed(&self) -> Result<(), Error> {
@@ -525,8 +535,7 @@ impl ClientHandle {
                 match tokio::time::timeout_at(deadline, self.write_line(&line)).await {
                     Ok(Ok(())) => {}
                     Ok(Err(err)) => {
-                        let mut pending = lock_pending(&self.pending);
-                        pending.remove(&id);
+                        lock_pending(&self.pending).remove(&id);
                         guard.disarm();
                         return Err(err);
                     }
@@ -552,8 +561,7 @@ impl ClientHandle {
             }
             None => {
                 if let Err(err) = self.write_line(&line).await {
-                    let mut pending = lock_pending(&self.pending);
-                    pending.remove(&id);
+                    lock_pending(&self.pending).remove(&id);
                     guard.disarm();
                     return Err(err);
                 }
@@ -644,6 +652,7 @@ impl ClientHandle {
         let mut write = self.write.lock().await;
         write.write_all(line).await?;
         write.flush().await?;
+        drop(write);
         Ok(())
     }
 }
@@ -1905,6 +1914,54 @@ mod wait_timeout_tests {
 
         assert!(entered.load(Ordering::Relaxed));
         assert!(!status.success());
+    }
+}
+
+#[cfg(test)]
+mod background_close_tests {
+    use super::*;
+
+    #[test]
+    fn schedule_close_once_without_runtime_drains_pending_without_panic() {
+        let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, rx) = oneshot::channel();
+        lock_pending(&pending).insert(Id::Integer(1), tx);
+
+        let handle = ClientHandle {
+            write: Arc::new(tokio::sync::Mutex::new(
+                Box::new(tokio::io::sink()) as Box<dyn AsyncWrite + Send + Unpin>
+            )),
+            next_id: Arc::new(AtomicI64::new(1)),
+            pending: pending.clone(),
+            max_pending_requests: 1,
+            cancelled_request_ids: Arc::new(Mutex::new(CancelledRequestIdsState::default())),
+            stats: Arc::new(ClientStatsInner::default()),
+            diagnostics: None,
+            closed: Arc::new(AtomicBool::new(false)),
+            close_reason: Arc::new(OnceLock::new()),
+            stdout_log_write_error: Arc::new(OnceLock::new()),
+        };
+
+        handle.schedule_close_once("closed outside runtime".to_string());
+
+        assert!(handle.is_closed());
+        assert_eq!(
+            handle.close_reason().as_deref(),
+            Some("closed outside runtime")
+        );
+        assert!(lock_pending(&pending).is_empty());
+
+        let drained = rx
+            .blocking_recv()
+            .expect("pending request should be drained");
+        let err = drained.expect_err("drained pending request must receive closed error");
+        assert!(matches!(
+            err,
+            Error::Protocol(ProtocolError {
+                kind: ProtocolErrorKind::Closed,
+                ..
+            })
+        ));
     }
 }
 

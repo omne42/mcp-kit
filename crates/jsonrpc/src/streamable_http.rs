@@ -480,6 +480,7 @@ impl HttpPostBridge {
                     if guard.as_deref() != Some(value) {
                         *guard = Some(value.to_owned());
                     }
+                    drop(guard);
                     if was_none {
                         should_wake_sse = true;
                     }
@@ -768,6 +769,7 @@ async fn close_post_bridge(
     handle.close_with_reason(reason.into()).await;
     let mut writer = writer.lock().await;
     let _ = writer.shutdown().await; // pre-commit: allow-let-underscore
+    drop(writer);
 }
 
 async fn emit_post_bridge_error(
@@ -810,18 +812,18 @@ async fn read_response_body_limited(
     max_message_bytes: usize,
 ) -> Result<Vec<u8>, ReadBodyError> {
     let content_length = resp.content_length();
-    if let Some(content_length) = content_length {
-        let actual_bytes = match usize::try_from(content_length) {
-            Ok(actual_bytes) => actual_bytes,
-            Err(_) => usize::MAX,
-        };
+    let content_length_usize = content_length.and_then(|len| usize::try_from(len).ok());
+    if let Some(actual_bytes) = content_length_usize {
         if actual_bytes > max_message_bytes {
             return Err(ReadBodyError::TooLarge { actual_bytes });
         }
+    } else if content_length.is_some() {
+        return Err(ReadBodyError::TooLarge {
+            actual_bytes: usize::MAX,
+        });
     }
 
-    let initial_capacity = content_length
-        .and_then(|len| usize::try_from(len).ok())
+    let initial_capacity = content_length_usize
         .unwrap_or_default()
         .min(max_message_bytes)
         .min(HTTP_RESPONSE_INITIAL_CAP_BYTES);
@@ -831,9 +833,7 @@ async fn read_response_body_limited(
         let chunk = chunk.map_err(ReadBodyError::Http)?;
         let next_len = out.len().saturating_add(chunk.len());
         if next_len > max_message_bytes {
-            let actual_bytes = content_length
-                .and_then(|len| usize::try_from(len).ok())
-                .map_or(next_len, |len| len.max(next_len));
+            let actual_bytes = content_length_usize.map_or(next_len, |len| len.max(next_len));
             return Err(ReadBodyError::TooLarge { actual_bytes });
         }
         out.extend_from_slice(&chunk);
@@ -931,6 +931,7 @@ async fn pump_sse(
     }
     let mut writer = writer.lock().await;
     let _ = writer.shutdown().await;
+    drop(writer);
 }
 
 async fn sse_pump_to_writer<R: tokio::io::AsyncBufRead + Unpin>(
@@ -1006,6 +1007,7 @@ async fn write_json_line(
     let mut writer = writer.lock().await;
     writer.write_all(line).await?;
     writer.write_all(b"\n").await?;
+    drop(writer);
     Ok(())
 }
 
@@ -1039,6 +1041,7 @@ async fn write_error_response(
 
     let mut writer = writer.lock().await;
     writer.write_all(&out).await?;
+    drop(writer);
     Ok(())
 }
 
