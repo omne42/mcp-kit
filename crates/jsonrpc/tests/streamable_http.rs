@@ -492,6 +492,86 @@ async fn streamable_http_propagates_mcp_session_id_and_updates() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streamable_http_clamps_zero_max_message_bytes_to_minimum() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => return,
+            };
+            tokio::spawn(async move {
+                let Some((req, body)) = read_http_request(&mut socket).await else {
+                    return;
+                };
+
+                match (req.method.as_str(), req.path.as_str()) {
+                    ("GET", "/mcp") => {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                    }
+                    ("POST", "/mcp") => {
+                        let parsed: serde_json::Value = match serde_json::from_slice(&body) {
+                            Ok(v) => v,
+                            Err(_) => return,
+                        };
+                        let id = parsed.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                        let response = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": { "ok": true },
+                        });
+                        let body = serde_json::to_vec(&response).unwrap();
+                        let _ = write_http_response(
+                            &mut socket,
+                            "200 OK",
+                            &[
+                                ("Content-Type", "application/json".to_string()),
+                                ("Connection", "close".to_string()),
+                            ],
+                            &body,
+                        )
+                        .await;
+                    }
+                    _ => {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                    }
+                }
+            });
+        }
+    });
+
+    let mut options = mcp_jsonrpc::SpawnOptions::default();
+    options.limits.max_message_bytes = 0;
+    let url = format!("http://{}/mcp", addr);
+    let client = mcp_jsonrpc::Client::connect_streamable_http_with_options(
+        &url,
+        mcp_jsonrpc::StreamableHttpOptions::default(),
+        options,
+    )
+    .await
+    .expect("connect streamable http");
+
+    let result = client
+        .request("ping", serde_json::json!({}))
+        .await
+        .expect("request should succeed");
+    assert_eq!(result, serde_json::json!({ "ok": true }));
+
+    drop(client);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn streamable_http_post_can_return_sse_and_stops_on_done() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();

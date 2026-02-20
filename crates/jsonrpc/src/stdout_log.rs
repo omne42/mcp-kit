@@ -114,13 +114,11 @@ impl LogState {
         if !line.ends_with(b"\n") {
             self.write_bytes_with_rotation(b"\n").await?;
         }
-
         Ok(())
     }
 
-    async fn write_bytes_with_rotation(&mut self, bytes: &[u8]) -> Result<(), std::io::Error> {
-        let mut offset = 0usize;
-        while offset < bytes.len() {
+    async fn write_bytes_with_rotation(&mut self, mut bytes: &[u8]) -> Result<(), std::io::Error> {
+        while !bytes.is_empty() {
             let remaining = self.max_bytes_per_part.saturating_sub(self.current_len);
             if remaining == 0 {
                 self.file.flush().await?;
@@ -133,11 +131,10 @@ impl LogState {
                 continue;
             }
 
-            let take = usize::try_from(remaining.min((bytes.len() - offset) as u64))
-                .unwrap_or(bytes.len() - offset);
-            self.file.write_all(&bytes[offset..(offset + take)]).await?;
+            let take = usize::try_from(remaining.min(bytes.len() as u64)).unwrap_or(bytes.len());
+            self.file.write_all(&bytes[..take]).await?;
             self.current_len = self.current_len.saturating_add(take as u64);
-            offset = offset.saturating_add(take);
+            bytes = &bytes[take..];
         }
         Ok(())
     }
@@ -297,6 +294,32 @@ mod tests {
             parts.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
             vec![4, 5]
         );
+    }
+
+    #[tokio::test]
+    async fn write_line_bytes_preserves_order_across_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("server.stdout.log");
+        let mut state = LogState::new(StdoutLog {
+            path: base.clone(),
+            max_bytes_per_part: 3,
+            max_parts: None,
+        })
+        .await
+        .unwrap();
+
+        state.write_line_bytes(b"abc").await.unwrap();
+        drop(state);
+
+        let mut parts = list_rotating_log_parts(&base).await.unwrap();
+        parts.sort_by_key(|(part, _)| *part);
+
+        let mut out = Vec::new();
+        for (_part, path) in parts {
+            out.extend(tokio::fs::read(path).await.unwrap());
+        }
+        out.extend(tokio::fs::read(&base).await.unwrap());
+        assert_eq!(out, b"abc\n");
     }
 
     #[cfg(unix)]

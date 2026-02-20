@@ -244,6 +244,51 @@ async fn request_roundtrip_over_duplex() {
 }
 
 #[tokio::test]
+async fn connect_io_clamps_zero_max_message_bytes_to_default() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let mut server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+        let line = lines
+            .next_line()
+            .await
+            .expect("read ok")
+            .expect("request line");
+
+        let msg = parse_line(&line);
+        let id = msg["id"].clone();
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "ok": true },
+        });
+        let mut out = serde_json::to_string(&response).unwrap();
+        out.push('\n');
+        server_write.write_all(out.as_bytes()).await.unwrap();
+        server_write.flush().await.unwrap();
+    });
+
+    let mut options = mcp_jsonrpc::SpawnOptions::default();
+    options.limits.max_message_bytes = 0;
+    let client = mcp_jsonrpc::Client::connect_io_with_options(client_read, client_write, options)
+        .await
+        .expect("client connect");
+
+    let result = client
+        .request("demo/request", serde_json::json!({ "x": 1 }))
+        .await
+        .expect("request ok");
+    assert_eq!(result, serde_json::json!({ "ok": true }));
+
+    tokio::time::timeout(Duration::from_secs(1), &mut server_task)
+        .await
+        .expect("server task completed")
+        .expect("server task ok");
+}
+
+#[tokio::test]
 async fn request_fails_when_response_id_type_mismatches_pending_request() {
     let (client_stream, server_stream) = tokio::io::duplex(1024);
     let (client_read, client_write) = tokio::io::split(client_stream);

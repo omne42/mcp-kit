@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use tokio_util::io::StreamReader;
 
 use crate::{
-    Client, ClientHandle, Error, Limits, ProtocolErrorKind, SpawnOptions, StreamableHttpOptions,
+    Client, ClientHandle, Error, ProtocolErrorKind, SpawnOptions, StreamableHttpOptions,
 };
 
 fn ends_with_ignore_ascii_case(haystack: &str, suffix: &str) -> bool {
@@ -44,10 +44,6 @@ fn is_json_content_type(content_type: &str) -> bool {
         return true;
     }
     ends_with_ignore_ascii_case(subty, "+json")
-}
-
-fn normalized_max_message_bytes(max_message_bytes: usize) -> usize {
-    max_message_bytes.max(1)
 }
 
 const SSE_EVENT_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
@@ -155,16 +151,8 @@ impl Client {
             Ok(Some(resp))
         }
 
-        if options.limits.max_message_bytes == 0 {
-            return Err(Error::protocol(
-                ProtocolErrorKind::InvalidInput,
-                "limits.max_message_bytes must be >= 1",
-            ));
-        }
-
-        let mut limits = options.limits.clone();
-        limits.max_message_bytes = normalized_max_message_bytes(limits.max_message_bytes);
-        let max_message_bytes = limits.max_message_bytes;
+        let max_message_bytes =
+            crate::normalize_max_message_bytes(options.limits.max_message_bytes);
         let connect_timeout = http_options.connect_timeout;
         let request_timeout = http_options.request_timeout;
         let follow_redirects = http_options.follow_redirects;
@@ -225,7 +213,6 @@ impl Client {
         let writer_post = writer.clone();
         let session_id_post = session_id.clone();
         let sse_wake_post = sse_wake_tx.clone();
-        let limits_post = limits.clone();
         let request_timeout_post = request_timeout;
         let error_body_preview_bytes_post = error_body_preview_bytes;
         let handle_post = transport_handle.clone();
@@ -238,7 +225,7 @@ impl Client {
                 post_url,
                 session_id: session_id_post,
                 sse_wake: sse_wake_post,
-                limits: limits_post,
+                max_message_bytes,
                 request_timeout: request_timeout_post,
                 error_body_preview_bytes: error_body_preview_bytes_post,
             }
@@ -307,7 +294,7 @@ struct HttpPostBridge {
     post_url: String,
     session_id: Arc<tokio::sync::Mutex<Option<String>>>,
     sse_wake: mpsc::Sender<()>,
-    limits: Limits,
+    max_message_bytes: usize,
     request_timeout: Option<Duration>,
     error_body_preview_bytes: usize,
 }
@@ -324,11 +311,10 @@ impl HttpPostBridge {
             post_url,
             session_id,
             sse_wake,
-            limits,
+            max_message_bytes,
             request_timeout,
             error_body_preview_bytes,
         } = self;
-        let max_message_bytes = normalized_max_message_bytes(limits.max_message_bytes);
 
         let mut reader = tokio::io::BufReader::new(bridge_read);
         loop {

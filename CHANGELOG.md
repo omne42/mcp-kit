@@ -157,6 +157,7 @@
 
 ### Fixed
 - `mcp-kit`：`Session::notify` 超时后不再无上限等待 close 路径；现在会以有界 best-effort close 收尾，并保留结构化 `WaitTimeout` 错误，避免调用方在“已超时”后再次卡住。
+- `mcp-jsonrpc`：修复 `limits.max_message_bytes=0` 时被错误钳制为 `1` 导致消息全部超限的问题；现在 `0` 会回退到默认上限，并统一到 stdio/unix/streamable_http 路径。
 - `mcp-jsonrpc`：streamable_http POST bridge 在收到无效 JSON 时会 fail-fast 关闭连接，避免 pending request 无限悬挂。
 - `mcp-kit`：Windows 下读取 `mcp.json` 时 open 会设置 `FILE_FLAG_OPEN_REPARSE_POINT`（best-effort），降低 TOCTOU symlink replacement 风险。
 - `mcp-kit`：server→client request handler panic 现在会桥接为 `-32000` error 并继续处理后续消息，避免后台任务 panic 导致连接被动断开。

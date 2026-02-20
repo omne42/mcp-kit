@@ -39,6 +39,8 @@ use stdout_log::LogState;
 
 pub type StdoutLogRedactor = Arc<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
 
+const DEFAULT_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Clone)]
 pub struct SpawnOptions {
     pub stdout_log: Option<StdoutLog>,
@@ -157,12 +159,19 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             // Large enough for typical MCP messages, but bounded to reduce DoS risk.
-            max_message_bytes: 16 * 1024 * 1024,
+            max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
             notifications_capacity: 256,
             requests_capacity: 64,
             max_pending_requests: 64,
         }
     }
+}
+
+pub(crate) fn normalize_max_message_bytes(max_message_bytes: usize) -> usize {
+    if max_message_bytes == 0 {
+        return DEFAULT_MAX_MESSAGE_BYTES;
+    }
+    max_message_bytes
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1125,7 +1134,7 @@ where
 
         let mut log_state = stdout_log;
 
-        let max_message_bytes = limits.max_message_bytes.max(1);
+        let max_message_bytes = normalize_max_message_bytes(limits.max_message_bytes);
         let mut reader = tokio::io::BufReader::new(reader);
         loop {
             let next = read_line_limited(&mut reader, max_message_bytes).await;
@@ -1597,6 +1606,15 @@ fn handle_response(
 mod stats_tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn max_message_bytes_zero_falls_back_to_default() {
+        assert_eq!(
+            normalize_max_message_bytes(0),
+            Limits::default().max_message_bytes
+        );
+        assert_eq!(normalize_max_message_bytes(4096), 4096);
+    }
 
     #[tokio::test]
     async fn stats_tracks_invalid_json_lines() {
