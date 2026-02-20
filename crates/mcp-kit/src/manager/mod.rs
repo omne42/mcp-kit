@@ -51,13 +51,35 @@ fn absolutize_with_base(path: &Path, base: &Path) -> PathBuf {
     base.join(path)
 }
 
+fn normalize_path_for_prefix_check(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
+}
+
 fn stdout_log_path_within_root(stdout_log_path: &Path, root: &Path) -> bool {
-    let stdout_log_path = if stdout_log_path.is_absolute() {
-        stdout_log_path.to_path_buf()
-    } else {
-        root.join(stdout_log_path)
-    };
-    stdout_log_path.starts_with(root)
+    if !stdout_log_path.is_absolute() {
+        return true;
+    }
+    if !root.is_absolute() {
+        return false;
+    }
+
+    let normalized_root = normalize_path_for_prefix_check(root);
+    let normalized_stdout_log_path = normalize_path_for_prefix_check(stdout_log_path);
+    normalized_stdout_log_path.starts_with(&normalized_root)
 }
 
 fn contains_wait_timeout(err: &anyhow::Error) -> bool {

@@ -64,6 +64,14 @@ fn stdout_log_path_within_root_rejects_outside_absolute_path() {
 }
 
 #[test]
+fn stdout_log_path_within_root_accepts_equivalent_root_with_parent_segments() {
+    let root = std::env::temp_dir().join("workspace");
+    let root_with_parent = root.join("nested").join("..");
+    let log_path = root.join("logs/server.stdout.log");
+    assert!(stdout_log_path_within_root(&log_path, &root_with_parent));
+}
+
+#[test]
 fn try_from_config_rejects_invalid_client_config() {
     let config = Config::new(
         crate::ClientConfig {
@@ -3077,6 +3085,110 @@ async fn connection_wait_aborts_remaining_handler_tasks_after_first_join_error()
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn connection_drop_aborts_handler_tasks() {
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+    let server_task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+        let init_line = lines.next_line().await.unwrap().unwrap();
+        let init_value: Value = serde_json::from_str(&init_line).unwrap();
+        assert_eq!(init_value["method"], "initialize");
+        let id = init_value["id"].clone();
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "protocolVersion": MCP_PROTOCOL_VERSION },
+        });
+        let mut response_line = serde_json::to_string(&response).unwrap();
+        response_line.push('\n');
+        server_write
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let note_line = lines.next_line().await.unwrap().unwrap();
+        let note_value: Value = serde_json::from_str(&note_line).unwrap();
+        assert_eq!(note_value["method"], "notifications/initialized");
+
+        let notify = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "demo/notify",
+            "params": {},
+        });
+        let mut notify_line = serde_json::to_string(&notify).unwrap();
+        notify_line.push('\n');
+        server_write
+            .write_all(notify_line.as_bytes())
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        let eof = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(eof.is_none(), "expected EOF after connection drop");
+    });
+
+    let handler_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started_for_handler = Arc::clone(&handler_started);
+    let handler_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dropped_for_handler = Arc::clone(&handler_dropped);
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted)
+        .with_server_notification_handler(Arc::new(move |_ctx| {
+            let started_for_handler = Arc::clone(&started_for_handler);
+            let dropped_for_handler = Arc::clone(&dropped_for_handler);
+            Box::pin(async move {
+                struct OnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+                impl Drop for OnDrop {
+                    fn drop(&mut self) {
+                        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+
+                let _on_drop = OnDrop(dropped_for_handler);
+                started_for_handler.store(true, std::sync::atomic::Ordering::Relaxed);
+                std::future::pending::<()>().await;
+            })
+        }));
+
+    manager
+        .connect_io("srv", client_read, client_write)
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !handler_started.load(std::sync::atomic::Ordering::Relaxed) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let conn = manager
+        .take_connection("srv")
+        .expect("connection should exist");
+    drop(conn);
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !handler_dropped.load(std::sync::atomic::Ordering::Relaxed) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    server_task.await.unwrap();
 }
 
 #[tokio::test]

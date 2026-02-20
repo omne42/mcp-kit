@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.3.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：优化 `stdout_log_path_within_root` 的相对路径判断：在 `ServerConfig::validate` 已保证无 `..` 的前提下直接走 fast-path，避免不必要的 `PathBuf` 拼接分配（行为不变）。
 - `mcp-jsonrpc`：优化批处理入站分发路径，`handle_incoming_value` 在展开 batch 数组时先做容量预留，减少大 batch 场景下的临时 `Vec` 扩容开销（行为不变）。
 - `mcp-kit`：优化 `ServerHandlerTimeoutCounts::{snapshot,take_and_reset}` 的快照构建，改为按当前计数项数量预分配 `HashMap`，减少高频读取统计时的重复扩容。
 - `mcp-jsonrpc`：优化入站 JSON-RPC 分发热路径：`handle_incoming_value` 改为“按需分配”批处理栈，常见的单消息（非 batch）路径不再为临时栈触发堆分配（行为不变）。
@@ -191,6 +192,7 @@
 - githooks: `pre-commit` 新增 staged Rust hygiene 检查（库代码新增行中默认拒绝 `unwrap/expect` 与 `let _ =`），并将 Rust gate 升级为 `clippy -D warnings` + `cargo test --workspace --all-features`。
 
 ### Fixed
+- `mcp-kit`：修复 `stdout_log.path` root 边界判断在 `root` 含 `..` 语义等价段时的误判拒绝；判断前会做词法归一化（不触发文件系统访问），避免合法的绝对路径被错误判定为 root 外。
 - `mcp-jsonrpc`：修复诊断采样在达到上限后不再更新的问题；`invalid_json_samples` 现在保持固定容量并保留“最近 N 条”无效 JSON 样本，避免长生命周期连接里诊断信息陈旧，同时维持有界内存占用（并补充回归测试）。
 - `mcp-jsonrpc`：修复 `cancelled_request_ids` 重复记录同一 `id` 时不会刷新“最近代际”的问题；现在重复插入会刷新淘汰顺序，避免极端 `id` 复用 + 延迟响应场景下取消标记被过早驱逐，并补充回归测试。
 - `mcp-jsonrpc`：修复 `streamable_http` 在 `mcp-session-id` 从旧值更新为新值且响应并非 `202` 时未触发 SSE 重试的问题；现在只要会话 ID 发生变化就会唤醒重连流程，避免 SSE 长期停留在旧会话（并新增回归测试覆盖该场景）。
