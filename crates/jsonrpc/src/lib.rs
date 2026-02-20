@@ -684,6 +684,10 @@ impl Client {
         self.handle.stats()
     }
 
+    pub fn is_closed(&self) -> bool {
+        self.handle.is_closed()
+    }
+
     pub async fn connect_io<R, W>(read: R, write: W) -> Result<Self, Error>
     where
         R: AsyncRead + Unpin + Send + 'static,

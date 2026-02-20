@@ -1081,6 +1081,45 @@ async fn load_denies_invalid_server_names() {
 }
 
 #[tokio::test]
+async fn load_denies_duplicate_server_names_after_trim_in_v1() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{ "version": 1, "servers": { "srv": { "transport": "stdio", "argv": ["a"] }, " srv ": { "transport": "stdio", "argv": ["b"] } } }"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("duplicate mcp server name after normalization"),
+        "err={err:#}"
+    );
+}
+
+#[tokio::test]
+async fn load_denies_duplicate_server_names_after_trim_in_external_format() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{
+  "srv": { "command": "echo", "args": ["a"] },
+  " srv ": { "command": "echo", "args": ["b"] }
+}"#,
+    )
+    .await
+    .unwrap();
+
+    let err = Config::load(dir.path(), None).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("duplicate mcp server name after normalization"),
+        "err={err:#}"
+    );
+}
+
+#[tokio::test]
 async fn load_override_path_is_fail_closed() {
     let dir = tempfile::tempdir().unwrap();
     let err = Config::load(dir.path(), Some(PathBuf::from("missing.json")))

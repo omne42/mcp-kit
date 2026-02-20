@@ -986,10 +986,10 @@ impl Manager {
                 if child.try_wait().ok().flatten().is_some() {
                     true
                 } else {
-                    conn.client.handle().is_closed()
+                    conn.client.is_closed()
                 }
             }
-            None => conn.client.handle().is_closed(),
+            None => conn.client.is_closed(),
         };
 
         if exited {

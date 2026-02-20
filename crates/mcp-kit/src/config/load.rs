@@ -234,6 +234,21 @@ fn ensure_command_args_argv_only_for_stdio(
     Ok(())
 }
 
+fn insert_server_unique(
+    servers: &mut BTreeMap<ServerName, ServerConfig>,
+    raw_name: &str,
+    server_name: ServerName,
+    server_cfg: ServerConfig,
+) -> anyhow::Result<()> {
+    if servers.contains_key(server_name.as_str()) {
+        anyhow::bail!(
+            "duplicate mcp server name after normalization: {raw_name:?} -> {server_name}"
+        );
+    }
+    servers.insert(server_name, server_cfg);
+    Ok(())
+}
+
 fn build_v1_config(
     thread_root: &Path,
     path: Option<PathBuf>,
@@ -381,7 +396,7 @@ fn build_v1_config(
             err.context(msg)
         })?;
 
-        servers.insert(server_name_key, server_cfg);
+        insert_server_unique(&mut servers, &name, server_name_key, server_cfg)?;
     }
 
     Ok(Config {
@@ -588,7 +603,7 @@ impl Config {
                         err.context(msg)
                     })?;
 
-                    servers.insert(server_name, server_cfg);
+                    insert_server_unique(&mut servers, &name, server_name, server_cfg)?;
                 }
                 Transport::Unix => {
                     let has_command_args_argv =
@@ -628,7 +643,7 @@ impl Config {
                         err.context(msg)
                     })?;
 
-                    servers.insert(server_name, server_cfg);
+                    insert_server_unique(&mut servers, &name, server_name, server_cfg)?;
                 }
                 Transport::StreamableHttp => {
                     let has_command_args_argv =
@@ -668,7 +683,7 @@ impl Config {
                         err.context(msg)
                     })?;
 
-                    servers.insert(server_name, server_cfg);
+                    insert_server_unique(&mut servers, &name, server_name, server_cfg)?;
                 }
             }
         }
