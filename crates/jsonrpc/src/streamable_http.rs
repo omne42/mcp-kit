@@ -872,25 +872,19 @@ async fn sse_pump_to_writer<R: tokio::io::AsyncBufRead + Unpin>(
     stop_on_done: bool,
 ) -> Result<(), io::Error> {
     let mut data = Vec::new();
+    let mut line = Vec::new();
 
     loop {
-        let line = crate::read_line_limited(reader, max_message_bytes).await?;
-        let Some(line) = line else {
-            return Ok(());
-        };
-
-        if line.is_empty() {
-            if data.is_empty() {
-                continue;
-            }
-            if stop_on_done && data == b"[DONE]" {
+        if !crate::read_line_limited_into(reader, max_message_bytes, &mut line).await? {
+            if flush_sse_event_data(writer, &mut data, max_message_bytes, stop_on_done).await? {
                 return Ok(());
             }
-            write_json_line(writer, &data).await?;
-            data.clear();
-            if data.capacity() > SSE_EVENT_BUFFER_RETAIN_BYTES {
-                let retain = SSE_EVENT_BUFFER_RETAIN_BYTES.min(max_message_bytes);
-                data = Vec::with_capacity(retain);
+            return Ok(());
+        }
+
+        if line.is_empty() {
+            if flush_sse_event_data(writer, &mut data, max_message_bytes, stop_on_done).await? {
+                return Ok(());
             }
             continue;
         }
@@ -913,6 +907,30 @@ async fn sse_pump_to_writer<R: tokio::io::AsyncBufRead + Unpin>(
             data.extend_from_slice(rest);
         }
     }
+}
+
+async fn flush_sse_event_data(
+    writer: &Arc<tokio::sync::Mutex<tokio::io::WriteHalf<tokio::io::DuplexStream>>>,
+    data: &mut Vec<u8>,
+    max_message_bytes: usize,
+    stop_on_done: bool,
+) -> Result<bool, io::Error> {
+    if data.is_empty() {
+        return Ok(false);
+    }
+
+    if stop_on_done && data == b"[DONE]" {
+        data.clear();
+        return Ok(true);
+    }
+
+    write_json_line(writer, data).await?;
+    data.clear();
+    if data.capacity() > SSE_EVENT_BUFFER_RETAIN_BYTES {
+        let retain = SSE_EVENT_BUFFER_RETAIN_BYTES.min(max_message_bytes);
+        *data = Vec::with_capacity(retain);
+    }
+    Ok(false)
 }
 
 async fn write_json_line(
@@ -1031,5 +1049,57 @@ mod tests {
             out,
             b"{\"jsonrpc\":\"2.0\",\"method\":\"demo/notify\",\"params\":{}}\n"
         );
+    }
+
+    #[tokio::test]
+    async fn sse_pump_flushes_last_data_event_without_trailing_blank_line()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let sse = "data: {\"jsonrpc\":\"2.0\",\"method\":\"demo/notify\"}\n";
+
+        let (mut in_write, in_read) = tokio::io::duplex(1024);
+        in_write.write_all(sse.as_bytes()).await?;
+        drop(in_write);
+        let mut reader = tokio::io::BufReader::new(in_read);
+
+        let (client_side, mut capture_side) = tokio::io::duplex(1024);
+        let (read, write) = tokio::io::split(client_side);
+        drop(read);
+        let writer = Arc::new(tokio::sync::Mutex::new(write));
+
+        sse_pump_to_writer(&mut reader, &writer, 1024, false)
+            .await
+            .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
+        drop(writer);
+
+        let mut out = Vec::new();
+        capture_side.read_to_end(&mut out).await?;
+        assert_eq!(out, b"{\"jsonrpc\":\"2.0\",\"method\":\"demo/notify\"}\n");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sse_pump_stop_on_done_ignores_eof_done_without_trailing_blank_line()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let sse = "data: [DONE]\n";
+
+        let (mut in_write, in_read) = tokio::io::duplex(1024);
+        in_write.write_all(sse.as_bytes()).await?;
+        drop(in_write);
+        let mut reader = tokio::io::BufReader::new(in_read);
+
+        let (client_side, mut capture_side) = tokio::io::duplex(1024);
+        let (read, write) = tokio::io::split(client_side);
+        drop(read);
+        let writer = Arc::new(tokio::sync::Mutex::new(write));
+
+        sse_pump_to_writer(&mut reader, &writer, 1024, true)
+            .await
+            .map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
+        drop(writer);
+
+        let mut out = Vec::new();
+        capture_side.read_to_end(&mut out).await?;
+        assert!(out.is_empty());
+        Ok(())
     }
 }

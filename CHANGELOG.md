@@ -29,6 +29,7 @@
 - `mcp-kit`：`Config::load` 解析 `stdout_log` 时会先用 `StdoutLogConfig::validate` 做 fail-fast 校验，再 resolve 相对路径，避免空 `path` 被当作 root。
 - `mcp-kit`：移除 `Manager::connect` 内对 `argv` 的重复校验（统一由 `ServerConfig::validate` 负责）；并小幅整理 `normalize_ip` 的实现，降低后续继续加规则时的维护成本（行为不变）。
 - `mcp-jsonrpc`：deflake 一处 EOF 相关单测（仅测试改动，不影响库行为）。
+- `mcp-jsonrpc`：JSON-RPC/SSE 逐行读取热路径改为复用行缓冲区，减少高频消息场景下的重复分配（行为不变）。
 - `mcp-kit`：收口 `Config::load` / `validate` 的重复校验，并在包裹错误时保留 `anyhow` 的 source chain（错误文案仍包含根因）；同时将 server→client handler 超时计数改为 per-server 原子计数，避免在 handler 路径上持锁更新（API 不变）。
 - `mcp-kit`：修正文档：`Manager::take_server_handler_timeout_counts()` 会重置计数但不会移除已跟踪的 server key（实现原因：handler task 持有共享计数器）；并补充单测覆盖该语义（API 不变）。
 - `mcp-jsonrpc`：stdout_log 写入失败不再直接 `eprintln!`；改为通过 `ClientHandle::stdout_log_write_error()` 暴露（失败后会禁用 stdout_log 写入）。
@@ -158,6 +159,7 @@
 ### Fixed
 - `mcp-jsonrpc`：`streamable_http` 在收到 `Content-Length` 已超出 `max_message_bytes` 的 JSON 响应时会立即返回 `http response too large`，不再等待响应体流式读取；修复 `request_timeout=None` + keep-alive 场景下可能长时间阻塞的问题，并新增回归测试覆盖。
 - `mcp-jsonrpc`：`streamable_http` 在 `request_timeout=None` 时，遇到非 2xx HTTP 响应不再等待错误响应体结束（也不读取 body preview），避免 keep-alive 且无 `Content-Length` 的错误响应导致请求卡死；并新增回归测试 `streamable_http_error_without_request_timeout_does_not_hang`。
+- `mcp-jsonrpc`：修复 `streamable_http` SSE 解析在 EOF 且缺少末尾空行时可能丢失最后一个 `data:` 事件的问题；并补充回归测试覆盖（含 `[DONE]` EOF 语义）。
 - `mcp-kit`：`Manager::connect` 在 Untrusted + `streamable_http` 场景下，遇到 `bearer_token_env_var` / `env_http_headers` 现在会在 DNS 校验前 fail-fast 拒绝，避免无意义的 DNS/network 开销并确保错误原因稳定可预期。
 - Tests：`untrusted` DNS fail-open/fail-closed 回归测试改为使用极短 `dns_timeout` 触发超时分支，移除对外部 DNS/NXDOMAIN 行为的环境依赖，降低 flaky 风险。
 - `mcp-kit`：`Session::notify` 超时后不再无上限等待 close 路径；现在会以有界 best-effort close 收尾，并保留结构化 `WaitTimeout` 错误，避免调用方在“已超时”后再次卡住。

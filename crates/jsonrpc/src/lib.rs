@@ -1136,10 +1136,11 @@ where
 
         let max_message_bytes = normalize_max_message_bytes(limits.max_message_bytes);
         let mut reader = tokio::io::BufReader::new(reader);
+        let mut line = Vec::new();
         loop {
-            let next = read_line_limited(&mut reader, max_message_bytes).await;
+            let next = read_line_limited_into(&mut reader, max_message_bytes, &mut line).await;
             match next {
-                Ok(Some(line)) => {
+                Ok(true) => {
                     if line.iter().all(u8::is_ascii_whitespace) {
                         continue;
                     }
@@ -1174,7 +1175,7 @@ where
                     )
                     .await;
                 }
-                Ok(None) => {
+                Ok(false) => {
                     responder
                         .close_with_reason("server closed connection")
                         .await;
@@ -1336,13 +1337,23 @@ async fn read_line_limited<R: tokio::io::AsyncBufRead + Unpin>(
     max_bytes: usize,
 ) -> Result<Option<Vec<u8>>, std::io::Error> {
     let mut buf = Vec::new();
+    if read_line_limited_into(reader, max_bytes, &mut buf).await? {
+        Ok(Some(buf))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn read_line_limited_into<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max_bytes: usize,
+    buf: &mut Vec<u8>,
+) -> Result<bool, std::io::Error> {
+    buf.clear();
     loop {
         let available = reader.fill_buf().await?;
         if available.is_empty() {
-            if buf.is_empty() {
-                return Ok(None);
-            }
-            break;
+            return Ok(!buf.is_empty());
         }
 
         let newline_pos = available.iter().position(|b| *b == b'\n');
@@ -1368,7 +1379,7 @@ async fn read_line_limited<R: tokio::io::AsyncBufRead + Unpin>(
         }
     }
 
-    Ok(Some(buf))
+    Ok(true)
 }
 
 fn truncate_string(mut s: String, max_bytes: usize) -> String {
