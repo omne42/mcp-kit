@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.3.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-jsonrpc`：优化两条高频读取路径的初始缓冲分配策略：`read_line_limited` 现在为行缓冲预留 `4KiB` 初始容量，`streamable_http` 在未知 `Content-Length` 的响应体读取中也会使用小窗口预分配；减少高频小消息/分块响应场景下的重复扩容与分配抖动（行为不变）。
 - `mcp-kit`：修复 `Connection::wait_with_timeout` 的 child 回收边界：当 JSON-RPC close 阶段先超时且 `on_timeout=Kill` 时，仍会继续执行“detached child”的 kill/wait 流程，避免提前返回导致子进程未被回收；并补充对应回归测试。
 - `mcp-kit`：`Config::load` 的 `mcpServers` 路径跳转新增“已访问 canonical path”循环检测；循环引用现在会快速失败而不是反复读取到跳数上限，减少无效 I/O 与解析开销（行为更明确，仍保留最大跳数保护）。
 - `mcp-jsonrpc`：优化 `handle_response` 热路径：`result/error` 字段改为一次性移动解析，并在错误分支直接移动 `code/message/data`，减少 `HashMap` 重复查找与 `error.message` 额外字符串克隆；并补充响应路由回归测试（行为不变）。

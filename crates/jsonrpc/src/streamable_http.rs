@@ -111,6 +111,7 @@ fn jsonrpc_response_id_from_line(line: &[u8]) -> Result<Option<Value>, serde_jso
 
 const SSE_EVENT_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
 const HTTP_RESPONSE_INITIAL_CAP_BYTES: usize = 64 * 1024;
+const HTTP_RESPONSE_UNKNOWN_LENGTH_INITIAL_CAP_BYTES: usize = 4 * 1024;
 
 impl Client {
     pub async fn connect_streamable_http(url: &str) -> Result<Self, Error> {
@@ -830,8 +831,8 @@ async fn read_response_body_limited(
     }
 
     let initial_capacity = content_length_usize
-        .unwrap_or_default()
-        .min(max_message_bytes)
+        .map(|len| len.min(max_message_bytes))
+        .unwrap_or_else(|| max_message_bytes.min(HTTP_RESPONSE_UNKNOWN_LENGTH_INITIAL_CAP_BYTES))
         .min(HTTP_RESPONSE_INITIAL_CAP_BYTES);
     let mut out = Vec::with_capacity(initial_capacity);
     let mut stream = resp.bytes_stream();

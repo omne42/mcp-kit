@@ -41,6 +41,7 @@ pub type StdoutLogRedactor = Arc<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
 
 const DEFAULT_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 const REUSABLE_LINE_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
+const READ_LINE_INITIAL_CAP_BYTES: usize = 4 * 1024;
 
 #[derive(Clone)]
 pub struct SpawnOptions {
@@ -1400,7 +1401,7 @@ async fn read_line_limited<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     max_bytes: usize,
 ) -> Result<Option<Vec<u8>>, std::io::Error> {
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(max_bytes.min(READ_LINE_INITIAL_CAP_BYTES));
     if read_line_limited_into(reader, max_bytes, &mut buf).await? {
         Ok(Some(buf))
     } else {
