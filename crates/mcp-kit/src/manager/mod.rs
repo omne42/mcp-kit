@@ -1839,8 +1839,7 @@ impl Manager {
             })?
             .with_context(|| format!("mcp initialize failed (server={})", server_name.as_str()))?;
 
-        if let Some(server_protocol_version) =
-            result.get("protocolVersion").and_then(|v| v.as_str())
+        if let Some(server_protocol_version) = result.get("protocolVersion").and_then(Value::as_str)
         {
             if server_protocol_version != self.protocol_version {
                 match self.protocol_version_check {
@@ -1874,6 +1873,8 @@ impl Manager {
             } else {
                 self.remove_protocol_version_mismatch(server_name.as_str());
             }
+        } else {
+            self.remove_protocol_version_mismatch(server_name.as_str());
         }
 
         Self::notify_raw(

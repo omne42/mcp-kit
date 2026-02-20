@@ -1546,6 +1546,96 @@ async fn protocol_version_mismatch_is_cleared_after_matching_reconnect() {
 }
 
 #[tokio::test]
+async fn protocol_version_mismatch_is_cleared_when_reconnect_omits_protocol_version() {
+    let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
+        .with_trust_mode(TrustMode::Trusted)
+        .with_protocol_version_check(ProtocolVersionCheck::Warn);
+
+    {
+        let (client_stream, server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let server_task = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            assert_eq!(init_value["method"], "initialize");
+            let id = init_value["id"].clone();
+
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "protocolVersion": "1900-01-01" },
+            });
+            let mut response_line = serde_json::to_string(&response).unwrap();
+            response_line.push('\n');
+            server_write
+                .write_all(response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let note_line = lines.next_line().await.unwrap().unwrap();
+            let note_value: Value = serde_json::from_str(&note_line).unwrap();
+            assert_eq!(note_value["method"], "notifications/initialized");
+        });
+
+        let session = manager
+            .connect_io_session("srv", client_read, client_write)
+            .await
+            .unwrap();
+        assert_eq!(manager.protocol_version_mismatches().len(), 1);
+        session.wait().await.unwrap();
+        server_task.await.unwrap();
+    }
+
+    {
+        let (client_stream, server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let server_task = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(server_read).lines();
+
+            let init_line = lines.next_line().await.unwrap().unwrap();
+            let init_value: Value = serde_json::from_str(&init_line).unwrap();
+            assert_eq!(init_value["method"], "initialize");
+            let id = init_value["id"].clone();
+
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "hello": "world" },
+            });
+            let mut response_line = serde_json::to_string(&response).unwrap();
+            response_line.push('\n');
+            server_write
+                .write_all(response_line.as_bytes())
+                .await
+                .unwrap();
+            server_write.flush().await.unwrap();
+
+            let note_line = lines.next_line().await.unwrap().unwrap();
+            let note_value: Value = serde_json::from_str(&note_line).unwrap();
+            assert_eq!(note_value["method"], "notifications/initialized");
+        });
+
+        let session = manager
+            .connect_io_session("srv", client_read, client_write)
+            .await
+            .unwrap();
+        assert!(
+            manager.protocol_version_mismatches().is_empty(),
+            "reconnect without protocolVersion should clear stale mismatch entry"
+        );
+        session.wait().await.unwrap();
+        server_task.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn disconnect_clears_protocol_version_mismatch_entry() {
     let (client_stream, server_stream) = tokio::io::duplex(1024);
     let (client_read, client_write) = tokio::io::split(client_stream);

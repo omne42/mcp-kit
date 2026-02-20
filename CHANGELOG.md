@@ -10,6 +10,8 @@
 > 计划下一个版本：`0.3.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-jsonrpc`：JSON-RPC 出站（`notify/request/respond_*`）改为直接序列化到 `Vec<u8>` 再写入，减少热路径上的字符串分配与字节拷贝（行为不变）。
+- `mcp-kit`：修复 `ProtocolVersionCheck::Warn` 下的状态残留：当重连后的 `initialize.result` 未包含 `protocolVersion` 时，会清理该 server 的旧 mismatch 记录，避免陈旧告警。
 - `mcp-jsonrpc`：`streamable_http` 的 SSE 事件缓冲回收改为 `Vec::shrink_to(...)`，避免通过重建 `Vec` 触发一次额外分配（行为不变）。
 - `mcpctl`：构建 Untrusted `allow_host` 策略时改用 `clone_from`，减少一次不必要的分配/拷贝（行为不变）。
 - `mcp-jsonrpc`：`streamable_http` 的 HTTP JSON body 缓冲初始容量现在上限为 `64KiB`（仍受 `max_message_bytes` 约束），降低大 `Content-Length` 场景下的瞬时内存占用（行为不变）。

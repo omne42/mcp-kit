@@ -451,8 +451,8 @@ impl ClientHandle {
         }
         let msg = Value::Object(msg);
 
-        let mut line = serde_json::to_string(&msg)?;
-        line.push('\n');
+        let mut line = serde_json::to_vec(&msg)?;
+        line.push(b'\n');
         self.write_line(&line).await?;
         Ok(())
     }
@@ -517,8 +517,8 @@ impl ClientHandle {
             req["params"] = params;
         }
 
-        let mut line = serde_json::to_string(&req)?;
-        line.push('\n');
+        let mut line = serde_json::to_vec(&req)?;
+        line.push(b'\n');
         let recv_result = match timeout {
             Some(timeout) => {
                 let deadline = tokio::time::Instant::now() + timeout;
@@ -580,8 +580,8 @@ impl ClientHandle {
             "id": id,
             "result": result,
         });
-        let mut line = serde_json::to_string(&response)?;
-        line.push('\n');
+        let mut line = serde_json::to_vec(&response)?;
+        line.push(b'\n');
         self.write_line(&line).await
     }
 
@@ -607,8 +607,8 @@ impl ClientHandle {
             "error": error,
         });
 
-        let mut line = serde_json::to_string(&response)?;
-        line.push('\n');
+        let mut line = serde_json::to_vec(&response)?;
+        line.push(b'\n');
         self.write_line(&line).await
     }
 
@@ -634,15 +634,15 @@ impl ClientHandle {
             "error": error,
         });
 
-        let mut line = serde_json::to_string(&response)?;
-        line.push('\n');
+        let mut line = serde_json::to_vec(&response)?;
+        line.push(b'\n');
         self.write_line(&line).await
     }
 
-    async fn write_line(&self, line: &str) -> Result<(), Error> {
+    async fn write_line(&self, line: &[u8]) -> Result<(), Error> {
         self.check_closed()?;
         let mut write = self.write.lock().await;
-        write.write_all(line.as_bytes()).await?;
+        write.write_all(line).await?;
         write.flush().await?;
         Ok(())
     }
