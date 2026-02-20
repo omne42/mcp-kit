@@ -690,6 +690,85 @@ async fn streamable_http_bridges_oversized_json_body_to_jsonrpc_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streamable_http_declared_oversized_json_body_fails_without_hanging() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => return,
+            };
+            tokio::spawn(async move {
+                let Some((req, _body)) = read_http_request(&mut socket).await else {
+                    return;
+                };
+
+                match (req.method.as_str(), req.path.as_str()) {
+                    ("GET", "/mcp") => {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                    }
+                    ("POST", "/mcp") => {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4096\r\nConnection: keep-alive\r\n\r\n",
+                            )
+                            .await;
+                        let _ = socket.flush().await;
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                    _ => {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                    }
+                }
+            });
+        }
+    });
+
+    let url = format!("http://{}/mcp", addr);
+    let mut spawn_options = mcp_jsonrpc::SpawnOptions::default();
+    spawn_options.limits.max_message_bytes = 256;
+    let client = mcp_jsonrpc::Client::connect_streamable_http_with_options(
+        &url,
+        mcp_jsonrpc::StreamableHttpOptions {
+            request_timeout: None,
+            ..Default::default()
+        },
+        spawn_options,
+    )
+    .await
+    .expect("connect streamable http");
+
+    let err = tokio::time::timeout(
+        Duration::from_millis(500),
+        client.request("ping", serde_json::json!({})),
+    )
+    .await
+    .expect("request should fail fast for oversized declared content-length")
+    .expect_err("request should fail on oversized http response body");
+
+    match err {
+        mcp_jsonrpc::Error::Rpc { code, message, .. } => {
+            assert_eq!(code, -32000);
+            assert_eq!(message, "http response too large");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    drop(client);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn streamable_http_bridges_empty_json_body_to_jsonrpc_error() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();

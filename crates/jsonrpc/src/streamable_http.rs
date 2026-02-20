@@ -742,15 +742,31 @@ async fn read_response_body_limited(
     resp: reqwest::Response,
     max_message_bytes: usize,
 ) -> Result<Vec<u8>, ReadBodyError> {
-    let mut out = Vec::new();
+    let content_length = resp.content_length();
+    if let Some(content_length) = content_length {
+        let actual_bytes = match usize::try_from(content_length) {
+            Ok(actual_bytes) => actual_bytes,
+            Err(_) => usize::MAX,
+        };
+        if actual_bytes > max_message_bytes {
+            return Err(ReadBodyError::TooLarge { actual_bytes });
+        }
+    }
+
+    let initial_capacity = content_length
+        .and_then(|len| usize::try_from(len).ok())
+        .unwrap_or_default()
+        .min(max_message_bytes);
+    let mut out = Vec::with_capacity(initial_capacity);
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(ReadBodyError::Http)?;
         let next_len = out.len().saturating_add(chunk.len());
         if next_len > max_message_bytes {
-            return Err(ReadBodyError::TooLarge {
-                actual_bytes: next_len,
-            });
+            let actual_bytes = content_length
+                .and_then(|len| usize::try_from(len).ok())
+                .map_or(next_len, |len| len.max(next_len));
+            return Err(ReadBodyError::TooLarge { actual_bytes });
         }
         out.extend_from_slice(&chunk);
     }
