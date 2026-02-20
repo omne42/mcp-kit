@@ -599,15 +599,7 @@ impl HttpPostBridge {
                             let parsed_json: Value = match serde_json::from_slice(&body) {
                                 Ok(json) => json,
                                 Err(_) => {
-                                    let data = if error_body_preview_bytes > 0 {
-                                        let body_preview =
-                                            String::from_utf8_lossy(&body).into_owned();
-                                        let preview =
-                                            truncate_string(body_preview, error_body_preview_bytes);
-                                        Some(serde_json::json!({ "body": preview }))
-                                    } else {
-                                        None
-                                    };
+                                    let data = body_preview_json(&body, error_body_preview_bytes);
                                     if !emit_post_bridge_error_from_line(
                                         &writer,
                                         &handle,
@@ -654,14 +646,7 @@ impl HttpPostBridge {
                             }
                         } else {
                             if serde_json::from_slice::<serde::de::IgnoredAny>(&body).is_err() {
-                                let data = if error_body_preview_bytes > 0 {
-                                    let body_preview = String::from_utf8_lossy(&body).into_owned();
-                                    let preview =
-                                        truncate_string(body_preview, error_body_preview_bytes);
-                                    Some(serde_json::json!({ "body": preview }))
-                                } else {
-                                    None
-                                };
+                                let data = body_preview_json(&body, error_body_preview_bytes);
                                 if !emit_post_bridge_error_from_line(
                                     &writer,
                                     &handle,
@@ -896,11 +881,22 @@ async fn read_response_body_preview_text(
         }
     }
 
-    if out.is_empty() {
+    body_preview_text(&out, max_bytes)
+}
+
+fn body_preview_json(body: &[u8], max_bytes: usize) -> Option<Value> {
+    body_preview_text(body, max_bytes).map(|preview| serde_json::json!({ "body": preview }))
+}
+
+fn body_preview_text(body: &[u8], max_bytes: usize) -> Option<String> {
+    if max_bytes == 0 || body.is_empty() {
         return None;
     }
 
-    let preview = String::from_utf8_lossy(&out).into_owned();
+    // Convert only the preview window instead of the full body to avoid large temporary
+    // allocations on oversized/invalid responses.
+    let preview_len = body.len().min(max_bytes);
+    let preview = String::from_utf8_lossy(&body[..preview_len]).into_owned();
     Some(truncate_string(preview, max_bytes))
 }
 
@@ -1136,6 +1132,19 @@ mod tests {
         assert!(!is_json_content_type("application/xml"));
         assert!(!is_json_content_type("application/jsonp"));
         assert!(!is_json_content_type("application/notjson+jsone"));
+    }
+
+    #[test]
+    fn body_preview_text_is_bounded_by_max_bytes() {
+        let body = b"abcdefghijklmnopqrstuvwxyz";
+        let preview = body_preview_text(body, 8).expect("preview available");
+        assert_eq!(preview, "abcdefgh");
+    }
+
+    #[test]
+    fn body_preview_json_returns_none_for_zero_limit() {
+        let body = b"{\"large\":true}";
+        assert!(body_preview_json(body, 0).is_none());
     }
 
     #[tokio::test]
