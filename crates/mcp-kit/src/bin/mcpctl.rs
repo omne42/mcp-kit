@@ -163,7 +163,9 @@ async fn main() -> anyhow::Result<()> {
             root.join(path)
         };
 
-        let canonical_root = tokio::fs::canonicalize(&root).await.unwrap_or(root.clone());
+        let canonical_root = tokio::fs::canonicalize(&root)
+            .await
+            .unwrap_or_else(|_| root.clone());
         if let Ok(canonical_config) = tokio::fs::canonicalize(&resolved).await {
             if !canonical_config.starts_with(&canonical_root) {
                 if !cli.allow_config_outside_root {

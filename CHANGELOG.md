@@ -10,6 +10,8 @@
 > 计划下一个版本：`0.3.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-jsonrpc`：`streamable_http` 的 POST bridge 在探测客户端请求 `id` 时改为借用 JSON key（`Cow<'de, str>`），减少热路径中的临时字符串分配（行为不变）。
+- `mcpctl`：`--config` 边界检查中的 `canonicalize(root)` 回退分支改为 `unwrap_or_else`，避免无条件克隆 `PathBuf`（行为不变）。
 - `mcp-kit`：`Session::notify` 超时后的关闭路径改为 one-shot 后台关闭（首个超时即标记 closed，后续不再重复 spawn 关闭任务），降低持续超时/锁竞争场景下的后台任务堆积风险并保持快速失败语义。
 - `mcp-jsonrpc`：JSON-RPC 出站（`notify/request/respond_*`）改为直接序列化到 `Vec<u8>` 再写入，减少热路径上的字符串分配与字节拷贝（行为不变）。
 - `mcp-jsonrpc`：`streamable_http` 的 POST bridge 提取请求 `id` 时改为轻量反序列化（只解析 `id`，其余字段走 `IgnoredAny`），避免为大 `params` 请求构建整棵 `Value` 树，降低热路径内存分配与 CPU 开销（行为不变）。

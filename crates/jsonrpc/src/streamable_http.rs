@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -78,7 +79,7 @@ impl<'de> Deserialize<'de> for JsonRpcIdObjectProbe {
                 A: MapAccess<'de>,
             {
                 let mut probe = JsonRpcIdObjectProbe::default();
-                while let Some(key) = map.next_key::<String>()? {
+                while let Some(key) = map.next_key::<Cow<'de, str>>()? {
                     if key == "id" {
                         probe.saw_id = true;
                         probe.id = Some(map.next_value()?);
