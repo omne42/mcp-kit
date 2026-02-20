@@ -10,6 +10,8 @@
 > 计划下一个版本：`0.3.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-jsonrpc`：`streamable_http` 的 HTTP JSON body 缓冲初始容量现在上限为 `64KiB`（仍受 `max_message_bytes` 约束），降低大 `Content-Length` 场景下的瞬时内存占用（行为不变）。
+- `mcp-jsonrpc`：移除 `streamable_http` 中未使用的内部 helper，恢复 `clippy -D warnings` 全绿。
 - `mcp-jsonrpc`：优化入站 JSON-RPC 消息分发路径，`method/params` 改为从已拥有的对象中移动而非克隆，降低大 `params` 场景下的额外分配开销（行为不变）。
 - `mcp-kit`：配置文件读取按已知文件大小预分配缓冲区，减少 `Config::load` 热路径上的重复扩容开销（行为不变）。
 - `mcp-jsonrpc`：诊断采样队列与 HTTP 错误 body 预览缓冲增加预分配，减少高频错误路径上的小额分配抖动（行为不变）。

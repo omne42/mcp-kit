@@ -44,10 +44,6 @@ fn is_json_content_type(content_type: &str) -> bool {
     ends_with_ignore_ascii_case(subty, "+json")
 }
 
-fn normalized_max_message_bytes(max_message_bytes: usize) -> usize {
-    max_message_bytes.max(1)
-}
-
 fn jsonrpc_response_id(value: &Value) -> Option<Value> {
     match value.get("id") {
         Some(Value::String(id)) => Some(Value::String(id.clone())),
@@ -58,6 +54,7 @@ fn jsonrpc_response_id(value: &Value) -> Option<Value> {
 }
 
 const SSE_EVENT_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
+const HTTP_RESPONSE_INITIAL_CAP_BYTES: usize = 64 * 1024;
 
 impl Client {
     pub async fn connect_streamable_http(url: &str) -> Result<Self, Error> {
@@ -769,7 +766,8 @@ async fn read_response_body_limited(
     let initial_capacity = content_length
         .and_then(|len| usize::try_from(len).ok())
         .unwrap_or_default()
-        .min(max_message_bytes);
+        .min(max_message_bytes)
+        .min(HTTP_RESPONSE_INITIAL_CAP_BYTES);
     let mut out = Vec::with_capacity(initial_capacity);
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
