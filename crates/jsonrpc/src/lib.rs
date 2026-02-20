@@ -1276,10 +1276,10 @@ async fn handle_incoming_value(
 
                 match map.remove("method") {
                     Some(Value::String(method)) => {
+                        let id_value = map.remove("id");
                         if !jsonrpc_valid {
-                            if let Some(id_value) = map.get("id") {
-                                let id_value =
-                                    parse_id(id_value).map_or(Value::Null, |_| id_value.clone());
+                            if let Some(id_value) = id_value {
+                                let id_value = error_response_id_or_null(id_value);
                                 drop(
                                     responder
                                         .respond_error_raw_id(
@@ -1295,8 +1295,8 @@ async fn handle_incoming_value(
                         }
 
                         let params = map.remove("params");
-                        if let Some(id_value) = map.get("id") {
-                            let Some(id) = parse_id(id_value) else {
+                        if let Some(id_value) = id_value {
+                            let Some(id) = parse_id_owned(id_value) else {
                                 drop(
                                     responder
                                         .respond_error_raw_id(
@@ -1363,9 +1363,8 @@ async fn handle_incoming_value(
                         continue;
                     }
                     Some(_) => {
-                        if let Some(id_value) = map.get("id") {
-                            let id_value =
-                                parse_id(id_value).map_or(Value::Null, |_| id_value.clone());
+                        if let Some(id_value) = map.remove("id") {
+                            let id_value = error_response_id_or_null(id_value);
                             let _ = responder
                                 .respond_error_raw_id(
                                     id_value,
@@ -1595,16 +1594,10 @@ fn clone_error_for_drain(err: &Error) -> Error {
     }
 }
 
-fn parse_id(value: &Value) -> Option<Id> {
+fn error_response_id_or_null(value: Value) -> Value {
     match value {
-        Value::String(value) => Some(Id::String(value.clone())),
-        Value::Number(value) => value.as_i64().map(Id::Integer).or_else(|| {
-            value
-                .as_u64()
-                .and_then(|v| i64::try_from(v).ok())
-                .map(Id::Integer)
-        }),
-        _ => None,
+        Value::String(_) | Value::Number(_) => value,
+        _ => Value::Null,
     }
 }
 
