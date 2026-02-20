@@ -70,15 +70,13 @@ fn normalize_path_for_prefix_check(path: &Path) -> PathBuf {
 }
 
 fn stdout_log_path_within_root(stdout_log_path: &Path, root: &Path) -> bool {
-    if !stdout_log_path.is_absolute() {
-        return true;
-    }
     if !root.is_absolute() {
         return false;
     }
 
+    let resolved_stdout_log_path = absolutize_with_base(stdout_log_path, root);
     let normalized_root = normalize_path_for_prefix_check(root);
-    let normalized_stdout_log_path = normalize_path_for_prefix_check(stdout_log_path);
+    let normalized_stdout_log_path = normalize_path_for_prefix_check(&resolved_stdout_log_path);
     normalized_stdout_log_path.starts_with(&normalized_root)
 }
 
@@ -740,8 +738,9 @@ impl Manager {
                 let stdout_log = server_cfg.stdout_log().map(|log| {
                     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                     let cwd_abs = absolutize_with_base(cwd, &current_dir);
+                    let resolved_log_path = absolutize_with_base(&log.path, &cwd_abs);
                     if !self.allow_stdout_log_outside_root
-                        && !stdout_log_path_within_root(&log.path, &cwd_abs)
+                        && !stdout_log_path_within_root(&resolved_log_path, &cwd_abs)
                     {
                         anyhow::bail!(
                             "mcp server {server_name}: stdout_log.path must be within root (set Manager::with_allow_stdout_log_outside_root(true) to override): {}",
@@ -749,7 +748,7 @@ impl Manager {
                         );
                     }
                     Ok::<_, anyhow::Error>(mcp_jsonrpc::StdoutLog {
-                        path: log.path.clone(),
+                        path: resolved_log_path,
                         max_bytes_per_part: log.max_bytes_per_part,
                         max_parts: log.max_parts,
                     })

@@ -49,6 +49,15 @@ fn stdout_log_path_within_root_accepts_relative_path() {
 }
 
 #[test]
+fn stdout_log_path_within_root_rejects_relative_parent_escape() {
+    let root = std::env::temp_dir().join("workspace");
+    assert!(!stdout_log_path_within_root(
+        Path::new("../outside.log"),
+        &root
+    ));
+}
+
+#[test]
 fn stdout_log_path_within_root_accepts_absolute_path_after_root_absolutize() {
     let base = std::env::temp_dir();
     let root = absolutize_with_base(Path::new("workspace"), &base);

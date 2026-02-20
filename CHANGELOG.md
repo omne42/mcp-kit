@@ -10,7 +10,9 @@
 > 计划下一个版本：`0.3.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
-- `mcp-kit`：优化 `stdout_log_path_within_root` 的相对路径判断：在 `ServerConfig::validate` 已保证无 `..` 的前提下直接走 fast-path，避免不必要的 `PathBuf` 拼接分配（行为不变）。
+- `mcp-kit`：修复 `Manager::connect` 对 `stdout_log.path` 的相对路径处理：连接时先按 `cwd` 解析为绝对路径，再做 root 边界校验并将解析后的路径传给 `mcp-jsonrpc`，避免程序化配置传入相对路径时出现“校验与实际落盘路径不一致”的问题。
+- `mcp-jsonrpc`：优化 `stdout_log` 轮转扫描目录的热路径：先按文件名模式过滤，再对候选项执行 `file_type` 检查，减少大目录下的无效 `stat`/`file_type` 调用（行为不变）。
+- `mcp-kit`：优化 `stdout_log_path_within_root` 的路径归一化判断：支持 root/path 含等价父目录段时的稳定比较，减少边界校验误判（行为更准确）。
 - `mcp-jsonrpc`：优化批处理入站分发路径，`handle_incoming_value` 在展开 batch 数组时先做容量预留，减少大 batch 场景下的临时 `Vec` 扩容开销（行为不变）。
 - `mcp-kit`：优化 `ServerHandlerTimeoutCounts::{snapshot,take_and_reset}` 的快照构建，改为按当前计数项数量预分配 `HashMap`，减少高频读取统计时的重复扩容。
 - `mcp-jsonrpc`：优化入站 JSON-RPC 分发热路径：`handle_incoming_value` 改为“按需分配”批处理栈，常见的单消息（非 batch）路径不再为临时栈触发堆分配（行为不变）。

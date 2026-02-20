@@ -157,10 +157,6 @@ async fn next_rotating_log_part(base_path: &Path) -> Result<u32, std::io::Error>
     let prefix = format!("{stem}.segment-");
     let mut max_part = 0u32;
     while let Some(entry) = read_dir.next_entry().await? {
-        let ty = entry.file_type().await?;
-        if !ty.is_file() {
-            continue;
-        }
         let file_name = entry.file_name();
         let Some(name) = file_name.to_str() else {
             continue;
@@ -174,6 +170,10 @@ async fn next_rotating_log_part(base_path: &Path) -> Result<u32, std::io::Error>
         let Ok(part) = part_str.parse::<u32>() else {
             continue;
         };
+        let ty = entry.file_type().await?;
+        if !ty.is_file() {
+            continue;
+        }
         max_part = max_part.max(part);
     }
 
@@ -225,10 +225,6 @@ pub(crate) async fn list_rotating_log_parts(
     let prefix = format!("{stem}.segment-");
     let mut parts = Vec::new();
     while let Some(entry) = read_dir.next_entry().await? {
-        let ty = entry.file_type().await?;
-        if !ty.is_file() {
-            continue;
-        }
         let file_name = entry.file_name();
         let Some(name) = file_name.to_str() else {
             continue;
@@ -242,6 +238,10 @@ pub(crate) async fn list_rotating_log_parts(
         let Ok(part) = part_str.parse::<u32>() else {
             continue;
         };
+        let ty = entry.file_type().await?;
+        if !ty.is_file() {
+            continue;
+        }
 
         parts.push((part, entry.path()));
     }
