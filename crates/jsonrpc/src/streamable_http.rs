@@ -99,8 +99,7 @@ impl<'de> Deserialize<'de> for JsonRpcIdObjectProbe {
 fn jsonrpc_response_id_from_line(line: &[u8]) -> Result<Option<Value>, serde_json::Error> {
     let id = match serde_json::from_slice::<JsonRpcIdProbe>(line)? {
         JsonRpcIdProbe::Object(probe) if probe.saw_id => probe.id,
-        JsonRpcIdProbe::Other(_) => None,
-        JsonRpcIdProbe::Object(_) => None,
+        JsonRpcIdProbe::Other(_) | JsonRpcIdProbe::Object(_) => None,
     };
     Ok(match id {
         Some(Value::String(id)) => Some(Value::String(id)),
@@ -395,11 +394,10 @@ impl HttpPostBridge {
                     return;
                 }
             };
-            let line = Bytes::from(line);
-
-            if line.iter().all(u8::is_ascii_whitespace) {
+            if crate::is_ascii_whitespace_only(&line) {
                 continue;
             }
+            let line = Bytes::from(line);
 
             let mut req = http_client
                 .post(&post_url)

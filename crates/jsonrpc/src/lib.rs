@@ -1193,7 +1193,7 @@ where
             let next = read_line_limited_into(&mut reader, max_message_bytes, &mut line).await;
             match next {
                 Ok(true) => {
-                    if line.iter().all(u8::is_ascii_whitespace) {
+                    if is_ascii_whitespace_only(&line) {
                         continue;
                     }
                     if let Some(state) = &mut log_state {
@@ -1463,6 +1463,12 @@ async fn read_line_limited_into<R: tokio::io::AsyncBufRead + Unpin>(
 
     maybe_shrink_line_buffer(buf, max_bytes);
     Ok(true)
+}
+
+pub(crate) fn is_ascii_whitespace_only(line: &[u8]) -> bool {
+    line.is_empty()
+        || (line.first().is_some_and(u8::is_ascii_whitespace)
+            && line.iter().all(u8::is_ascii_whitespace))
 }
 
 fn maybe_shrink_line_buffer(buf: &mut Vec<u8>, max_bytes: usize) {
@@ -1800,6 +1806,14 @@ mod line_limit_tests {
         );
         assert_eq!(line, b"ok");
         assert!(line.capacity() <= REUSABLE_LINE_BUFFER_RETAIN_BYTES);
+    }
+
+    #[test]
+    fn ascii_whitespace_only_fast_path_keeps_semantics() {
+        assert!(is_ascii_whitespace_only(b""));
+        assert!(is_ascii_whitespace_only(b" \t\r\n"));
+        assert!(!is_ascii_whitespace_only(b"{\"jsonrpc\":\"2.0\"}"));
+        assert!(!is_ascii_whitespace_only(b"\xE3\x80\x80"));
     }
 }
 
