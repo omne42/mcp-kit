@@ -297,7 +297,9 @@ impl DiagnosticsState {
             return None;
         }
         Some(Arc::new(Self {
-            invalid_json_samples: Mutex::new(VecDeque::new()),
+            invalid_json_samples: Mutex::new(VecDeque::with_capacity(
+                opts.invalid_json_sample_lines,
+            )),
             invalid_json_sample_lines: opts.invalid_json_sample_lines,
             invalid_json_sample_max_bytes: opts.invalid_json_sample_max_bytes.max(1),
         }))
@@ -1431,24 +1433,36 @@ fn remember_cancelled_request_id(cancelled_request_ids: &CancelledRequestIds, id
 
 fn take_cancelled_request_id(cancelled_request_ids: &CancelledRequestIds, id: &Id) -> bool {
     let mut guard = lock_cancelled_request_ids(cancelled_request_ids);
-    if !guard.latest.contains_key(id) {
-        return false;
+    guard.latest.remove(id).is_some()
+}
+
+fn type_mismatch_candidate_id(id: &Id) -> Option<Id> {
+    match id {
+        Id::Integer(value) => Some(Id::String(value.to_string())),
+        Id::String(value) => match value.parse::<i64>() {
+            Ok(parsed) if parsed.to_string() == *value => Some(Id::Integer(parsed)),
+            _ => None,
+        },
     }
-    guard.latest.remove(id);
-    true
+}
+
+fn take_cancelled_request_id_type_mismatch(
+    cancelled_request_ids: &CancelledRequestIds,
+    id: &Id,
+) -> bool {
+    let Some(candidate) = type_mismatch_candidate_id(id) else {
+        return false;
+    };
+
+    let mut guard = lock_cancelled_request_ids(cancelled_request_ids);
+    guard.latest.remove(&candidate).is_some()
 }
 
 fn take_pending_type_mismatch_sender(
     pending: &PendingRequests,
     id: &Id,
 ) -> Option<oneshot::Sender<Result<Value, Error>>> {
-    let candidate = match id {
-        Id::Integer(value) => Id::String(value.to_string()),
-        Id::String(value) => match value.parse::<i64>() {
-            Ok(parsed) if parsed.to_string() == *value => Id::Integer(parsed),
-            _ => return None,
-        },
-    };
+    let candidate = type_mismatch_candidate_id(id)?;
 
     let mut pending = lock_pending(pending);
     pending.remove(&candidate)
@@ -1525,7 +1539,9 @@ fn handle_response(
         pending.remove(&id)
     };
     let Some(tx) = tx else {
-        if take_cancelled_request_id(cancelled_request_ids, &id) {
+        if take_cancelled_request_id(cancelled_request_ids, &id)
+            || take_cancelled_request_id_type_mismatch(cancelled_request_ids, &id)
+        {
             return Ok(());
         }
         if let Some(tx) = take_pending_type_mismatch_sender(pending, &id) {
@@ -1782,5 +1798,18 @@ mod cancelled_request_ids_tests {
 
         let guard = lock_cancelled_request_ids(&cancelled_request_ids);
         assert!(guard.order.len() <= CANCELLED_REQUEST_IDS_MAX);
+    }
+
+    #[test]
+    fn cancelled_request_id_type_mismatch_consumes_counterpart_entry() {
+        let cancelled_request_ids = Arc::new(Mutex::new(CancelledRequestIdsState::default()));
+        let id = Id::Integer(7);
+
+        remember_cancelled_request_id(&cancelled_request_ids, &id);
+        assert!(take_cancelled_request_id_type_mismatch(
+            &cancelled_request_ids,
+            &Id::String("7".to_string())
+        ));
+        assert!(!take_cancelled_request_id(&cancelled_request_ids, &id));
     }
 }

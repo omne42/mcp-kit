@@ -803,7 +803,7 @@ async fn read_response_body_preview_text(
         return None;
     }
 
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(max_bytes.min(4096));
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.ok()?;

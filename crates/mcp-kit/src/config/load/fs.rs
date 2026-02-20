@@ -98,7 +98,10 @@ async fn read_to_string_limited_inner(
         );
     }
 
-    let mut buf = Vec::new();
+    let reserve = usize::try_from(file_meta.len())
+        .unwrap_or(usize::MAX)
+        .min((super::super::MAX_CONFIG_BYTES + 1) as usize);
+    let mut buf = Vec::with_capacity(reserve);
     file.take(super::super::MAX_CONFIG_BYTES + 1)
         .read_to_end(&mut buf)
         .await
