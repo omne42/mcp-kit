@@ -1220,13 +1220,98 @@ async fn handle_incoming_value(
                     stack.push(item);
                 }
             }
-            Value::Object(map) => {
-                let jsonrpc = map.get("jsonrpc").and_then(|v| v.as_str());
+            Value::Object(mut map) => {
+                let jsonrpc_valid = map.get("jsonrpc").and_then(Value::as_str) == Some("2.0");
 
-                let method_value = map.get("method");
-                let method = method_value.and_then(|v| v.as_str());
-                if let Some(method) = method {
-                    if jsonrpc != Some("2.0") {
+                match map.remove("method") {
+                    Some(Value::String(method)) => {
+                        if !jsonrpc_valid {
+                            if let Some(id_value) = map.get("id") {
+                                let id_value =
+                                    parse_id(id_value).map_or(Value::Null, |_| id_value.clone());
+                                drop(
+                                    responder
+                                        .respond_error_raw_id(
+                                            id_value,
+                                            INVALID_REQUEST,
+                                            "invalid jsonrpc version",
+                                            None,
+                                        )
+                                        .await,
+                                );
+                            }
+                            continue;
+                        }
+
+                        let params = map.remove("params");
+                        if let Some(id_value) = map.get("id") {
+                            let Some(id) = parse_id(id_value) else {
+                                drop(
+                                    responder
+                                        .respond_error_raw_id(
+                                            Value::Null,
+                                            INVALID_REQUEST,
+                                            "invalid request id",
+                                            None,
+                                        )
+                                        .await,
+                                );
+                                continue;
+                            };
+
+                            let request = IncomingRequest {
+                                id,
+                                method,
+                                params,
+                                responder: responder.clone(),
+                            };
+
+                            match request_tx.try_send(request) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Full(request)) => {
+                                    drop(
+                                        responder
+                                            .respond_error(
+                                                request.id,
+                                                CLIENT_OVERLOADED,
+                                                "client overloaded",
+                                                None,
+                                            )
+                                            .await,
+                                    );
+                                }
+                                Err(mpsc::error::TrySendError::Closed(request)) => {
+                                    drop(
+                                        responder
+                                            .respond_error(
+                                                request.id,
+                                                METHOD_NOT_FOUND,
+                                                "no request handler installed",
+                                                None,
+                                            )
+                                            .await,
+                                    );
+                                }
+                            }
+                            continue;
+                        }
+
+                        match notify_tx.try_send(Notification { method, params }) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                stats
+                                    .dropped_notifications_full
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                stats
+                                    .dropped_notifications_closed
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        continue;
+                    }
+                    Some(_) => {
                         if let Some(id_value) = map.get("id") {
                             let id_value =
                                 parse_id(id_value).map_or(Value::Null, |_| id_value.clone());
@@ -1234,87 +1319,14 @@ async fn handle_incoming_value(
                                 .respond_error_raw_id(
                                     id_value,
                                     INVALID_REQUEST,
-                                    "invalid jsonrpc version",
+                                    "invalid request method",
                                     None,
                                 )
                                 .await;
                         }
                         continue;
                     }
-
-                    let params = map.get("params").cloned();
-                    if let Some(id_value) = map.get("id") {
-                        let Some(id) = parse_id(id_value) else {
-                            let _ = responder
-                                .respond_error_raw_id(
-                                    Value::Null,
-                                    INVALID_REQUEST,
-                                    "invalid request id",
-                                    None,
-                                )
-                                .await;
-                            continue;
-                        };
-
-                        let request = IncomingRequest {
-                            id: id.clone(),
-                            method: method.to_string(),
-                            params,
-                            responder: responder.clone(),
-                        };
-
-                        match request_tx.try_send(request) {
-                            Ok(()) => {}
-                            Err(mpsc::error::TrySendError::Full(_request)) => {
-                                let _ = responder
-                                    .respond_error(id, CLIENT_OVERLOADED, "client overloaded", None)
-                                    .await;
-                            }
-                            Err(mpsc::error::TrySendError::Closed(_request)) => {
-                                let _ = responder
-                                    .respond_error(
-                                        id,
-                                        METHOD_NOT_FOUND,
-                                        "no request handler installed",
-                                        None,
-                                    )
-                                    .await;
-                            }
-                        }
-                        continue;
-                    }
-
-                    match notify_tx.try_send(Notification {
-                        method: method.to_string(),
-                        params,
-                    }) {
-                        Ok(()) => {}
-                        Err(mpsc::error::TrySendError::Full(_)) => {
-                            stats
-                                .dropped_notifications_full
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
-                        Err(mpsc::error::TrySendError::Closed(_)) => {
-                            stats
-                                .dropped_notifications_closed
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
-                    continue;
-                }
-                if method_value.is_some() {
-                    if let Some(id_value) = map.get("id") {
-                        let id_value = parse_id(id_value).map_or(Value::Null, |_| id_value.clone());
-                        let _ = responder
-                            .respond_error_raw_id(
-                                id_value,
-                                INVALID_REQUEST,
-                                "invalid request method",
-                                None,
-                            )
-                            .await;
-                    }
-                    continue;
+                    None => {}
                 }
 
                 if let Err(err) =
@@ -1355,12 +1367,22 @@ async fn read_line_limited_into<R: tokio::io::AsyncBufRead + Unpin>(
     loop {
         let available = reader.fill_buf().await?;
         if available.is_empty() {
+            if buf.len() > max_bytes {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "jsonrpc message too large",
+                ));
+            }
             return Ok(!buf.is_empty());
         }
 
         let newline_pos = available.iter().position(|b| *b == b'\n');
         let take = newline_pos.map_or(available.len(), |idx| idx.saturating_add(1));
-        if buf.len().saturating_add(take) > max_bytes {
+        // Allow only delimiter slack above the payload limit:
+        // - up to 1 byte while scanning (possible trailing '\r' before '\n')
+        // - up to 2 bytes when this chunk includes '\n' (possible "\r\n")
+        let delimiter_slack = if newline_pos.is_some() { 2 } else { 1 };
+        if buf.len().saturating_add(take) > max_bytes.saturating_add(delimiter_slack) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "jsonrpc message too large",
@@ -1379,6 +1401,13 @@ async fn read_line_limited_into<R: tokio::io::AsyncBufRead + Unpin>(
         if buf.ends_with(b"\r") {
             buf.pop();
         }
+    }
+
+    if buf.len() > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "jsonrpc message too large",
+        ));
     }
 
     Ok(true)
@@ -1628,6 +1657,61 @@ fn handle_response(
 
 // Streamable HTTP and stdout_log implementations live in `streamable_http.rs` and
 // `stdout_log.rs`.
+
+#[cfg(test)]
+mod line_limit_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn read_line_limited_accepts_payload_equal_to_limit_with_lf() {
+        let input = b"hello\n";
+        let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(input.as_slice()));
+
+        let line = match read_line_limited(&mut reader, 5).await {
+            Ok(Some(line)) => line,
+            Ok(None) => panic!("line available"),
+            Err(err) => panic!("read succeeds: {err}"),
+        };
+
+        assert_eq!(line, b"hello");
+    }
+
+    #[tokio::test]
+    async fn read_line_limited_accepts_payload_equal_to_limit_with_crlf() {
+        let input = b"hello\r\n";
+        let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(input.as_slice()));
+
+        let line = match read_line_limited(&mut reader, 5).await {
+            Ok(Some(line)) => line,
+            Ok(None) => panic!("line available"),
+            Err(err) => panic!("read succeeds: {err}"),
+        };
+
+        assert_eq!(line, b"hello");
+    }
+
+    #[tokio::test]
+    async fn read_line_limited_rejects_payload_over_limit() {
+        let input = b"helloo\n";
+        let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(input.as_slice()));
+
+        let err = read_line_limited(&mut reader, 5)
+            .await
+            .expect_err("must fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn read_line_limited_rejects_payload_over_limit_without_newline() {
+        let input = b"helloo";
+        let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(input.as_slice()));
+
+        let err = read_line_limited(&mut reader, 5)
+            .await
+            .expect_err("must fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+}
 
 #[cfg(test)]
 mod stats_tests {

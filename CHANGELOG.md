@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.3.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-jsonrpc`：优化入站 JSON-RPC 消息分发路径，`method/params` 改为从已拥有的对象中移动而非克隆，降低大 `params` 场景下的额外分配开销（行为不变）。
 - `mcp-kit`：配置文件读取按已知文件大小预分配缓冲区，减少 `Config::load` 热路径上的重复扩容开销（行为不变）。
 - `mcp-jsonrpc`：诊断采样队列与 HTTP 错误 body 预览缓冲增加预分配，减少高频错误路径上的小额分配抖动（行为不变）。
 - `mcp-kit`：`Manager::connected_server_names()` 改为原地 `retain` 过滤，减少一次中间集合分配（行为不变）。
@@ -160,6 +161,7 @@
 - githooks: `pre-commit` 新增 staged Rust hygiene 检查（库代码新增行中默认拒绝 `unwrap/expect` 与 `let _ =`），并将 Rust gate 升级为 `clippy -D warnings` + `cargo test --workspace --all-features`。
 
 ### Fixed
+- `mcp-jsonrpc`：修复逐行读取的大小边界判断，消息 payload 与 `max_message_bytes` 刚好相等时（含 `\n`/`\r\n` 行结束）不再被误判为超限，并补充回归测试覆盖。
 - `mcp-jsonrpc`：当请求已超时取消后，若延迟响应使用了数值/字符串相反类型的同值 `id`，现在会正确消费对应取消标记，避免取消 ID 集合残留并减少后续误判风险。
 - `mcp-jsonrpc`：`streamable_http` POST bridge 在桥接错误响应时仅回显合法 JSON-RPC `id`（string/number/null），避免异常 `id` 形态进入错误响应并减少不必要的 `Value` 克隆。
 - `mcp-jsonrpc`：`streamable_http` 在收到 `Content-Length` 已超出 `max_message_bytes` 的 JSON 响应时会立即返回 `http response too large`，不再等待响应体流式读取；修复 `request_timeout=None` + keep-alive 场景下可能长时间阻塞的问题，并新增回归测试覆盖。
