@@ -137,23 +137,16 @@ impl Session {
                 )
             }),
             Err(_) => {
-                const CLOSE_ON_TIMEOUT_BUDGET: Duration = Duration::from_millis(50);
                 let timeout_message = format!(
                     "mcp notification timed out after {timeout:?}: {method} (server={})",
                     self.server_name
                 );
 
-                // Best-effort close: run close in the background so timeout callers are not
-                // delayed by close-path lock contention.
-                let handle = self.connection.client().handle();
-                let close_reason = timeout_message.clone();
-                std::mem::drop(tokio::spawn(async move {
-                    let _ = /* pre-commit: allow-let-underscore */ tokio::time::timeout(
-                        CLOSE_ON_TIMEOUT_BUDGET,
-                        handle.close(close_reason),
-                    )
-                    .await;
-                }));
+                // Best-effort close: schedule only once so repeated timeout calls do not spawn
+                // unbounded close tasks under sustained transport lock contention.
+                self.connection
+                    .client()
+                    .close_in_background_once(timeout_message.clone());
                 Err(anyhow::Error::new(mcp_jsonrpc::Error::protocol(
                     mcp_jsonrpc::ProtocolErrorKind::WaitTimeout,
                     timeout_message,

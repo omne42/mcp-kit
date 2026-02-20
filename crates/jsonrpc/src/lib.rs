@@ -846,6 +846,14 @@ impl Client {
         self.handle.close(reason).await;
     }
 
+    /// Schedule an asynchronous close only once.
+    ///
+    /// This marks the client closed immediately and starts a best-effort background close path.
+    /// Repeated calls after the first one are no-ops.
+    pub fn close_in_background_once(&self, reason: impl Into<String>) {
+        self.handle.schedule_close_once(reason.into());
+    }
+
     pub fn child_id(&self) -> Option<u32> {
         self.child.as_ref().and_then(tokio::process::Child::id)
     }

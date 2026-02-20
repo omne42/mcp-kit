@@ -973,6 +973,115 @@ async fn session_notify_timeout_returns_without_waiting_for_close_budget() {
     );
 }
 
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn session_notify_timeout_marks_closed_once_with_first_reason() {
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
+
+    struct BlockingWrite {
+        entered: Arc<AtomicBool>,
+    }
+
+    impl tokio::io::AsyncWrite for BlockingWrite {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.entered.store(true, Ordering::Relaxed);
+            Poll::Pending
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.entered.store(true, Ordering::Relaxed);
+            Poll::Pending
+        }
+    }
+
+    let entered = Arc::new(AtomicBool::new(false));
+    let (client_stream, _server_stream) = tokio::io::duplex(64);
+    let (client_read, _client_write) = tokio::io::split(client_stream);
+    let client = mcp_jsonrpc::Client::connect_io(
+        client_read,
+        BlockingWrite {
+            entered: entered.clone(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let connection = Connection {
+        child: None,
+        client,
+        handler_tasks: Vec::new(),
+    };
+    let session = crate::Session::new(
+        ServerName::parse("srv").unwrap(),
+        connection,
+        serde_json::json!({}),
+        Duration::from_millis(20),
+    );
+
+    let first_err = session
+        .notify("demo/first", Some(serde_json::json!({ "x": 1 })))
+        .await
+        .expect_err("first notify should time out");
+    assert!(entered.load(Ordering::Relaxed));
+    assert!(
+        contains_wait_timeout(&first_err),
+        "timeout should preserve structured wait-timeout error, err={first_err:#}"
+    );
+
+    let handle = session.connection().client().handle();
+    assert!(handle.is_closed(), "timeout should mark client closed");
+    let close_reason = handle.close_reason().expect("close reason set");
+    assert!(
+        close_reason.contains("demo/first"),
+        "close reason should come from first timeout, got={close_reason:?}"
+    );
+
+    let second_started = tokio::time::Instant::now();
+    let second_err = session
+        .notify("demo/second", Some(serde_json::json!({ "x": 2 })))
+        .await
+        .expect_err("second notify should fail fast as closed");
+    assert!(
+        second_started.elapsed() < Duration::from_millis(5),
+        "closed client should fail fast, elapsed={:?}",
+        second_started.elapsed()
+    );
+    assert!(
+        !contains_wait_timeout(&second_err),
+        "second notify should not re-timeout once closed, err={second_err:#}"
+    );
+    assert!(
+        second_err.chain().any(|cause| {
+            cause
+                .downcast_ref::<mcp_jsonrpc::Error>()
+                .is_some_and(|err| {
+                    matches!(
+                        err,
+                        mcp_jsonrpc::Error::Protocol(protocol_err)
+                            if protocol_err.kind == mcp_jsonrpc::ProtocolErrorKind::Closed
+                    )
+                })
+        }),
+        "second notify should surface closed error, err={second_err:#}"
+    );
+    assert_eq!(
+        session.connection().client().handle().close_reason(),
+        Some(close_reason),
+        "subsequent timeout attempts should not overwrite close reason"
+    );
+}
+
 #[tokio::test]
 async fn connect_io_session_without_handler_timeout_does_not_track_timeout_counter() {
     let (client_stream, server_stream) = tokio::io::duplex(1024);
