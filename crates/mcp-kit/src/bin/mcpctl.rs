@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -149,6 +149,17 @@ enum Command {
     },
 }
 
+async fn canonicalize_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut cursor = Some(path);
+    while let Some(candidate) = cursor {
+        if let Ok(canonical) = tokio::fs::canonicalize(candidate).await {
+            return Some(canonical);
+        }
+        cursor = candidate.parent();
+    }
+    None
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -166,8 +177,8 @@ async fn main() -> anyhow::Result<()> {
         let canonical_root = tokio::fs::canonicalize(&root)
             .await
             .unwrap_or_else(|_| root.clone());
-        if let Ok(canonical_config) = tokio::fs::canonicalize(&resolved).await {
-            if !canonical_config.starts_with(&canonical_root) {
+        if let Some(canonical_config_or_parent) = canonicalize_existing_ancestor(&resolved).await {
+            if !canonical_config_or_parent.starts_with(&canonical_root) {
                 if !cli.allow_config_outside_root {
                     anyhow::bail!(
                         "--config must be within --root (pass --allow-config-outside-root to override): {}",

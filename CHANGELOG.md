@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.3.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：配置加载内部的解析上下文文案改为惰性构造（仅在错误路径分配字符串），减少 `Config::load` 成功路径上的无谓分配（行为不变）。
 - `mcp-jsonrpc`：优化响应分发热路径：`handle_response` 在 `result` 与 `error.data` 分支改为从已拥有的 JSON 对象中直接移动值，不再额外克隆大 payload，降低大响应场景的瞬时内存占用（行为不变）。
 - `mcp-jsonrpc`：优化 JSON-RPC 入站与 `streamable_http` POST bridge 的“空白行过滤”热路径：新增首字节 fast-path，避免对绝大多数非空白消息做整行扫描；并补充等价语义回归测试（行为不变）。
 - `mcp-jsonrpc`：`streamable_http` 在 SSE 重连失败时统一走 `close_post_bridge` 关闭路径，提前释放写锁并复用既有收尾逻辑，降低异常路径下的锁竞争窗口（行为不变）。
@@ -178,6 +179,7 @@
 - githooks: `pre-commit` 新增 staged Rust hygiene 检查（库代码新增行中默认拒绝 `unwrap/expect` 与 `let _ =`），并将 Rust gate 升级为 `clippy -D warnings` + `cargo test --workspace --all-features`。
 
 ### Fixed
+- `mcpctl`：修复 `--config` 越出 `--root` 且目标文件尚不存在时可能绕过边界预检的问题；现在会回退检查最近已存在父路径并保持 fail-closed（可通过 `--allow-config-outside-root` 显式覆盖）。
 - `mcp-jsonrpc`：修复 stdout 日志轮转在分段号达到 `u32::MAX` 且目标分段已存在时可能陷入无限重试的问题；现在会 fail-fast 返回错误，避免卡死/CPU 空转。
 - `mcp-kit`：修复配置加载在 server 名称经 `trim()` 归一化后发生冲突时会被静默覆盖的问题；现在会 fail-fast 报错（并补充 v1 / external 格式回归测试）。
 - `mcp-jsonrpc`：修复 `Client::close_in_background_once` 在无 Tokio runtime 的同步上下文里可能 panic 的问题；现在会改为同步 best-effort 关闭并立刻清理 pending requests（已补回归测试）。

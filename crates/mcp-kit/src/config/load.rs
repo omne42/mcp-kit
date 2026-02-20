@@ -55,14 +55,17 @@ async fn parse_config_or_external(
     mut path: Option<PathBuf>,
     mut contents: String,
 ) -> anyhow::Result<ParsedConfig> {
-    let mut hops = 0usize;
-    loop {
-        let parse_ctx = match &path {
+    fn parse_context(path: Option<&Path>) -> String {
+        match path {
             Some(path) => format!("parse {}", path.display()),
             None => "parse mcp config".to_string(),
-        };
+        }
+    }
 
-        let json: Value = serde_json::from_str(&contents).with_context(|| parse_ctx.clone())?;
+    let mut hops = 0usize;
+    loop {
+        let json: Value =
+            serde_json::from_str(&contents).with_context(|| parse_context(path.as_deref()))?;
 
         match json {
             Value::Object(mut root) => {
@@ -122,7 +125,7 @@ async fn parse_config_or_external(
 
                 if matches!(root.get("version"), Some(Value::Number(_))) {
                     let cfg: ConfigFile = serde_json::from_value(Value::Object(root))
-                        .with_context(|| parse_ctx.clone())?;
+                        .with_context(|| parse_context(path.as_deref()))?;
                     return Ok(ParsedConfig::V1 { path, cfg });
                 }
 

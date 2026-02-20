@@ -54,4 +54,21 @@ mod cli_tests {
             "NOTE: --dns-check is already the default in untrusted mode; the flag is kept for compatibility.",
         ));
     }
+
+    #[test]
+    fn config_outside_root_missing_path_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let missing = outside.path().join("missing-config.json");
+
+        let mut cmd = cargo_bin_cmd!("mcpctl");
+        cmd.arg("--root")
+            .arg(root.path())
+            .arg("--config")
+            .arg(&missing)
+            .arg("list-servers");
+        cmd.assert()
+            .failure()
+            .stderr(predicate::str::contains("--config must be within --root"));
+    }
 }
