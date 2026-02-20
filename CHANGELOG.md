@@ -163,6 +163,8 @@
 - githooks: `pre-commit` 新增 staged Rust hygiene 检查（库代码新增行中默认拒绝 `unwrap/expect` 与 `let _ =`），并将 Rust gate 升级为 `clippy -D warnings` + `cargo test --workspace --all-features`。
 
 ### Fixed
+- `mcp-jsonrpc`：修复逐行读取复用缓冲区在偶发超大消息后长期保留大容量的问题；当后续恢复为小消息时会回收到 `64KiB` 保留上限，降低连接常驻内存占用（行为不变），并补充回归测试。
+- `mcp-jsonrpc`：修正 `streamable_http` 错误响应 body 预览的读取边界，严格按 `error_body_preview_bytes` 截断，避免无意义的额外读取（行为不变）。
 - `mcp-jsonrpc`：修复逐行读取的大小边界判断，消息 payload 与 `max_message_bytes` 刚好相等时（含 `\n`/`\r\n` 行结束）不再被误判为超限，并补充回归测试覆盖。
 - `mcp-jsonrpc`：当请求已超时取消后，若延迟响应使用了数值/字符串相反类型的同值 `id`，现在会正确消费对应取消标记，避免取消 ID 集合残留并减少后续误判风险。
 - `mcp-jsonrpc`：`streamable_http` POST bridge 在桥接错误响应时仅回显合法 JSON-RPC `id`（string/number/null），避免异常 `id` 形态进入错误响应并减少不必要的 `Value` 克隆。

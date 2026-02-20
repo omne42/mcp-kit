@@ -40,6 +40,7 @@ use stdout_log::LogState;
 pub type StdoutLogRedactor = Arc<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
 
 const DEFAULT_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+const REUSABLE_LINE_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
 
 #[derive(Clone)]
 pub struct SpawnOptions {
@@ -1373,6 +1374,7 @@ async fn read_line_limited_into<R: tokio::io::AsyncBufRead + Unpin>(
                     "jsonrpc message too large",
                 ));
             }
+            maybe_shrink_line_buffer(buf, max_bytes);
             return Ok(!buf.is_empty());
         }
 
@@ -1410,7 +1412,19 @@ async fn read_line_limited_into<R: tokio::io::AsyncBufRead + Unpin>(
         ));
     }
 
+    maybe_shrink_line_buffer(buf, max_bytes);
     Ok(true)
+}
+
+fn maybe_shrink_line_buffer(buf: &mut Vec<u8>, max_bytes: usize) {
+    let retain = REUSABLE_LINE_BUFFER_RETAIN_BYTES.min(max_bytes);
+    if retain == 0 {
+        return;
+    }
+    // After occasional large messages, release surplus capacity once smaller traffic resumes.
+    if buf.capacity() > retain && buf.len() <= retain {
+        buf.shrink_to(retain);
+    }
 }
 
 fn truncate_string(mut s: String, max_bytes: usize) -> String {
@@ -1710,6 +1724,33 @@ mod line_limit_tests {
             .await
             .expect_err("must fail");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn read_line_limited_into_releases_large_buffer_after_small_line() {
+        let large = vec![b'x'; REUSABLE_LINE_BUFFER_RETAIN_BYTES * 2];
+        let mut input = large.clone();
+        input.push(b'\n');
+        input.extend_from_slice(b"ok\n");
+
+        let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(input));
+        let mut line = Vec::new();
+
+        assert!(
+            read_line_limited_into(&mut reader, large.len(), &mut line)
+                .await
+                .expect("large line must parse")
+        );
+        let large_capacity = line.capacity();
+        assert!(large_capacity >= large.len());
+
+        assert!(
+            read_line_limited_into(&mut reader, large.len(), &mut line)
+                .await
+                .expect("small line must parse")
+        );
+        assert_eq!(line, b"ok");
+        assert!(line.capacity() <= REUSABLE_LINE_BUFFER_RETAIN_BYTES);
     }
 }
 

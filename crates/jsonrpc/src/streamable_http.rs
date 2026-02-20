@@ -806,14 +806,14 @@ async fn read_response_body_preview_text(
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.ok()?;
 
-        let remaining = max_bytes.saturating_add(1).saturating_sub(out.len());
+        let remaining = max_bytes.saturating_sub(out.len());
         if remaining == 0 {
             break;
         }
 
         let take = remaining.min(chunk.len());
         out.extend_from_slice(&chunk[..take]);
-        if out.len() >= max_bytes {
+        if out.len() == max_bytes {
             break;
         }
     }
