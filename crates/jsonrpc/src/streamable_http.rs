@@ -704,16 +704,18 @@ impl HttpPostBridge {
                         }
                     }
                     Ok(body) if body.is_empty() => {
-                        if status != reqwest::StatusCode::ACCEPTED
-                            && !emit_post_bridge_error(
-                                &writer,
-                                &handle,
-                                id,
-                                HTTP_TRANSPORT_ERROR,
-                                "http response is empty".to_string(),
-                                None,
-                            )
-                            .await
+                        if id.is_none() || status == reqwest::StatusCode::ACCEPTED {
+                            continue;
+                        }
+                        if !emit_post_bridge_error(
+                            &writer,
+                            &handle,
+                            id,
+                            HTTP_TRANSPORT_ERROR,
+                            "http response is empty".to_string(),
+                            None,
+                        )
+                        .await
                         {
                             return;
                         }

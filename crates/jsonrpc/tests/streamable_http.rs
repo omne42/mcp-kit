@@ -838,6 +838,120 @@ async fn streamable_http_bridges_empty_json_body_to_jsonrpc_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streamable_http_notification_no_content_keeps_client_open() {
+    #[derive(Default)]
+    struct State {
+        notify_post_count: AtomicUsize,
+        request_post_count: AtomicUsize,
+    }
+
+    let state = Arc::new(State::default());
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server_state = state.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => return,
+            };
+            let server_state = server_state.clone();
+            tokio::spawn(async move {
+                let Some((req, body)) = read_http_request(&mut socket).await else {
+                    return;
+                };
+
+                match (req.method.as_str(), req.path.as_str()) {
+                    ("GET", "/mcp") => {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                    }
+                    ("POST", "/mcp") => {
+                        let parsed: serde_json::Value = match serde_json::from_slice(&body) {
+                            Ok(v) => v,
+                            Err(_) => return,
+                        };
+                        if parsed.get("id").is_none() {
+                            server_state
+                                .notify_post_count
+                                .fetch_add(1, Ordering::SeqCst);
+                            let _ = write_http_response(
+                                &mut socket,
+                                "204 No Content",
+                                &[("Connection", "close".to_string())],
+                                b"",
+                            )
+                            .await;
+                            return;
+                        }
+
+                        server_state
+                            .request_post_count
+                            .fetch_add(1, Ordering::SeqCst);
+                        let id = parsed.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                        let response = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": { "ok": true },
+                        });
+                        let body = serde_json::to_vec(&response).unwrap();
+                        let _ = write_http_response(
+                            &mut socket,
+                            "200 OK",
+                            &[
+                                ("Content-Type", "application/json".to_string()),
+                                ("Connection", "close".to_string()),
+                            ],
+                            &body,
+                        )
+                        .await;
+                    }
+                    _ => {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                    }
+                }
+            });
+        }
+    });
+
+    let url = format!("http://{}/mcp", addr);
+    let client = mcp_jsonrpc::Client::connect_streamable_http(&url)
+        .await
+        .expect("connect streamable http");
+    let handle = client.handle();
+
+    client
+        .notify("demo/notify", Some(serde_json::json!({ "x": 1 })))
+        .await
+        .expect("notify should write to bridge");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !handle.is_closed(),
+        "204 no-content notification response should not close client"
+    );
+
+    let result = client
+        .request("ping", serde_json::json!({}))
+        .await
+        .expect("request should still succeed after notify");
+    assert_eq!(result, serde_json::json!({ "ok": true }));
+    assert_eq!(state.notify_post_count.load(Ordering::SeqCst), 1);
+    assert_eq!(state.request_post_count.load(Ordering::SeqCst), 1);
+
+    drop(client);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn streamable_http_notification_post_failure_closes_client() {
     #[derive(Default)]
     struct State {
