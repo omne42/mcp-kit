@@ -10,6 +10,9 @@
 > 计划下一个版本：`0.3.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：`Manager` 的 `stdout_log.path` root 边界判断改为先按当前工作目录绝对化 `cwd`，修复“`cwd` 为相对路径且 `stdout_log.path` 为绝对路径”时的误判拒绝问题（行为更符合预期，未放宽安全边界）。
+- `mcp-kit`：`ServerHandlerTimeoutCounts::take_and_reset` 在清零后会回收未被活跃 handler 共享的零值计数项，降低长生命周期进程里按 server 名持续积累空计数器的内存占用风险。
+- `mcp-kit`：配置加载去重改为 `BTreeMap::entry` 单次查找插入，避免 `contains_key + insert` 的双查找开销（行为不变）。
 - `mcp-kit`：配置加载内部的解析上下文文案改为惰性构造（仅在错误路径分配字符串），减少 `Config::load` 成功路径上的无谓分配（行为不变）。
 - `mcp-jsonrpc`：优化响应分发热路径：`handle_response` 在 `result` 与 `error.data` 分支改为从已拥有的 JSON 对象中直接移动值，不再额外克隆大 payload，降低大响应场景的瞬时内存占用（行为不变）。
 - `mcp-jsonrpc`：优化 JSON-RPC 入站与 `streamable_http` POST bridge 的“空白行过滤”热路径：新增首字节 fast-path，避免对绝大多数非空白消息做整行扫描；并补充等价语义回归测试（行为不变）。

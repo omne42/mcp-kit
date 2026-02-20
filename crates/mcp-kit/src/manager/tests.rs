@@ -40,6 +40,30 @@ fn built_in_roots_list_returns_expected_shape() {
 }
 
 #[test]
+fn stdout_log_path_within_root_accepts_relative_path() {
+    let root = std::env::temp_dir().join("workspace");
+    assert!(stdout_log_path_within_root(
+        Path::new("logs/server.stdout.log"),
+        &root
+    ));
+}
+
+#[test]
+fn stdout_log_path_within_root_accepts_absolute_path_after_root_absolutize() {
+    let base = std::env::temp_dir();
+    let root = absolutize_with_base(Path::new("workspace"), &base);
+    let log_path = root.join("logs/server.stdout.log");
+    assert!(stdout_log_path_within_root(&log_path, &root));
+}
+
+#[test]
+fn stdout_log_path_within_root_rejects_outside_absolute_path() {
+    let root = std::env::temp_dir().join("workspace");
+    let log_path = std::env::temp_dir().join("other/server.stdout.log");
+    assert!(!stdout_log_path_within_root(&log_path, &root));
+}
+
+#[test]
 fn try_from_config_rejects_invalid_client_config() {
     let config = Config::new(
         crate::ClientConfig {
@@ -80,8 +104,24 @@ fn server_handler_timeout_counts_take_resets_counters() {
     assert_eq!(counts.count("b"), 0);
 
     let snap = counts.snapshot();
+    assert!(!snap.contains_key("a"));
+    assert!(!snap.contains_key("b"));
+}
+
+#[test]
+fn server_handler_timeout_counts_take_keeps_shared_zero_entries() {
+    let counts = ServerHandlerTimeoutCounts::default();
+    let a = ServerName::parse("a").unwrap();
+
+    let counter = counts.counter_for(&a);
+    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    let taken = counts.take_and_reset();
+    assert_eq!(taken.get("a"), Some(&1));
+    assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+    let snap = counts.snapshot();
     assert_eq!(snap.get("a"), Some(&0));
-    assert_eq!(snap.get("b"), Some(&0));
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map::Entry};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::Context;
@@ -243,13 +243,18 @@ fn insert_server_unique(
     server_name: ServerName,
     server_cfg: ServerConfig,
 ) -> anyhow::Result<()> {
-    if servers.contains_key(server_name.as_str()) {
-        anyhow::bail!(
-            "duplicate mcp server name after normalization: {raw_name:?} -> {server_name}"
-        );
+    match servers.entry(server_name) {
+        Entry::Vacant(entry) => {
+            entry.insert(server_cfg);
+            Ok(())
+        }
+        Entry::Occupied(entry) => {
+            anyhow::bail!(
+                "duplicate mcp server name after normalization: {raw_name:?} -> {}",
+                entry.key()
+            );
+        }
     }
-    servers.insert(server_name, server_cfg);
-    Ok(())
 }
 
 fn build_v1_config(

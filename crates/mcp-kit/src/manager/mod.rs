@@ -1,7 +1,7 @@
 //! Connection cache + MCP initialize + request helpers.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -42,6 +42,22 @@ fn parse_server_name_anyhow(server_name: &str) -> anyhow::Result<ServerName> {
 
 fn normalize_server_name_lookup(server_name: &str) -> &str {
     server_name.trim()
+}
+
+fn absolutize_with_base(path: &Path, base: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    base.join(path)
+}
+
+fn stdout_log_path_within_root(stdout_log_path: &Path, root: &Path) -> bool {
+    let stdout_log_path = if stdout_log_path.is_absolute() {
+        stdout_log_path.to_path_buf()
+    } else {
+        root.join(stdout_log_path)
+    };
+    stdout_log_path.starts_with(root)
 }
 
 fn contains_wait_timeout(err: &anyhow::Error) -> bool {
@@ -106,12 +122,19 @@ impl ServerHandlerTimeoutCounts {
     }
 
     fn take_and_reset(&self) -> HashMap<ServerName, u64> {
-        self.counters
+        let mut counters = self
+            .counters
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let snapshot = counters
             .iter()
             .map(|(name, counter)| (name.clone(), counter.swap(0, Ordering::Relaxed)))
-            .collect()
+            .collect();
+        // Compact stale zeroed entries that are no longer shared with active handler tasks.
+        counters.retain(|_, counter| {
+            counter.load(Ordering::Relaxed) > 0 || Arc::strong_count(counter) > 1
+        });
+        snapshot
     }
 
     fn remove(&self, server_name: &str) {
@@ -504,9 +527,9 @@ impl Manager {
 
     /// Takes a snapshot of timeout counts and resets all counters to zero.
     ///
-    /// Note: the set of tracked servers is retained because active handler tasks hold shared
-    /// counters. After calling this, `server_handler_timeout_counts()` can still include
-    /// servers with a count of 0.
+    /// Stale zeroed entries are compacted after reset. Active handler tasks can still keep
+    /// shared counters alive, so `server_handler_timeout_counts()` may include servers with a
+    /// count of 0.
     pub fn take_server_handler_timeout_counts(&mut self) -> HashMap<ServerName, u64> {
         self.server_handler_timeout_counts.take_and_reset()
     }
@@ -650,7 +673,11 @@ impl Manager {
                 cmd.kill_on_drop(true);
 
                 let stdout_log = server_cfg.stdout_log().map(|log| {
-                    if !self.allow_stdout_log_outside_root && !log.path.starts_with(cwd) {
+                    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                    let cwd_abs = absolutize_with_base(cwd, &current_dir);
+                    if !self.allow_stdout_log_outside_root
+                        && !stdout_log_path_within_root(&log.path, &cwd_abs)
+                    {
                         anyhow::bail!(
                             "mcp server {server_name}: stdout_log.path must be within root (set Manager::with_allow_stdout_log_outside_root(true) to override): {}",
                             log.path.display()
