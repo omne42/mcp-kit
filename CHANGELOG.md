@@ -10,6 +10,7 @@
 > 计划下一个版本：`0.3.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-kit`：`Manager::connected_server_names()` 改为原地 `retain` 过滤，减少一次中间集合分配（行为不变）。
 - `mcp-kit`（BREAKING）：`UntrustedStreamableHttpPolicy` 默认 `dns_check` 从 `false` 改为 `true`（默认开启 hostname DNS 解析校验并 fail-closed）；`mcpctl` 的 DNS 相关参数语义同步调整：`--no-dns-check` 显式关闭默认校验，`--dns-timeout-ms`/`--dns-fail-open` 不再要求显式传 `--dns-check`。
 - `mcp-kit`：`mcpctl --dns-check` 明确标注为兼容性保留参数（默认已开启 DNS 校验）；同时收紧默认 DNS 回归测试断言，强制命中 `resolves to non-global ip` 分支，避免被 `localhost` 早期拒绝路径误通过。
 - Docs：统一 `mcpctl` DNS 参数文案，明确 `--dns-check` 为兼容保留参数；需要关闭 DNS 校验时应使用 `--no-dns-check`，并在 `docs/security.md` 的策略参数列表中补充该兼容语义及 `--dns-timeout-ms`/`--dns-fail-open`（同时去除 README 中重复的 `mcpctl --allow-host` 示例）。
@@ -157,6 +158,7 @@
 - githooks: `pre-commit` 新增 staged Rust hygiene 检查（库代码新增行中默认拒绝 `unwrap/expect` 与 `let _ =`），并将 Rust gate 升级为 `clippy -D warnings` + `cargo test --workspace --all-features`。
 
 ### Fixed
+- `mcp-jsonrpc`：`streamable_http` POST bridge 在桥接错误响应时仅回显合法 JSON-RPC `id`（string/number/null），避免异常 `id` 形态进入错误响应并减少不必要的 `Value` 克隆。
 - `mcp-jsonrpc`：`streamable_http` 在收到 `Content-Length` 已超出 `max_message_bytes` 的 JSON 响应时会立即返回 `http response too large`，不再等待响应体流式读取；修复 `request_timeout=None` + keep-alive 场景下可能长时间阻塞的问题，并新增回归测试覆盖。
 - `mcp-jsonrpc`：`streamable_http` 在 `request_timeout=None` 时，遇到非 2xx HTTP 响应不再等待错误响应体结束（也不读取 body preview），避免 keep-alive 且无 `Content-Length` 的错误响应导致请求卡死；并新增回归测试 `streamable_http_error_without_request_timeout_does_not_hang`。
 - `mcp-jsonrpc`：修复 `streamable_http` SSE 解析在 EOF 且缺少末尾空行时可能丢失最后一个 `data:` 事件的问题；并补充回归测试覆盖（含 `[DONE]` EOF 语义）。

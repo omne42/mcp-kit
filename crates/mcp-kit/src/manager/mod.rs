@@ -565,11 +565,9 @@ impl Manager {
     }
 
     pub fn connected_server_names(&mut self) -> Vec<ServerName> {
-        let names = self.conns.keys().cloned().collect::<Vec<_>>();
+        let mut names = self.conns.keys().cloned().collect::<Vec<_>>();
+        names.retain(|name| self.is_connected_and_alive(name.as_str()));
         names
-            .into_iter()
-            .filter(|name| self.is_connected_and_alive(name))
-            .collect()
     }
 
     pub fn initialize_result(&self, server_name: &str) -> Option<&Value> {

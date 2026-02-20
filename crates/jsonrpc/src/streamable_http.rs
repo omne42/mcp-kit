@@ -44,6 +44,19 @@ fn is_json_content_type(content_type: &str) -> bool {
     ends_with_ignore_ascii_case(subty, "+json")
 }
 
+fn normalized_max_message_bytes(max_message_bytes: usize) -> usize {
+    max_message_bytes.max(1)
+}
+
+fn jsonrpc_response_id(value: &Value) -> Option<Value> {
+    match value.get("id") {
+        Some(Value::String(id)) => Some(Value::String(id.clone())),
+        Some(Value::Number(id)) => Some(Value::Number(id.clone())),
+        Some(Value::Null) => Some(Value::Null),
+        _ => None,
+    }
+}
+
 const SSE_EVENT_BUFFER_RETAIN_BYTES: usize = 64 * 1024;
 
 impl Client {
@@ -348,7 +361,7 @@ impl HttpPostBridge {
                     return;
                 }
             };
-            let id = parsed.get("id").cloned();
+            let id = jsonrpc_response_id(&parsed);
 
             let mut req = http_client
                 .post(&post_url)
@@ -992,6 +1005,24 @@ fn truncate_string(mut s: String, max_bytes: usize) -> String {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn jsonrpc_response_id_rejects_non_scalar_ids() {
+        let id_string = jsonrpc_response_id(&serde_json::json!({ "id": "abc" }));
+        assert_eq!(id_string, Some(serde_json::json!("abc")));
+
+        let id_number = jsonrpc_response_id(&serde_json::json!({ "id": 7 }));
+        assert_eq!(id_number, Some(serde_json::json!(7)));
+
+        let id_null = jsonrpc_response_id(&serde_json::json!({ "id": null }));
+        assert_eq!(id_null, Some(serde_json::Value::Null));
+
+        let id_object = jsonrpc_response_id(&serde_json::json!({ "id": { "x": 1 } }));
+        assert!(id_object.is_none());
+
+        let missing = jsonrpc_response_id(&serde_json::json!({ "method": "ping" }));
+        assert!(missing.is_none());
+    }
 
     #[test]
     fn content_type_helpers_handle_common_variants() {
