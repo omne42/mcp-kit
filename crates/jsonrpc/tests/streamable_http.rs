@@ -861,6 +861,81 @@ async fn streamable_http_notification_post_failure_closes_client() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streamable_http_error_without_request_timeout_does_not_hang() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => return,
+            };
+            tokio::spawn(async move {
+                let Some((req, _body)) = read_http_request(&mut socket).await else {
+                    return;
+                };
+
+                match (req.method.as_str(), req.path.as_str()) {
+                    ("GET", "/mcp") => {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                    }
+                    ("POST", "/mcp") => {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: keep-alive\r\n\r\n",
+                            )
+                            .await;
+                        let _ = socket.flush().await;
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                    _ => {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                    }
+                }
+            });
+        }
+    });
+
+    let url = format!("http://{}/mcp", addr);
+    let client = mcp_jsonrpc::Client::connect_streamable_http_with_options(
+        &url,
+        mcp_jsonrpc::StreamableHttpOptions {
+            request_timeout: None,
+            ..Default::default()
+        },
+        mcp_jsonrpc::SpawnOptions::default(),
+    )
+    .await
+    .expect("connect streamable http");
+
+    let request = client.request("ping", serde_json::json!({}));
+    let err = match tokio::time::timeout(Duration::from_millis(300), request).await {
+        Ok(Ok(value)) => panic!("request should fail, got {value:?}"),
+        Ok(Err(err)) => err,
+        Err(_) => panic!("request hung on http error response without request_timeout"),
+    };
+    match err {
+        mcp_jsonrpc::Error::Rpc { code, message, .. } => {
+            assert_eq!(code, -32000);
+            assert_eq!(message, "http error: 500 Internal Server Error");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    drop(client);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn streamable_http_close_aborts_transport_tasks_and_closes_sse_connection() {
     let disconnected = Arc::new(AtomicBool::new(false));
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();

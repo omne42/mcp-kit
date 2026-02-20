@@ -156,6 +156,7 @@
 - githooks: `pre-commit` 新增 staged Rust hygiene 检查（库代码新增行中默认拒绝 `unwrap/expect` 与 `let _ =`），并将 Rust gate 升级为 `clippy -D warnings` + `cargo test --workspace --all-features`。
 
 ### Fixed
+- `mcp-jsonrpc`：`streamable_http` 在 `request_timeout=None` 时，遇到非 2xx HTTP 响应不再等待错误响应体结束（也不读取 body preview），避免 keep-alive 且无 `Content-Length` 的错误响应导致请求卡死；并新增回归测试 `streamable_http_error_without_request_timeout_does_not_hang`。
 - `mcp-kit`：`Manager::connect` 在 Untrusted + `streamable_http` 场景下，遇到 `bearer_token_env_var` / `env_http_headers` 现在会在 DNS 校验前 fail-fast 拒绝，避免无意义的 DNS/network 开销并确保错误原因稳定可预期。
 - Tests：`untrusted` DNS fail-open/fail-closed 回归测试改为使用极短 `dns_timeout` 触发超时分支，移除对外部 DNS/NXDOMAIN 行为的环境依赖，降低 flaky 风险。
 - `mcp-kit`：`Session::notify` 超时后不再无上限等待 close 路径；现在会以有界 best-effort close 收尾，并保留结构化 `WaitTimeout` 错误，避免调用方在“已超时”后再次卡住。

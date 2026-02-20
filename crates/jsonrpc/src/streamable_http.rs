@@ -659,22 +659,22 @@ impl HttpPostBridge {
                 continue;
             }
 
-            let body_text = if error_body_preview_bytes == 0 {
-                let drain = drain_response_body(resp);
-                match request_timeout {
-                    Some(timeout) => {
-                        let _ = tokio::time::timeout(timeout, drain).await; // pre-commit: allow-let-underscore
-                    }
-                    None => drain.await,
+            let body_text = match request_timeout {
+                Some(timeout) if error_body_preview_bytes == 0 => {
+                    let drain = drain_response_body(resp);
+                    let _ = tokio::time::timeout(timeout, drain).await; // pre-commit: allow-let-underscore
+                    None
                 }
-                None
-            } else {
-                let read = read_response_body_preview_text(resp, error_body_preview_bytes);
-                match request_timeout {
-                    Some(timeout) => tokio::time::timeout(timeout, read)
+                Some(timeout) => {
+                    let read = read_response_body_preview_text(resp, error_body_preview_bytes);
+                    tokio::time::timeout(timeout, read)
                         .await
-                        .unwrap_or_default(),
-                    None => read.await,
+                        .unwrap_or_default()
+                }
+                None => {
+                    // Without a request timeout, waiting for an error body to finish can hang
+                    // indefinitely (e.g. keep-alive response without Content-Length).
+                    None
                 }
             };
             if !emit_post_bridge_error(
