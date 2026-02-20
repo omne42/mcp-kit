@@ -1675,37 +1675,21 @@ fn handle_response(
         return Ok(());
     }
 
-    let has_error = map.contains_key("error");
-    let has_result = map.contains_key("result");
-    match (has_error, has_result) {
-        (true, false) => {
-            let Some(error) = map.remove("error") else {
+    let error = map.remove("error");
+    let result = map.remove("result");
+    match (error, result) {
+        (Some(Value::Object(mut error)), None) => {
+            let Some(code) = error.remove("code").and_then(|v| v.as_i64()) else {
                 let _ = tx.send(Err(Error::protocol(
                     ProtocolErrorKind::InvalidMessage,
                     "invalid error response",
                 )));
                 return Ok(());
             };
-            let Value::Object(mut error) = error else {
-                let _ = tx.send(Err(Error::protocol(
-                    ProtocolErrorKind::InvalidMessage,
-                    "invalid error response",
-                )));
-                return Ok(());
-            };
-
-            let Some(code) = error.get("code").and_then(Value::as_i64) else {
-                let _ = tx.send(Err(Error::protocol(
-                    ProtocolErrorKind::InvalidMessage,
-                    "invalid error response",
-                )));
-                return Ok(());
-            };
-            let Some(message) = error
-                .get("message")
-                .and_then(|v| v.as_str())
-                .map(ToOwned::to_owned)
-            else {
+            let Some(message) = error.remove("message").and_then(|v| match v {
+                Value::String(message) => Some(message),
+                _ => None,
+            }) else {
                 let _ = tx.send(Err(Error::protocol(
                     ProtocolErrorKind::InvalidMessage,
                     "invalid error response",
@@ -1720,14 +1704,7 @@ fn handle_response(
             }));
             Ok(())
         }
-        (false, true) => {
-            let Some(result) = map.remove("result") else {
-                let _ = tx.send(Err(Error::protocol(
-                    ProtocolErrorKind::InvalidMessage,
-                    "invalid result response",
-                )));
-                return Ok(());
-            };
+        (None, Some(result)) => {
             let _ = tx.send(Ok(result));
             Ok(())
         }
@@ -2064,5 +2041,85 @@ mod cancelled_request_ids_tests {
             &Id::String("7".to_string())
         ));
         assert!(!take_cancelled_request_id(&cancelled_request_ids, &id));
+    }
+}
+
+#[cfg(test)]
+mod response_routing_tests {
+    use super::*;
+
+    #[test]
+    fn handle_response_routes_rpc_error_with_data() {
+        let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
+        let cancelled_request_ids = Arc::new(Mutex::new(CancelledRequestIdsState::default()));
+
+        let (tx, rx) = oneshot::channel();
+        lock_pending(&pending).insert(Id::Integer(1), tx);
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": -32000,
+                "message": "boom",
+                "data": { "k": "v" }
+            }
+        });
+
+        handle_response(&pending, &cancelled_request_ids, response).expect("handle response");
+
+        let err = rx
+            .blocking_recv()
+            .expect("pending response channel")
+            .expect_err("rpc error expected");
+        match err {
+            Error::Rpc {
+                code,
+                message,
+                data,
+            } => {
+                assert_eq!(code, -32000);
+                assert_eq!(message, "boom");
+                assert_eq!(data, Some(serde_json::json!({ "k": "v" })));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_response_rejects_result_and_error_together() {
+        let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
+        let cancelled_request_ids = Arc::new(Mutex::new(CancelledRequestIdsState::default()));
+
+        let (tx, rx) = oneshot::channel();
+        lock_pending(&pending).insert(Id::Integer(1), tx);
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "ok": true },
+            "error": {
+                "code": -32000,
+                "message": "boom"
+            }
+        });
+
+        handle_response(&pending, &cancelled_request_ids, response).expect("handle response");
+
+        let err = rx
+            .blocking_recv()
+            .expect("pending response channel")
+            .expect_err("protocol error expected");
+        match err {
+            Error::Protocol(protocol_err) => {
+                assert_eq!(protocol_err.kind, ProtocolErrorKind::InvalidMessage);
+                assert!(
+                    protocol_err
+                        .message
+                        .contains("must include exactly one of result/error")
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }
