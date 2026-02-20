@@ -314,7 +314,7 @@ impl DiagnosticsState {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         if guard.len() >= self.invalid_json_sample_lines {
-            return;
+            guard.pop_front();
         }
 
         let sample_len = line.len().min(self.invalid_json_sample_max_bytes);
@@ -1270,9 +1270,8 @@ async fn handle_incoming_value(
                         .await;
                     continue;
                 }
-                for item in items.into_iter().rev() {
-                    stack.push(item);
-                }
+                stack.reserve(items.len());
+                stack.extend(items.into_iter().rev());
                 continue;
             }
             Value::Object(mut map) => {
@@ -1843,6 +1842,42 @@ mod stats_tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_json_samples_keep_latest_lines_when_buffer_is_full() {
+        let (client_stream, server_stream) = tokio::io::duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (_server_read, mut server_write) = tokio::io::split(server_stream);
+
+        let mut options = SpawnOptions::default();
+        options.diagnostics.invalid_json_sample_lines = 2;
+        let client = Client::connect_io_with_options(client_read, client_write, options)
+            .await
+            .unwrap();
+        let handle = client.handle();
+
+        server_write
+            .write_all(b"invalid-1\ninvalid-2\ninvalid-3\n")
+            .await
+            .unwrap();
+        server_write.flush().await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if client.stats().invalid_json_lines >= 3 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            handle.invalid_json_samples(),
+            vec!["invalid-2".to_string(), "invalid-3".to_string()]
+        );
     }
 
     #[tokio::test]

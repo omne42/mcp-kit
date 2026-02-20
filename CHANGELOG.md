@@ -10,6 +10,8 @@
 > 计划下一个版本：`0.3.0`（包含若干 breaking changes；见下文标注）。
 
 ### Changed
+- `mcp-jsonrpc`：优化批处理入站分发路径，`handle_incoming_value` 在展开 batch 数组时先做容量预留，减少大 batch 场景下的临时 `Vec` 扩容开销（行为不变）。
+- `mcp-kit`：优化 `ServerHandlerTimeoutCounts::{snapshot,take_and_reset}` 的快照构建，改为按当前计数项数量预分配 `HashMap`，减少高频读取统计时的重复扩容。
 - `mcp-jsonrpc`：优化入站 JSON-RPC 分发热路径：`handle_incoming_value` 改为“按需分配”批处理栈，常见的单消息（非 batch）路径不再为临时栈触发堆分配（行为不变）。
 - `mcp-jsonrpc`：优化入站 JSON-RPC 请求分发中的 `id` 处理：改为从消息对象中直接移动并解析 `id`，避免 `map.get + clone` 的额外拷贝；同时收口错误响应 `id` 归一化逻辑（仅允许 string/number 回显，其余返回 `null`）。行为不变。
 - `mcp-jsonrpc`：优化两条高频读取路径的初始缓冲分配策略：`read_line_limited` 现在为行缓冲预留 `4KiB` 初始容量，`streamable_http` 在未知 `Content-Length` 的响应体读取中也会使用小窗口预分配；减少高频小消息/分块响应场景下的重复扩容与分配抖动（行为不变）。
@@ -189,6 +191,7 @@
 - githooks: `pre-commit` 新增 staged Rust hygiene 检查（库代码新增行中默认拒绝 `unwrap/expect` 与 `let _ =`），并将 Rust gate 升级为 `clippy -D warnings` + `cargo test --workspace --all-features`。
 
 ### Fixed
+- `mcp-jsonrpc`：修复诊断采样在达到上限后不再更新的问题；`invalid_json_samples` 现在保持固定容量并保留“最近 N 条”无效 JSON 样本，避免长生命周期连接里诊断信息陈旧，同时维持有界内存占用（并补充回归测试）。
 - `mcp-jsonrpc`：修复 `cancelled_request_ids` 重复记录同一 `id` 时不会刷新“最近代际”的问题；现在重复插入会刷新淘汰顺序，避免极端 `id` 复用 + 延迟响应场景下取消标记被过早驱逐，并补充回归测试。
 - `mcp-jsonrpc`：修复 `streamable_http` 在 `mcp-session-id` 从旧值更新为新值且响应并非 `202` 时未触发 SSE 重试的问题；现在只要会话 ID 发生变化就会唤醒重连流程，避免 SSE 长期停留在旧会话（并新增回归测试覆盖该场景）。
 - `mcpctl`：修复 `--config` 越出 `--root` 且目标文件尚不存在时可能绕过边界预检的问题；现在会回退检查最近已存在父路径并保持 fail-closed（可通过 `--allow-config-outside-root` 显式覆盖）。

@@ -113,12 +113,15 @@ impl ServerHandlerTimeoutCounts {
     }
 
     fn snapshot(&self) -> HashMap<ServerName, u64> {
-        self.counters
+        let counters = self
+            .counters
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .map(|(name, counter)| (name.clone(), counter.load(Ordering::Relaxed)))
-            .collect()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut snapshot = HashMap::with_capacity(counters.len());
+        for (name, counter) in counters.iter() {
+            snapshot.insert(name.clone(), counter.load(Ordering::Relaxed));
+        }
+        snapshot
     }
 
     fn take_and_reset(&self) -> HashMap<ServerName, u64> {
@@ -126,10 +129,10 @@ impl ServerHandlerTimeoutCounts {
             .counters
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let snapshot = counters
-            .iter()
-            .map(|(name, counter)| (name.clone(), counter.swap(0, Ordering::Relaxed)))
-            .collect();
+        let mut snapshot = HashMap::with_capacity(counters.len());
+        for (name, counter) in counters.iter() {
+            snapshot.insert(name.clone(), counter.swap(0, Ordering::Relaxed));
+        }
         // Compact stale zeroed entries that are no longer shared with active handler tasks.
         counters.retain(|_, counter| {
             counter.load(Ordering::Relaxed) > 0 || Arc::strong_count(counter) > 1
