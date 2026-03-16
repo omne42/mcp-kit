@@ -14,6 +14,25 @@ const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
+tokio::task_local! {
+    static CURRENT_MANAGER_HANDLER_INSTANCE_ID: u64;
+}
+
+pub(crate) fn is_in_manager_handler_scope(manager_instance_id: u64) -> bool {
+    CURRENT_MANAGER_HANDLER_INSTANCE_ID
+        .try_with(|current| *current == manager_instance_id)
+        .unwrap_or(false)
+}
+
+async fn scope_manager_handler_call<T>(
+    manager_instance_id: u64,
+    fut: impl Future<Output = T>,
+) -> T {
+    CURRENT_MANAGER_HANDLER_INSTANCE_ID
+        .scope(manager_instance_id, fut)
+        .await
+}
+
 enum HandlerOutcome<T> {
     Ok(T),
     Panicked,
@@ -126,29 +145,63 @@ pub struct ServerNotificationContext {
 pub type ServerNotificationHandler =
     Arc<dyn Fn(ServerNotificationContext) -> BoxFuture<()> + Send + Sync>;
 
+#[derive(Clone)]
+pub(crate) struct HandlerAttachSnapshot {
+    pub(crate) handler_concurrency: usize,
+    pub(crate) handler_timeout: Option<std::time::Duration>,
+    pub(crate) timeout_counter: Arc<AtomicU64>,
+    pub(crate) server_request_handler: ServerRequestHandler,
+    pub(crate) server_notification_handler: ServerNotificationHandler,
+    pub(crate) roots: Option<Arc<Vec<Root>>>,
+    pub(crate) manager_instance_id: u64,
+}
+
 fn noop_timeout_counter() -> Arc<AtomicU64> {
     static NOOP: OnceLock<Arc<AtomicU64>> = OnceLock::new();
     NOOP.get_or_init(|| Arc::new(AtomicU64::new(0))).clone()
 }
 
 impl Manager {
-    pub(super) fn attach_client_handlers(
+    pub(crate) fn prepare_handler_attach(
         &self,
-        server_name: crate::ServerName,
-        client: &mut mcp_jsonrpc::Client,
-    ) -> Vec<tokio::task::JoinHandle<()>> {
-        let mut tasks = Vec::new();
-        let handler_concurrency = self.server_handler_concurrency.max(1);
+        server_name: &crate::ServerName,
+    ) -> HandlerAttachSnapshot {
         let handler_timeout = self.server_handler_timeout;
         let timeout_counter = if handler_timeout.is_some() {
-            self.server_handler_timeout_counts.counter_for(&server_name)
+            self.server_handler_timeout_counts.counter_for(server_name)
         } else {
             noop_timeout_counter()
         };
 
+        HandlerAttachSnapshot {
+            handler_concurrency: self.server_handler_concurrency.max(1),
+            handler_timeout,
+            timeout_counter,
+            server_request_handler: self.server_request_handler.clone(),
+            server_notification_handler: self.server_notification_handler.clone(),
+            roots: self.roots.clone(),
+            manager_instance_id: self.instance_id(),
+        }
+    }
+
+    pub(crate) fn attach_client_handlers_from_snapshot(
+        snapshot: HandlerAttachSnapshot,
+        server_name: crate::ServerName,
+        client: &mut mcp_jsonrpc::Client,
+    ) -> Vec<tokio::task::JoinHandle<()>> {
+        let mut tasks = Vec::new();
+        let HandlerAttachSnapshot {
+            handler_concurrency,
+            handler_timeout,
+            timeout_counter,
+            server_request_handler,
+            server_notification_handler,
+            roots,
+            manager_instance_id,
+        } = snapshot;
+
         if let Some(requests_rx) = client.take_requests() {
-            let handler = self.server_request_handler.clone();
-            let roots = self.roots.clone();
+            let handler = server_request_handler;
             let server_name = server_name.clone();
             let timeout_counter = timeout_counter.clone();
             tasks.push(tokio::spawn(async move {
@@ -171,7 +224,7 @@ impl Manager {
                         let mut outcome = match run_handler_with_timeout(
                             handler_timeout,
                             &timeout_counter,
-                            || handler(ctx),
+                            || scope_manager_handler_call(manager_instance_id, handler(ctx)),
                         )
                         .await
                         {
@@ -226,7 +279,7 @@ impl Manager {
         }
 
         if let Some(notifications_rx) = client.take_notifications() {
-            let handler = self.server_notification_handler.clone();
+            let handler = server_notification_handler;
             tasks.push(tokio::spawn(async move {
                 drive_handler_tasks(notifications_rx, handler_concurrency, move |note| {
                     let handler = handler.clone();
@@ -241,7 +294,7 @@ impl Manager {
 
                         let _ = /* pre-commit: allow-let-underscore */
                             run_handler_with_timeout(handler_timeout, &timeout_counter, || {
-                                handler(ctx)
+                                scope_manager_handler_call(manager_instance_id, handler(ctx))
                             })
                             .await;
                     }

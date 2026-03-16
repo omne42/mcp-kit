@@ -206,7 +206,7 @@ fn is_untrusted_sensitive_http_header(header: &str) -> bool {
         || header.eq_ignore_ascii_case("cookie")
 }
 
-pub(super) fn should_disconnect_after_jsonrpc_error(err: &anyhow::Error) -> bool {
+pub(crate) fn should_disconnect_after_jsonrpc_error(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause
             .downcast_ref::<mcp_jsonrpc::Error>()

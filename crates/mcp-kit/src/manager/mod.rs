@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -10,14 +9,16 @@ use std::time::Duration;
 use anyhow::Context;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 
 use crate::{
     Config, MCP_PROTOCOL_VERSION, McpNotification, McpRequest, Root, ServerConfig, ServerName,
-    Session, Transport, TrustMode, UntrustedStreamableHttpPolicy,
+    Session, TrustMode, UntrustedStreamableHttpPolicy,
 };
 
+mod connect;
 mod handlers;
+mod lifecycle;
 mod placeholders;
 mod streamable_http_validation;
 
@@ -26,14 +27,23 @@ pub use handlers::{
     ServerRequestHandler, ServerRequestOutcome,
 };
 
-use placeholders::{apply_stdio_baseline_env, expand_placeholders_trusted};
-use streamable_http_validation::{
-    should_disconnect_after_jsonrpc_error, validate_streamable_http_config,
-    validate_streamable_http_url_untrusted_dns,
-};
+#[cfg(test)]
+use connect::{absolutize_with_base, stdout_log_path_within_root};
+
+#[cfg(test)]
+use placeholders::expand_placeholders_trusted;
 
 #[cfg(test)]
 use streamable_http_validation::validate_streamable_http_url_untrusted;
+
+#[cfg(test)]
+use streamable_http_validation::validate_streamable_http_url_untrusted_dns;
+
+pub(crate) use connect::{ConnectContext, connect_transport};
+pub(crate) use handlers::is_in_manager_handler_scope;
+pub(crate) use streamable_http_validation::should_disconnect_after_jsonrpc_error;
+
+static NEXT_MANAGER_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
 fn parse_server_name_anyhow(server_name: &str) -> anyhow::Result<ServerName> {
     ServerName::parse(server_name)
@@ -44,43 +54,7 @@ fn normalize_server_name_lookup(server_name: &str) -> &str {
     server_name.trim()
 }
 
-fn absolutize_with_base(path: &Path, base: &Path) -> PathBuf {
-    if path.is_absolute() {
-        return path.to_path_buf();
-    }
-    base.join(path)
-}
-
-fn normalize_path_for_prefix_check(path: &Path) -> PathBuf {
-    use std::path::Component;
-
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::RootDir => normalized.push(component.as_os_str()),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            Component::Normal(part) => normalized.push(part),
-        }
-    }
-    normalized
-}
-
-fn stdout_log_path_within_root(stdout_log_path: &Path, root: &Path) -> bool {
-    if !root.is_absolute() {
-        return false;
-    }
-
-    let resolved_stdout_log_path = absolutize_with_base(stdout_log_path, root);
-    let normalized_root = normalize_path_for_prefix_check(root);
-    let normalized_stdout_log_path = normalize_path_for_prefix_check(&resolved_stdout_log_path);
-    normalized_stdout_log_path.starts_with(&normalized_root)
-}
-
-fn contains_wait_timeout(err: &anyhow::Error) -> bool {
+pub(crate) fn contains_wait_timeout(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause
             .downcast_ref::<mcp_jsonrpc::Error>()
@@ -169,6 +143,7 @@ impl ServerHandlerTimeoutCounts {
 }
 
 pub struct Manager {
+    instance_id: u64,
     conns: HashMap<ServerName, Connection>,
     init_results: HashMap<ServerName, Value>,
     client_name: String,
@@ -195,30 +170,25 @@ pub struct Connection {
     handler_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
+pub(crate) struct PreparedConnectedClient {
+    pub server_name: String,
+    pub timeout: Duration,
+    pub client: mcp_jsonrpc::ClientHandle,
+}
+
+pub(crate) struct PreparedTransportConnect {
+    pub server_name: String,
+    pub server_name_key: ServerName,
+    pub server_cfg: ServerConfig,
+    pub cwd: PathBuf,
+    pub ctx: ConnectContext,
+}
+
 fn handler_task_join_error(err: tokio::task::JoinError) -> anyhow::Error {
     if err.is_panic() {
         anyhow::anyhow!("server handler task panicked")
     } else {
         anyhow::anyhow!("server handler task failed: {err}")
-    }
-}
-
-fn reap_stale_child_best_effort(mut child: Child) {
-    const REAP_TIMEOUT: Duration = Duration::from_millis(200);
-
-    if child.try_wait().ok().flatten().is_some() {
-        return;
-    }
-
-    let _ = child.start_kill(); // pre-commit: allow-let-underscore
-    if child.try_wait().ok().flatten().is_some() {
-        return;
-    }
-
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        drop(handle.spawn(async move {
-            let _ = tokio::time::timeout(REAP_TIMEOUT, child.wait()).await; // pre-commit: allow-let-underscore
-        }));
     }
 }
 
@@ -502,6 +472,7 @@ impl Manager {
             Arc::new(|_| Box::pin(async {}));
 
         Self {
+            instance_id: NEXT_MANAGER_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
             conns: HashMap::new(),
             init_results: HashMap::new(),
             client_name: client_name.into(),
@@ -558,6 +529,10 @@ impl Manager {
     pub fn with_protocol_version_check(mut self, check: ProtocolVersionCheck) -> Self {
         self.protocol_version_check = check;
         self
+    }
+
+    pub(crate) fn instance_id(&self) -> u64 {
+        self.instance_id
     }
 
     pub fn protocol_version_mismatches(&self) -> &[ProtocolVersionMismatch] {
@@ -665,6 +640,59 @@ impl Manager {
         self.initialize_result(server_name.as_str())
     }
 
+    pub(crate) fn try_prepare_connected_client(
+        &mut self,
+        server_name: &str,
+    ) -> anyhow::Result<Option<PreparedConnectedClient>> {
+        let server_name = normalize_server_name_lookup(server_name);
+        if !self.is_connected_and_alive(server_name) {
+            return Ok(None);
+        }
+
+        let conn = self
+            .conns
+            .get(server_name)
+            .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?;
+        Ok(Some(PreparedConnectedClient {
+            server_name: server_name.to_string(),
+            timeout: self.request_timeout,
+            client: conn.client.handle(),
+        }))
+    }
+
+    pub(crate) fn prepare_transport_connect(
+        &mut self,
+        config: &Config,
+        server_name: &str,
+        cwd: &Path,
+    ) -> anyhow::Result<Option<PreparedTransportConnect>> {
+        let server_cfg = config
+            .server(server_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown mcp server: {server_name}"))?;
+        let server_name_key = parse_server_name_anyhow(server_name)?;
+        if self.is_connected_and_alive(server_name_key.as_str()) {
+            return Ok(None);
+        }
+
+        server_cfg
+            .validate()
+            .with_context(|| format!("invalid mcp server config (server={server_name_key})"))?;
+
+        Ok(Some(PreparedTransportConnect {
+            server_name: server_name.to_string(),
+            server_name_key,
+            server_cfg: server_cfg.clone(),
+            cwd: cwd.to_path_buf(),
+            ctx: ConnectContext {
+                trust_mode: self.trust_mode,
+                untrusted_streamable_http_policy: self.untrusted_streamable_http_policy.clone(),
+                allow_stdout_log_outside_root: self.allow_stdout_log_outside_root,
+                protocol_version: self.protocol_version.clone(),
+                request_timeout: self.request_timeout,
+            },
+        }))
+    }
+
     pub async fn connect(
         &mut self,
         server_name: &str,
@@ -696,250 +724,14 @@ impl Manager {
             .validate()
             .with_context(|| format!("invalid mcp server config (server={server_name_key})"))?;
 
-        let (client, child) = match server_cfg.transport() {
-            Transport::Stdio => {
-                if self.trust_mode == TrustMode::Untrusted {
-                    anyhow::bail!(
-                        "refusing to spawn mcp server in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
-                    );
-                }
-
-                let expanded_argv = server_cfg
-                    .argv()
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, arg)| {
-                        let expanded = expand_placeholders_trusted(arg, cwd).with_context(|| {
-                            format!(
-                                "expand argv placeholder (server={server_name} argv[{idx}] redacted)"
-                            )
-                        })?;
-                        Ok::<_, anyhow::Error>(std::ffi::OsString::from(expanded))
-                    })
-                    .collect::<anyhow::Result<Vec<std::ffi::OsString>>>()?;
-
-                let mut cmd = Command::new(&expanded_argv[0]);
-                cmd.args(expanded_argv.iter().skip(1));
-                cmd.current_dir(cwd);
-                cmd.stdin(Stdio::piped());
-                cmd.stdout(Stdio::piped());
-                cmd.stderr(Stdio::inherit());
-                if !server_cfg.inherit_env() {
-                    cmd.env_clear();
-                    apply_stdio_baseline_env(&mut cmd);
-                }
-                for (key, value) in server_cfg.env().iter() {
-                    let value = expand_placeholders_trusted(value, cwd)
-                        .with_context(|| format!("expand env placeholder: {key}"))?;
-                    cmd.env(key, value);
-                }
-                cmd.kill_on_drop(true);
-
-                let stdout_log = server_cfg.stdout_log().map(|log| {
-                    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                    let cwd_abs = absolutize_with_base(cwd, &current_dir);
-                    let resolved_log_path = absolutize_with_base(&log.path, &cwd_abs);
-                    if !self.allow_stdout_log_outside_root
-                        && !stdout_log_path_within_root(&resolved_log_path, &cwd_abs)
-                    {
-                        anyhow::bail!(
-                            "mcp server {server_name}: stdout_log.path must be within root (set Manager::with_allow_stdout_log_outside_root(true) to override): {}",
-                            log.path.display()
-                        );
-                    }
-                    Ok::<_, anyhow::Error>(mcp_jsonrpc::StdoutLog {
-                        path: resolved_log_path,
-                        max_bytes_per_part: log.max_bytes_per_part,
-                        max_parts: log.max_parts,
-                    })
-                });
-                let stdout_log = stdout_log.transpose()?;
-                let mut client = mcp_jsonrpc::Client::spawn_command_with_options(
-                    cmd,
-                    mcp_jsonrpc::SpawnOptions {
-                        stdout_log,
-                        ..Default::default()
-                    },
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "spawn mcp server (server={server_name}) argv redacted (argc={})",
-                        server_cfg.argv().len()
-                    )
-                })?;
-                let child = client.take_child();
-                (client, child)
-            }
-            Transport::Unix => {
-                if self.trust_mode == TrustMode::Untrusted {
-                    anyhow::bail!(
-                        "refusing to connect unix mcp server in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
-                    );
-                }
-                let unix_path = server_cfg.unix_path_required();
-                let client = mcp_jsonrpc::Client::connect_unix(unix_path)
-                    .await
-                    .with_context(|| {
-                        format!("connect unix mcp server path={}", unix_path.display())
-                    })?;
-                (client, None)
-            }
-            Transport::StreamableHttp => {
-                let (sse_url_raw, post_url_raw) = match (
-                    server_cfg.url(),
-                    server_cfg.sse_url(),
-                    server_cfg.http_url(),
-                ) {
-                    (Some(url), None, None) => (url, url),
-                    (None, Some(sse_url), Some(http_url)) => (sse_url, http_url),
-                    _ => {
-                        anyhow::bail!(
-                            "mcp server {server_name}: set url or (sse_url + http_url) for transport=streamable_http"
-                        )
-                    }
-                };
-
-                let (sse_url_field, post_url_field) = if server_cfg.url().is_some() {
-                    ("url", "url")
-                } else {
-                    ("sse_url", "http_url")
-                };
-
-                let sse_url = if self.trust_mode == TrustMode::Trusted {
-                    expand_placeholders_trusted(sse_url_raw, cwd)
-                        .with_context(|| {
-                            format!(
-                                "expand url placeholder (server={server_name} field={sse_url_field}) (url redacted)"
-                            )
-                        })?
-                } else {
-                    sse_url_raw.to_string()
-                };
-                let post_url = if self.trust_mode == TrustMode::Trusted {
-                    expand_placeholders_trusted(post_url_raw, cwd)
-                        .with_context(|| {
-                            format!(
-                                "expand url placeholder (server={server_name} field={post_url_field}) (url redacted)"
-                            )
-                        })?
-                } else {
-                    post_url_raw.to_string()
-                };
-
-                validate_streamable_http_config(
-                    self.trust_mode,
-                    &self.untrusted_streamable_http_policy,
-                    server_name,
-                    sse_url_field,
-                    &sse_url,
-                    server_cfg,
-                )?;
-                if post_url != sse_url {
-                    validate_streamable_http_config(
-                        self.trust_mode,
-                        &self.untrusted_streamable_http_policy,
-                        server_name,
-                        post_url_field,
-                        &post_url,
-                        server_cfg,
-                    )?;
-                }
-                if self.trust_mode != TrustMode::Trusted {
-                    if server_cfg.bearer_token_env_var().is_some() {
-                        anyhow::bail!(
-                            "refusing to read bearer token env var in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
-                        );
-                    }
-                    if !server_cfg.env_http_headers().is_empty() {
-                        anyhow::bail!(
-                            "refusing to read http header env vars in untrusted mode: {server_name} (set Manager::with_trust_mode(TrustMode::Trusted) to override)"
-                        );
-                    }
-
-                    validate_streamable_http_url_untrusted_dns(
-                        &self.untrusted_streamable_http_policy,
-                        server_name,
-                        sse_url_field,
-                        &sse_url,
-                    )
-                    .await?;
-                    if post_url != sse_url {
-                        validate_streamable_http_url_untrusted_dns(
-                            &self.untrusted_streamable_http_policy,
-                            server_name,
-                            post_url_field,
-                            &post_url,
-                        )
-                        .await?;
-                    }
-                }
-
-                let capacity = server_cfg
-                    .http_headers()
-                    .len()
-                    .saturating_add(1)
-                    .saturating_add(usize::from(server_cfg.bearer_token_env_var().is_some()))
-                    .saturating_add(server_cfg.env_http_headers().len());
-                let mut headers = std::collections::HashMap::with_capacity(capacity);
-
-                for (k, v) in server_cfg.http_headers() {
-                    let v = if self.trust_mode == TrustMode::Trusted {
-                        expand_placeholders_trusted(v, cwd).with_context(|| {
-                            format!("expand http_header placeholder: {server_name} header={k}")
-                        })?
-                    } else {
-                        v.to_string()
-                    };
-                    headers.insert(k.to_string(), v);
-                }
-                headers.insert(
-                    "MCP-Protocol-Version".to_string(),
-                    self.protocol_version.clone(),
-                );
-
-                if let Some(env_var) = server_cfg.bearer_token_env_var() {
-                    debug_assert_eq!(self.trust_mode, TrustMode::Trusted);
-                    let token = std::env::var(env_var)
-                        .with_context(|| format!("read bearer token env var: {env_var}"))?;
-                    headers.insert("Authorization".to_string(), format!("Bearer {token}"));
-                }
-
-                if !server_cfg.env_http_headers().is_empty() {
-                    debug_assert_eq!(self.trust_mode, TrustMode::Trusted);
-
-                    for (header, env_var) in server_cfg.env_http_headers().iter() {
-                        let value = std::env::var(env_var)
-                            .with_context(|| format!("read http header env var: {env_var}"))?;
-                        headers.insert(header.to_string(), value);
-                    }
-                }
-
-                let client = mcp_jsonrpc::Client::connect_streamable_http_split_with_options(
-                    &sse_url,
-                    &post_url,
-                    mcp_jsonrpc::StreamableHttpOptions {
-                        headers,
-                        request_timeout: Some(self.request_timeout),
-                        ..Default::default()
-                    },
-                    mcp_jsonrpc::SpawnOptions::default(),
-                )
-                .await
-                .with_context(|| {
-                    if sse_url == post_url {
-                        format!(
-                            "connect streamable http mcp server (server={server_name} field={sse_url_field}) (url redacted)"
-                        )
-                    } else {
-                        format!(
-                            "connect streamable http mcp server (server={server_name} fields={sse_url_field},{post_url_field}) (urls redacted)"
-                        )
-                    }
-                })?;
-                (client, None)
-            }
+        let ctx = ConnectContext {
+            trust_mode: self.trust_mode,
+            untrusted_streamable_http_policy: self.untrusted_streamable_http_policy.clone(),
+            allow_stdout_log_outside_root: self.allow_stdout_log_outside_root,
+            protocol_version: self.protocol_version.clone(),
+            request_timeout: self.request_timeout,
         };
+        let (client, child) = connect_transport(&ctx, server_name, server_cfg, cwd).await?;
 
         self.install_connection_parsed(server_name_key, client, child)
             .await?;
@@ -1052,110 +844,6 @@ impl Manager {
             .await
     }
 
-    fn is_connected_and_alive(&mut self, server_name: &str) -> bool {
-        let Some(exited) = self.connection_exited(server_name) else {
-            return false;
-        };
-        if exited {
-            if let Some(mut conn) = self.conns.remove(server_name)
-                && let Some(child) = conn.child.take()
-            {
-                reap_stale_child_best_effort(child);
-            }
-            self.init_results.remove(server_name);
-            self.server_handler_timeout_counts.remove(server_name);
-            self.remove_protocol_version_mismatch(server_name);
-            return false;
-        }
-        true
-    }
-
-    fn connection_exited(&mut self, server_name: &str) -> Option<bool> {
-        let conn = self.conns.get_mut(server_name)?;
-        let exited = match &mut conn.child {
-            Some(child) => {
-                if child.try_wait().ok().flatten().is_some() {
-                    true
-                } else {
-                    conn.client.is_closed()
-                }
-            }
-            None => conn.client.is_closed(),
-        };
-
-        if exited {
-            return Some(true);
-        }
-
-        if conn
-            .handler_tasks
-            .iter()
-            .any(tokio::task::JoinHandle::is_finished)
-        {
-            return Some(true);
-        }
-
-        Some(false)
-    }
-
-    async fn install_connection_parsed(
-        &mut self,
-        server_name: ServerName,
-        mut client: mcp_jsonrpc::Client,
-        child: Option<Child>,
-    ) -> anyhow::Result<()> {
-        struct HandlerTasksGuard {
-            tasks: Vec<tokio::task::JoinHandle<()>>,
-            armed: bool,
-        }
-
-        impl HandlerTasksGuard {
-            fn new(tasks: Vec<tokio::task::JoinHandle<()>>) -> Self {
-                Self { tasks, armed: true }
-            }
-
-            fn disarm(mut self) -> Vec<tokio::task::JoinHandle<()>> {
-                self.armed = false;
-                std::mem::take(&mut self.tasks)
-            }
-        }
-
-        impl Drop for HandlerTasksGuard {
-            fn drop(&mut self) {
-                if !self.armed {
-                    return;
-                }
-                for task in self.tasks.drain(..) {
-                    task.abort();
-                }
-            }
-        }
-
-        let handler_tasks = self.attach_client_handlers(server_name.clone(), &mut client);
-        let handler_tasks_guard = HandlerTasksGuard::new(handler_tasks);
-        let init_result = match self.initialize(&server_name, &client).await {
-            Ok(init_result) => init_result,
-            Err(err) => {
-                self.server_handler_timeout_counts
-                    .remove(server_name.as_str());
-                self.remove_protocol_version_mismatch(server_name.as_str());
-                return Err(err);
-            }
-        };
-        let handler_tasks = handler_tasks_guard.disarm();
-
-        self.init_results.insert(server_name.clone(), init_result);
-        self.conns.insert(
-            server_name,
-            Connection {
-                child,
-                client,
-                handler_tasks,
-            },
-        );
-        Ok(())
-    }
-
     pub async fn get_or_connect(
         &mut self,
         config: &Config,
@@ -1222,19 +910,14 @@ impl Manager {
     /// `Connection::wait_with_timeout`) when you own the lifecycle.
     pub fn disconnect(&mut self, server_name: &str) -> bool {
         let server_name = normalize_server_name_lookup(server_name);
-        self.init_results.remove(server_name);
-        let removed = match self.conns.remove(server_name) {
-            Some(mut conn) => {
-                if let Some(child) = conn.child.take() {
-                    reap_stale_child_best_effort(child);
-                }
-                true
-            }
-            None => false,
-        };
-        self.server_handler_timeout_counts.remove(server_name);
-        self.remove_protocol_version_mismatch(server_name);
-        removed
+        let removed = self.remove_cached_connection(server_name);
+        self.clear_connection_side_state(server_name, true);
+        if let Some(mut conn) = removed {
+            Self::reap_connection_child_best_effort(&mut conn);
+            true
+        } else {
+            false
+        }
     }
 
     pub fn disconnect_named(&mut self, server_name: &ServerName) -> bool {
@@ -1247,18 +930,9 @@ impl Manager {
         timeout: Duration,
         on_timeout: mcp_jsonrpc::WaitOnTimeout,
     ) -> anyhow::Result<Option<std::process::ExitStatus>> {
-        let server_name = normalize_server_name_lookup(server_name);
-        let Some(conn) = self.take_connection(server_name) else {
-            self.server_handler_timeout_counts.remove(server_name);
-            self.remove_protocol_version_mismatch(server_name);
-            return Ok(None);
-        };
-        self.server_handler_timeout_counts.remove(server_name);
-        self.remove_protocol_version_mismatch(server_name);
-
-        conn.wait_with_timeout(timeout, on_timeout)
+        self.prepare_disconnect_for_wait(server_name)
+            .wait_with_timeout(timeout, on_timeout)
             .await
-            .with_context(|| format!("disconnect mcp server: {server_name}"))
     }
 
     pub async fn disconnect_and_wait_named(
@@ -1271,27 +945,6 @@ impl Manager {
             .await
     }
 
-    async fn disconnect_after_jsonrpc_error(&mut self, server_name: &str) {
-        const DISCONNECT_TIMEOUT: Duration = Duration::from_millis(200);
-        const DISCONNECT_KILL_TIMEOUT: Duration = Duration::from_millis(200);
-
-        let server_name = normalize_server_name_lookup(server_name);
-        let Some(conn) = self.take_connection(server_name) else {
-            self.server_handler_timeout_counts.remove(server_name);
-            self.remove_protocol_version_mismatch(server_name);
-            return;
-        };
-
-        let _ = /* pre-commit: allow-let-underscore */ conn
-            .wait_with_timeout(
-                DISCONNECT_TIMEOUT,
-                mcp_jsonrpc::WaitOnTimeout::Kill {
-                    kill_timeout: DISCONNECT_KILL_TIMEOUT,
-                },
-            )
-            .await; // pre-commit: allow-let-underscore
-    }
-
     /// Take ownership of a cached connection (if any).
     ///
     /// After calling this, the caller owns the connection lifecycle. In particular, if the
@@ -1300,10 +953,9 @@ impl Manager {
     pub fn take_connection(&mut self, server_name: &str) -> Option<Connection> {
         let server_name = normalize_server_name_lookup(server_name);
         self.init_results.remove(server_name);
-        let conn = self.conns.remove(server_name);
+        let conn = self.remove_cached_connection(server_name);
         if conn.is_some() {
-            self.server_handler_timeout_counts.remove(server_name);
-            self.remove_protocol_version_mismatch(server_name);
+            self.clear_connection_side_state(server_name, false);
         }
         conn
     }
@@ -1350,8 +1002,7 @@ impl Manager {
     pub fn take_session_and_clear_state(&mut self, server_name: &str) -> Option<Session> {
         let session = self.take_session(server_name);
         let server_name = normalize_server_name_lookup(server_name);
-        self.server_handler_timeout_counts.remove(server_name);
-        self.remove_protocol_version_mismatch(server_name);
+        self.clear_connection_side_state(server_name, false);
         session
     }
 
@@ -1825,23 +1476,23 @@ impl Manager {
         method: &str,
         params: Option<Value>,
     ) -> anyhow::Result<Value> {
-        let server_name = normalize_server_name_lookup(server_name);
-        if !self.is_connected_and_alive(server_name) {
+        let Some(prepared) = self.try_prepare_connected_client(server_name)? else {
+            let server_name = normalize_server_name_lookup(server_name);
             anyhow::bail!("mcp server not connected: {server_name}");
-        }
-
-        let timeout = self.request_timeout;
-        let result = {
-            let conn = self
-                .conns
-                .get(server_name)
-                .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?;
-            Self::request_raw(timeout, server_name, &conn.client, method, params).await
         };
+        let server_name = prepared.server_name;
+        let result = Self::request_raw_handle(
+            prepared.timeout,
+            &server_name,
+            &prepared.client,
+            method,
+            params,
+        )
+        .await;
 
         if let Err(err) = &result {
             if should_disconnect_after_jsonrpc_error(err) {
-                self.disconnect_after_jsonrpc_error(server_name).await;
+                self.disconnect_after_jsonrpc_error(&server_name).await;
             }
         }
 
@@ -1864,23 +1515,23 @@ impl Manager {
         method: &str,
         params: Option<Value>,
     ) -> anyhow::Result<()> {
-        let server_name = normalize_server_name_lookup(server_name);
-        if !self.is_connected_and_alive(server_name) {
+        let Some(prepared) = self.try_prepare_connected_client(server_name)? else {
+            let server_name = normalize_server_name_lookup(server_name);
             anyhow::bail!("mcp server not connected: {server_name}");
-        }
-
-        let timeout = self.request_timeout;
-        let result = {
-            let conn = self
-                .conns
-                .get(server_name)
-                .ok_or_else(|| anyhow::anyhow!("mcp server not connected: {server_name}"))?;
-            Self::notify_raw(timeout, server_name, &conn.client, method, params).await
         };
+        let server_name = prepared.server_name;
+        let result = Self::notify_raw_handle(
+            prepared.timeout,
+            &server_name,
+            &prepared.client,
+            method,
+            params,
+        )
+        .await;
 
         if let Err(err) = &result {
             if should_disconnect_after_jsonrpc_error(err) || contains_wait_timeout(err) {
-                self.disconnect_after_jsonrpc_error(server_name).await;
+                self.disconnect_after_jsonrpc_error(&server_name).await;
             }
         }
 
@@ -1897,98 +1548,10 @@ impl Manager {
             .await
     }
 
-    async fn initialize(
-        &mut self,
-        server_name: &ServerName,
-        client: &mcp_jsonrpc::Client,
-    ) -> anyhow::Result<Value> {
-        if self.protocol_version.trim().is_empty() {
-            anyhow::bail!("mcp protocol version must not be empty");
-        }
-        if !self.capabilities.is_object() {
-            anyhow::bail!("mcp client capabilities must be a JSON object");
-        }
-
-        let initialize_params = serde_json::json!({
-            "protocolVersion": &self.protocol_version,
-            "clientInfo": {
-                "name": &self.client_name,
-                "version": &self.client_version,
-            },
-            "capabilities": &self.capabilities,
-        });
-
-        let timeout = self.request_timeout;
-        let outcome =
-            tokio::time::timeout(timeout, client.request("initialize", initialize_params)).await;
-        let result = outcome
-            .with_context(|| {
-                format!(
-                    "mcp initialize timed out after {timeout:?} (server={})",
-                    server_name.as_str()
-                )
-            })?
-            .with_context(|| format!("mcp initialize failed (server={})", server_name.as_str()))?;
-
-        if let Some(server_protocol_version) = result.get("protocolVersion").and_then(Value::as_str)
-        {
-            if server_protocol_version != self.protocol_version {
-                match self.protocol_version_check {
-                    ProtocolVersionCheck::Strict => {
-                        anyhow::bail!(
-                            "mcp initialize protocolVersion mismatch (server={}): client={}, server={}",
-                            server_name.as_str(),
-                            self.protocol_version,
-                            server_protocol_version
-                        );
-                    }
-                    ProtocolVersionCheck::Warn => {
-                        let mismatch = ProtocolVersionMismatch {
-                            server_name: server_name.clone(),
-                            client_protocol_version: self.protocol_version.clone(),
-                            server_protocol_version: server_protocol_version.to_string(),
-                        };
-
-                        if let Some(existing) = self
-                            .protocol_version_mismatches
-                            .iter_mut()
-                            .find(|m| m.server_name == *server_name)
-                        {
-                            *existing = mismatch;
-                        } else {
-                            self.protocol_version_mismatches.push(mismatch);
-                        }
-                    }
-                    ProtocolVersionCheck::Ignore => {}
-                }
-            } else {
-                self.remove_protocol_version_mismatch(server_name.as_str());
-            }
-        } else {
-            self.remove_protocol_version_mismatch(server_name.as_str());
-        }
-
-        Self::notify_raw(
-            timeout,
-            server_name.as_str(),
-            client,
-            "notifications/initialized",
-            None,
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "mcp initialized notification failed (server={})",
-                server_name.as_str()
-            )
-        })?;
-        Ok(result)
-    }
-
-    async fn request_raw(
+    pub(crate) async fn request_raw_handle(
         timeout: Duration,
         server_name: &str,
-        client: &mcp_jsonrpc::Client,
+        client: &mcp_jsonrpc::ClientHandle,
         method: &str,
         params: Option<Value>,
     ) -> anyhow::Result<Value> {
@@ -2010,6 +1573,16 @@ impl Manager {
         timeout: Duration,
         server_name: &str,
         client: &mcp_jsonrpc::Client,
+        method: &str,
+        params: Option<Value>,
+    ) -> anyhow::Result<()> {
+        Self::notify_raw_handle(timeout, server_name, &client.handle(), method, params).await
+    }
+
+    pub(crate) async fn notify_raw_handle(
+        timeout: Duration,
+        server_name: &str,
+        client: &mcp_jsonrpc::ClientHandle,
         method: &str,
         params: Option<Value>,
     ) -> anyhow::Result<()> {

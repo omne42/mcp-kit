@@ -2,6 +2,20 @@ use super::*;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
+fn seed_manager_side_state(manager: &mut Manager, server_name: &str) {
+    manager
+        .protocol_version_mismatches
+        .push(ProtocolVersionMismatch {
+            server_name: ServerName::parse(server_name).unwrap(),
+            client_protocol_version: MCP_PROTOCOL_VERSION.to_string(),
+            server_protocol_version: "1900-01-01".to_string(),
+        });
+    manager
+        .server_handler_timeout_counts
+        .counter_for(&ServerName::parse(server_name).unwrap())
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[test]
 fn roots_capability_is_inserted() {
     let mut capabilities = serde_json::json!({});
@@ -588,6 +602,7 @@ async fn request_connected_disconnects_after_protocol_error() {
         .connect_io("srv", client_read, client_write)
         .await
         .unwrap();
+    seed_manager_side_state(&mut manager, "srv");
 
     let err = manager
         .request_connected("srv", "ping", None)
@@ -601,6 +616,9 @@ async fn request_connected_disconnects_after_protocol_error() {
     // Connection is dropped after Protocol/Io errors to avoid keeping a stale/broken client.
     assert!(!manager.is_connected("srv"));
     assert!(manager.initialize_result("srv").is_none());
+    assert!(manager.protocol_version_mismatches().is_empty());
+    assert_eq!(manager.server_handler_timeout_count("srv"), 0);
+    assert!(!manager.server_handler_timeout_counts().contains_key("srv"));
 
     server_task.await.unwrap();
 }
@@ -1330,6 +1348,7 @@ async fn notify_connected_timeout_disconnects_connection() {
         .connect_io("srv", client_read, client_write)
         .await
         .unwrap();
+    seed_manager_side_state(&mut manager, "srv");
 
     let err = manager
         .notify_connected(
@@ -1347,6 +1366,9 @@ async fn notify_connected_timeout_disconnects_connection() {
         !manager.is_connected("srv"),
         "notification timeout should close potentially corrupted connection"
     );
+    assert!(manager.protocol_version_mismatches().is_empty());
+    assert_eq!(manager.server_handler_timeout_count("srv"), 0);
+    assert!(!manager.server_handler_timeout_counts().contains_key("srv"));
 
     server_task.await.unwrap();
 }
@@ -1601,6 +1623,7 @@ async fn initialize_failure_clears_protocol_mismatch_state() {
     let mut manager = Manager::new("test-client", "0.0.0", Duration::from_secs(5))
         .with_trust_mode(TrustMode::Trusted)
         .with_protocol_version_check(ProtocolVersionCheck::Warn);
+    seed_manager_side_state(&mut manager, "srv");
     let err = match manager
         .connect_io_session("srv", client_read, client_write)
         .await
@@ -1617,6 +1640,8 @@ async fn initialize_failure_clears_protocol_mismatch_state() {
         manager.protocol_version_mismatches().is_empty(),
         "failed initialize should not retain mismatch state"
     );
+    assert_eq!(manager.server_handler_timeout_count("srv"), 0);
+    assert!(!manager.server_handler_timeout_counts().contains_key("srv"));
 
     server_task.await.unwrap();
 }
